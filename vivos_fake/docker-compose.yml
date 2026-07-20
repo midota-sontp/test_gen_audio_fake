@@ -13,6 +13,9 @@ services:
     environment:
       # Docker on macOS has no MPS -> cpu. On Linux+NVIDIA set FISH_DEVICE=cuda.
       - FISH_DEVICE=${FISH_DEVICE:-cpu}
+      # use the classic HF downloader (the xet backend can throw "Failed to close
+      # writer: Input/output error" on some hosts/filesystems)
+      - HF_HUB_DISABLE_XET=1
       # optional: Kaggle creds via env instead of a mounted token
       - KAGGLE_USERNAME=${KAGGLE_USERNAME:-}
       - KAGGLE_KEY=${KAGGLE_KEY:-}
@@ -37,6 +40,8 @@ services:
   fetch-weights:
     build: .
     profiles: ["setup"]
+    environment:
+      - HF_HUB_DISABLE_XET=1
     entrypoint: ["python", "-c"]
     command: ["from huggingface_hub import snapshot_download; snapshot_download('fishaudio/s2-pro', local_dir='/work/third_party/fish-speech/checkpoints/s2-pro')"]
     volumes:
