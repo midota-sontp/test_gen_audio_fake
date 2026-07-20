@@ -2,9 +2,9 @@
 #
 #   docker compose run --rm generate
 #
-# The container self-bootstraps (docker/bootstrap.sh): it downloads the S2 weights
-# and VIVOS on first run (both persist on the host via the volumes below), then
-# generates. Re-running resumes. Outputs land on the host in ./dataset.
+# The container self-bootstraps (docker/bootstrap.sh): downloads the S2 weights and
+# VIVOS on first run (both persist on the host via the volumes below), then generates.
+# Re-running resumes. Outputs land on the host in ./dataset.
 
 services:
   generate:
@@ -17,11 +17,11 @@ services:
       - KAGGLE_USERNAME=${KAGGLE_USERNAME:-}
       - KAGGLE_KEY=${KAGGLE_KEY:-}
     volumes:
-      - ./vivos:/data/vivos                                                # VIVOS (auto-downloaded here if empty; persists on host)
-      - ./dataset:/data/output                                             # output written back to host
-      - ./third_party/fish-speech/checkpoints:/app/third_party/fish-speech/checkpoints  # S2 weights (persist)
-      - ./config.yaml:/app/config.yaml:ro                                  # edit config without rebuilding
-      - ${HOME}/.kaggle:/root/.kaggle:ro                                   # Kaggle token for VIVOS download
+      - ./vivos:/data/vivos                                                   # VIVOS (auto-downloaded here if empty; persists on host)
+      - ./dataset:/data/output                                                # output written back to host
+      - ./third_party/fish-speech/checkpoints:/work/third_party/fish-speech/checkpoints  # S2 weights (persist)
+      - ./config.yaml:/work/config.yaml:ro                                    # edit config without rebuilding
+      - ${HOME}/.kaggle:/home/fish/.kaggle:ro                                 # Kaggle token for VIVOS download
       - hf-cache:/app/.hfcache
     command: ["--dataset", "/data/vivos", "--output", "/data/output", "--config", "config.yaml"]
     # --- GPU (Linux + NVIDIA only; also set FISH_DEVICE=cuda) ---
@@ -38,9 +38,9 @@ services:
     build: .
     profiles: ["setup"]
     entrypoint: ["python", "-c"]
-    command: ["from huggingface_hub import snapshot_download; snapshot_download('fishaudio/s2-pro', local_dir='/app/third_party/fish-speech/checkpoints/s2-pro')"]
+    command: ["from huggingface_hub import snapshot_download; snapshot_download('fishaudio/s2-pro', local_dir='/work/third_party/fish-speech/checkpoints/s2-pro')"]
     volumes:
-      - ./third_party/fish-speech/checkpoints:/app/third_party/fish-speech/checkpoints
+      - ./third_party/fish-speech/checkpoints:/work/third_party/fish-speech/checkpoints
       - hf-cache:/app/.hfcache
 
 volumes:

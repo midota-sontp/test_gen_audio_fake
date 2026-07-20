@@ -4,7 +4,8 @@
 # by existence checks, so re-runs skip what's already there (resume-friendly).
 set -euo pipefail
 
-CKPT="${FISH_CKPT:-/app/third_party/fish-speech/checkpoints/s2-pro}"
+# relative to WORKDIR /work (matches config checkpoint_dir + the compose mount)
+CKPT="${FISH_CKPT:-third_party/fish-speech/checkpoints/s2-pro}"
 DATASET="${VIVOS_DEST:-/data/vivos}"
 
 if [ ! -f "$CKPT/codec.pth" ]; then

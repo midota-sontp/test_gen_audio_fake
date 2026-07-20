@@ -63,8 +63,10 @@ python cli.py --dataset vivos --output dataset --config config.yaml
 
 ## Chạy HẾT trong Docker (một lệnh)
 
-Container **tự bootstrap** ([docker/bootstrap.sh](docker/bootstrap.sh)): tự tải weights S2 + tự tải
-VIVOS từ Kaggle (nếu chưa có) rồi sinh dataset. Không cần setup native gì cả.
+Image dựng trên **image CPU chính thức của Fish Audio** (`fishaudio/fish-speech:server-cpu-v2.0.0-beta`,
+đã có sẵn `fish_speech` + torch-cpu trong venv `/app/.venv`), chỉ thêm 3 gói nhẹ — nên build nhanh,
+không dính dependency hell. Container **tự bootstrap** ([docker/bootstrap.sh](docker/bootstrap.sh)):
+tự tải weights S2 + tự tải VIVOS từ Kaggle (nếu chưa có) rồi sinh dataset. Không cần setup native gì cả.
 
 ```bash
 docker compose run --rm generate
@@ -79,9 +81,9 @@ Các volume trong [docker-compose.yml](docker-compose.yml):
 |---|---|---|
 | `./vivos` | `/data/vivos` | VIVOS — **tự tải vào đây** nếu trống (persist host) |
 | `./dataset` | `/data/output` | output ghi ngược ra host |
-| `./third_party/fish-speech/checkpoints` | (same) | weights S2 (tải 1 lần, giữ lại) |
-| `./config.yaml` | `/app/config.yaml` (ro) | sửa config không cần build lại |
-| `~/.kaggle` | `/root/.kaggle` (ro) | token Kaggle để tải VIVOS |
+| `./third_party/fish-speech/checkpoints` | `/work/.../checkpoints` | weights S2 (tải 1 lần, giữ lại) |
+| `./config.yaml` | `/work/config.yaml` (ro) | sửa config không cần build lại |
+| `~/.kaggle` | `/home/fish/.kaggle` (ro) | token Kaggle để tải VIVOS |
 
 Tải VIVOS cần token Kaggle: mount sẵn `~/.kaggle`, hoặc đặt `KAGGLE_USERNAME`/`KAGGLE_KEY`. Nếu bạn
 đã có VIVOS sẵn, cứ đặt vào `./vivos/train/...` — container sẽ bỏ qua bước tải.
