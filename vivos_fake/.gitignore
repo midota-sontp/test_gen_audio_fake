@@ -1,0 +1,30 @@
+# downloaded / generated data (large; never commit)
+# VIVOS corpus (downloaded from Kaggle)
+vivos/
+# generated output: real/ fake/ reference/ metadata/ logs/
+dataset/
+# cloned fish-speech + S2 weights
+third_party/
+*.wav
+*.npy
+metadata.csv
+
+# model weights / caches
+checkpoints/
+.hfcache/
+.cache/
+*.pt
+*.pth
+*.safetensors
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# os / editor
+.DS_Store
+*.log

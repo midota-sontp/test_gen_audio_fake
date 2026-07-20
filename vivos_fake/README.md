@@ -88,11 +88,25 @@ Các volume trong [docker-compose.yml](docker-compose.yml):
 Tải VIVOS cần token Kaggle: mount sẵn `~/.kaggle`, hoặc đặt `KAGGLE_USERNAME`/`KAGGLE_KEY`. Nếu bạn
 đã có VIVOS sẵn, cứ đặt vào `./vivos/train/...` — container sẽ bỏ qua bước tải.
 
-> ⚠️ **Docker trên macOS KHÔNG có MPS/GPU** → chạy CPU (`FISH_DEVICE=cpu`, mặc định), model 4B rất
-> chậm. Nên để `limit` nhỏ khi chạy Docker trên Mac. Muốn Docker **nhanh** → chạy trên **Linux + NVIDIA**:
-> ```bash
-> docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121 -t vivos-fake .
-> FISH_DEVICE=cuda docker compose run --rm generate   # + bỏ comment khối `deploy:` GPU trong compose
+> ⚠️ **Model S2 là 4B — cần nhiều RAM/VRAM.** Đây là điểm dễ hỏng nhất.
+>
+> **Lỗi thường gặp: `t2s step failed (exit -9)`** = SIGKILL = **hết RAM (OOM)**. Load 4B trên CPU fp32
+> cần **~16GB**. Cách xử lý:
+> - **CPU**: tăng RAM cho Docker (Desktop → Settings → Resources → Memory ≥ 16GB). `half: true` (fp16, ~8GB)
+>   có thể giúp nhưng trên CPU đôi khi lỗi `not implemented for 'Half'` → nếu vậy quay lại tăng RAM.
+> - **GPU (Linux + NVIDIA, khuyến nghị)**: sửa dòng `FROM` trong [Dockerfile](Dockerfile) sang
+>   `fishaudio/fish-speech:server-cuda-v2.0.0-beta`, đặt `half: true`, rồi:
+>   ```bash
+>   FISH_DEVICE=cuda docker compose run --rm generate   # + bỏ comment khối deploy: GPU trong compose
+>   ```
+>
+> **Chậm**: wrapper gọi CLI theo từng câu nên model bị **nạp lại mỗi clip** (~40-60s/clip chỉ để load).
+> Trên CPU nên để `limit` nhỏ; sinh số lượng lớn nên dùng GPU.
+>
+> Bật fp16 trong `config.yaml`:
+> ```yaml
+> fishspeech:
+>   half: true
 > ```
 
 ## Cấu hình (`config.yaml`)

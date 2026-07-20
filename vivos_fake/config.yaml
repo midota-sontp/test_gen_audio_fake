@@ -34,4 +34,5 @@ fishspeech:
   top_k: 30
   max_new_tokens: 0 # 0 = model default
   seed: 42
+  half: false # true -> fp16, ~half the RAM (helps CPU OOM on the 4B model; needs ~8GB instead of ~16GB)
   step_timeout: 900 # seconds per CLI step (MPS ~25-70s/sentence)

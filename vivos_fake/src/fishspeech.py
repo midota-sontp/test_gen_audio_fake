@@ -81,6 +81,7 @@ class FishSpeechS2Generator(Generator):
         self.top_k = int(cfg.get("top_k", 30))
         self.max_new_tokens = int(cfg.get("max_new_tokens", 0))
         self.seed = int(cfg.get("seed", 42))
+        self.half = bool(cfg.get("half", False))  # fp16 -> ~half the RAM (helps CPU OOM)
         self.step_timeout = int(cfg.get("step_timeout", 900))
         self._checked = False
 
@@ -165,6 +166,8 @@ class FishSpeechS2Generator(Generator):
             ]
             if self.max_new_tokens > 0:
                 t2s += ["--max-new-tokens", str(self.max_new_tokens)]
+            if self.half:
+                t2s += ["--half"]
             self._run("t2s", t2s, cwd=tdp)
             codes = sorted(tdp.glob("codes_*.npy")) or sorted(tdp.glob("*.npy"))
             if not codes:
