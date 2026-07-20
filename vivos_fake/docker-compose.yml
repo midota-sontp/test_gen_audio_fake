@@ -1,34 +1,27 @@
-# Run the VIVOS -> Fish Speech S2 generator in Docker.
+# Run the ENTIRE flow in Docker — weights + VIVOS download + generation.
 #
-#   1. Put VIVOS on the host at ./vivos  (so ./vivos/train/prompts.txt exists)
-#   2. Download S2 weights once into the mounted volume:
-#        docker compose run --rm fetch-weights
-#   3. Generate:
-#        docker compose run --rm generate
+#   docker compose run --rm generate
 #
-# Outputs land on the host in ./dataset (mounted below).
+# The container self-bootstraps (docker/bootstrap.sh): it downloads the S2 weights
+# and VIVOS on first run (both persist on the host via the volumes below), then
+# generates. Re-running resumes. Outputs land on the host in ./dataset.
 
 services:
-  # one-time: download fishaudio/s2-pro weights into the mounted checkpoints dir
-  fetch-weights:
-    build: .
-    profiles: ["setup"]
-    volumes:
-      - ./third_party/fish-speech/checkpoints:/app/third_party/fish-speech/checkpoints
-      - hf-cache:/app/.hfcache
-    entrypoint: ["bash", "-lc"]
-    command: ["huggingface-cli download fishaudio/s2-pro --local-dir /app/third_party/fish-speech/checkpoints/s2-pro"]
-
   generate:
     build: .
+    entrypoint: ["bash", "docker/bootstrap.sh"]
     environment:
       # Docker on macOS has no MPS -> cpu. On Linux+NVIDIA set FISH_DEVICE=cuda.
       - FISH_DEVICE=${FISH_DEVICE:-cpu}
+      # optional: Kaggle creds via env instead of a mounted token
+      - KAGGLE_USERNAME=${KAGGLE_USERNAME:-}
+      - KAGGLE_KEY=${KAGGLE_KEY:-}
     volumes:
-      - ./vivos:/data/vivos:ro                                              # <-- MOUNT DATASET (VIVOS), read-only
-      - ./dataset:/data/output                                             # <-- output written back to host
+      - ./vivos:/data/vivos                                                # VIVOS (auto-downloaded here if empty; persists on host)
+      - ./dataset:/data/output                                             # output written back to host
       - ./third_party/fish-speech/checkpoints:/app/third_party/fish-speech/checkpoints  # S2 weights (persist)
       - ./config.yaml:/app/config.yaml:ro                                  # edit config without rebuilding
+      - ${HOME}/.kaggle:/root/.kaggle:ro                                   # Kaggle token for VIVOS download
       - hf-cache:/app/.hfcache
     command: ["--dataset", "/data/vivos", "--output", "/data/output", "--config", "config.yaml"]
     # --- GPU (Linux + NVIDIA only; also set FISH_DEVICE=cuda) ---
@@ -39,6 +32,16 @@ services:
     #         - driver: nvidia
     #           count: all
     #           capabilities: [gpu]
+
+  # Optional: pre-download only the S2 weights (bootstrap does this automatically).
+  fetch-weights:
+    build: .
+    profiles: ["setup"]
+    entrypoint: ["bash", "-lc"]
+    command: ["huggingface-cli download fishaudio/s2-pro --local-dir /app/third_party/fish-speech/checkpoints/s2-pro"]
+    volumes:
+      - ./third_party/fish-speech/checkpoints:/app/third_party/fish-speech/checkpoints
+      - hf-cache:/app/.hfcache
 
 volumes:
   hf-cache:

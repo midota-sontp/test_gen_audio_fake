@@ -61,34 +61,37 @@ python cli.py --dataset vivos --output dataset --config config.yaml
 > chạy overnight. Sinh fake được **tuần tự hoá trên accelerator** (chạy nhiều tiến trình 4B song
 > song sẽ OOM); `num_workers` chỉ tăng tốc chuẩn hoá audio thật + dựng reference (I/O).
 
-## Chạy bằng Docker
+## Chạy HẾT trong Docker (một lệnh)
 
-Dataset VIVOS và thư mục output được **mount** từ host vào container (không nằm trong image).
+Container **tự bootstrap** ([docker/bootstrap.sh](docker/bootstrap.sh)): tự tải weights S2 + tự tải
+VIVOS từ Kaggle (nếu chưa có) rồi sinh dataset. Không cần setup native gì cả.
 
 ```bash
-# 1. Đặt VIVOS ở host tại ./vivos  (phải có ./vivos/train/prompts.txt)
-# 2. Tải weights S2 một lần vào volume checkpoints (được mount):
-docker compose run --rm fetch-weights
-# 3. Sinh dataset (kết quả đổ ra ./dataset trên host):
 docker compose run --rm generate
 ```
+
+Lần đầu sẽ: tải weights `fishaudio/s2-pro` → tải VIVOS → sinh. Mọi thứ **persist trên host** (weights,
+VIVOS, output) nên chạy lại là **resume**. Kết quả ở `./dataset`.
 
 Các volume trong [docker-compose.yml](docker-compose.yml):
 
 | host | container | vai trò |
 |---|---|---|
-| `./vivos` | `/data/vivos` (ro) | **dataset VIVOS mount vào** |
+| `./vivos` | `/data/vivos` | VIVOS — **tự tải vào đây** nếu trống (persist host) |
 | `./dataset` | `/data/output` | output ghi ngược ra host |
 | `./third_party/fish-speech/checkpoints` | (same) | weights S2 (tải 1 lần, giữ lại) |
 | `./config.yaml` | `/app/config.yaml` (ro) | sửa config không cần build lại |
+| `~/.kaggle` | `/root/.kaggle` (ro) | token Kaggle để tải VIVOS |
 
-> ⚠️ **Docker trên macOS KHÔNG có MPS/GPU** → chạy CPU (`FISH_DEVICE=cpu`, mặc định), model 4B
-> rất chậm. Chỉ nên dùng Docker để sinh **số ít** (đặt `limit` nhỏ), hoặc chạy trên **Linux + NVIDIA**:
+Tải VIVOS cần token Kaggle: mount sẵn `~/.kaggle`, hoặc đặt `KAGGLE_USERNAME`/`KAGGLE_KEY`. Nếu bạn
+đã có VIVOS sẵn, cứ đặt vào `./vivos/train/...` — container sẽ bỏ qua bước tải.
+
+> ⚠️ **Docker trên macOS KHÔNG có MPS/GPU** → chạy CPU (`FISH_DEVICE=cpu`, mặc định), model 4B rất
+> chậm. Nên để `limit` nhỏ khi chạy Docker trên Mac. Muốn Docker **nhanh** → chạy trên **Linux + NVIDIA**:
 > ```bash
 > docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121 -t vivos-fake .
 > FISH_DEVICE=cuda docker compose run --rm generate   # + bỏ comment khối `deploy:` GPU trong compose
 > ```
-> Để sinh full trên máy M1, chạy **native (MPS)** nhanh hơn nhiều (xem phần "Chạy" ở trên).
 
 ## Cấu hình (`config.yaml`)
 
