@@ -9,7 +9,7 @@ DATASET="${VIVOS_DEST:-/data/vivos}"
 
 if [ ! -f "$CKPT/codec.pth" ]; then
   echo ">> [1/3] Downloading Fish Speech S2-Pro weights -> $CKPT ..."
-  huggingface-cli download fishaudio/s2-pro --local-dir "$CKPT"
+  python -c "from huggingface_hub import snapshot_download; snapshot_download('fishaudio/s2-pro', local_dir='$CKPT')"
 else
   echo ">> [1/3] S2 weights present."
 fi

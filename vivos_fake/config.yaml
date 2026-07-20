@@ -25,9 +25,10 @@ overwrite: false # false => resume: skip audio already generated
 
 # Fish Speech S2 (fishaudio/s2-pro) local inference — set up once with setup_fish.sh.
 fishspeech:
-  repo_dir: third_party/fish-speech
+  invoke: module # "module" (Docker image / pip-installed) | "script" (cloned repo files)
+  repo_dir: third_party/fish-speech # only used when invoke: script
   checkpoint_dir: third_party/fish-speech/checkpoints/s2-pro
-  device: auto # auto -> mps on Apple Silicon, else cpu/cuda
+  device: auto # auto -> mps on Apple Silicon, else cpu/cuda (Docker overrides via FISH_DEVICE)
   temperature: 0.7
   top_p: 0.9
   top_k: 30

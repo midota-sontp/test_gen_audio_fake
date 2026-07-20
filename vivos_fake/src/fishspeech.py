@@ -23,6 +23,10 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# invoked as installed modules (default — works in the official image and after
+# `pip install -e`), or as repo script files (invoke="script")
+_DAC_MOD = "fish_speech.models.dac.inference"
+_T2S_MOD = "fish_speech.models.text2semantic.inference"
 _DAC = "fish_speech/models/dac/inference.py"
 _T2S = "fish_speech/models/text2semantic/inference.py"
 
@@ -64,6 +68,7 @@ class FishSpeechS2Generator(Generator):
     folder = "fishspeech"          # dataset/fake/<folder>/<spk>/
 
     def __init__(self, cfg: dict, cache_dir: str | Path):
+        self.invoke = cfg.get("invoke", "module")  # "module" (installed pkg) | "script" (repo files)
         self.repo_dir = Path(cfg.get("repo_dir", "third_party/fish-speech")).resolve()
         self.ckpt = Path(cfg.get("checkpoint_dir",
                                  "third_party/fish-speech/checkpoints/s2-pro")).resolve()
@@ -84,7 +89,12 @@ class FishSpeechS2Generator(Generator):
         if self._checked:
             return
         missing = []
-        if not (self.repo_dir / _DAC).exists():
+        if self.invoke == "module":
+            import importlib.util
+            if importlib.util.find_spec("fish_speech") is None:
+                missing.append("python package `fish_speech` not importable (use the Docker image "
+                               "or run setup_fish.sh)")
+        elif not (self.repo_dir / _DAC).exists():
             missing.append(f"fish-speech repo at {self.repo_dir} (missing {_DAC})")
         if not self.codec.exists():
             missing.append(f"codec weights at {self.codec}")
@@ -93,19 +103,24 @@ class FishSpeechS2Generator(Generator):
         if missing:
             raise RuntimeError(
                 "Fish Speech S2 is not set up:\n  - " + "\n  - ".join(missing)
-                + "\nRun `bash setup_fish.sh` first."
+                + "\nRun in the Docker image, or `bash setup_fish.sh` for a native install."
             )
-        log.info("Fish S2 ready | repo=%s device=%s", self.repo_dir, self.device)
+        log.info("Fish S2 ready | invoke=%s device=%s ckpt=%s", self.invoke, self.device, self.ckpt)
         self._checked = True
 
     # -- subprocess helper ------------------------------------------------
-    def _run(self, script: str, args: list[str], cwd: Path) -> None:
-        cmd = [sys.executable, str(self.repo_dir / script), *args]
+    def _base_cmd(self, which: str) -> list[str]:
+        if self.invoke == "module":
+            return [sys.executable, "-m", (_DAC_MOD if which == "dac" else _T2S_MOD)]
+        return [sys.executable, str(self.repo_dir / (_DAC if which == "dac" else _T2S))]
+
+    def _run(self, which: str, args: list[str], cwd: Path) -> None:
+        cmd = [*self._base_cmd(which), *args]
         proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True,
                               text=True, timeout=self.step_timeout)
         if proc.returncode != 0:
             tail = "\n".join((proc.stderr or proc.stdout or "").strip().splitlines()[-25:])
-            raise RuntimeError(f"{script} failed (exit {proc.returncode}, device={self.device}):\n{tail}")
+            raise RuntimeError(f"{which} step failed (exit {proc.returncode}, device={self.device}):\n{tail}")
 
     # -- step 1: encode reference (cached per speaker) --------------------
     def prepare_speaker(self, speaker: str, ref_wav: Path, ref_text: str):
@@ -114,7 +129,7 @@ class FishSpeechS2Generator(Generator):
         if not npy.exists():
             with tempfile.TemporaryDirectory(dir=self.cache_dir) as td:
                 tdp = Path(td)
-                self._run(_DAC, [
+                self._run("dac", [
                     "-i", str(Path(ref_wav).resolve()),
                     "-o", str(tdp / "ref.wav"),
                     "--checkpoint-path", str(self.codec),
@@ -150,11 +165,11 @@ class FishSpeechS2Generator(Generator):
             ]
             if self.max_new_tokens > 0:
                 t2s += ["--max-new-tokens", str(self.max_new_tokens)]
-            self._run(_T2S, t2s, cwd=tdp)
+            self._run("t2s", t2s, cwd=tdp)
             codes = sorted(tdp.glob("codes_*.npy")) or sorted(tdp.glob("*.npy"))
             if not codes:
                 raise RuntimeError("text2semantic produced no codes")
-            self._run(_DAC, [
+            self._run("dac", [
                 "-i", str(codes[0]),
                 "-o", str(out_wav),
                 "--checkpoint-path", str(self.codec),

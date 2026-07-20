@@ -37,8 +37,8 @@ services:
   fetch-weights:
     build: .
     profiles: ["setup"]
-    entrypoint: ["bash", "-lc"]
-    command: ["huggingface-cli download fishaudio/s2-pro --local-dir /app/third_party/fish-speech/checkpoints/s2-pro"]
+    entrypoint: ["python", "-c"]
+    command: ["from huggingface_hub import snapshot_download; snapshot_download('fishaudio/s2-pro', local_dir='/app/third_party/fish-speech/checkpoints/s2-pro')"]
     volumes:
       - ./third_party/fish-speech/checkpoints:/app/third_party/fish-speech/checkpoints
       - hf-cache:/app/.hfcache
