@@ -61,6 +61,35 @@ python cli.py --dataset vivos --output dataset --config config.yaml
 > chạy overnight. Sinh fake được **tuần tự hoá trên accelerator** (chạy nhiều tiến trình 4B song
 > song sẽ OOM); `num_workers` chỉ tăng tốc chuẩn hoá audio thật + dựng reference (I/O).
 
+## Chạy bằng Docker
+
+Dataset VIVOS và thư mục output được **mount** từ host vào container (không nằm trong image).
+
+```bash
+# 1. Đặt VIVOS ở host tại ./vivos  (phải có ./vivos/train/prompts.txt)
+# 2. Tải weights S2 một lần vào volume checkpoints (được mount):
+docker compose run --rm fetch-weights
+# 3. Sinh dataset (kết quả đổ ra ./dataset trên host):
+docker compose run --rm generate
+```
+
+Các volume trong [docker-compose.yml](docker-compose.yml):
+
+| host | container | vai trò |
+|---|---|---|
+| `./vivos` | `/data/vivos` (ro) | **dataset VIVOS mount vào** |
+| `./dataset` | `/data/output` | output ghi ngược ra host |
+| `./third_party/fish-speech/checkpoints` | (same) | weights S2 (tải 1 lần, giữ lại) |
+| `./config.yaml` | `/app/config.yaml` (ro) | sửa config không cần build lại |
+
+> ⚠️ **Docker trên macOS KHÔNG có MPS/GPU** → chạy CPU (`FISH_DEVICE=cpu`, mặc định), model 4B
+> rất chậm. Chỉ nên dùng Docker để sinh **số ít** (đặt `limit` nhỏ), hoặc chạy trên **Linux + NVIDIA**:
+> ```bash
+> docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121 -t vivos-fake .
+> FISH_DEVICE=cuda docker compose run --rm generate   # + bỏ comment khối `deploy:` GPU trong compose
+> ```
+> Để sinh full trên máy M1, chạy **native (MPS)** nhanh hơn nhiều (xem phần "Chạy" ở trên).
+
 ## Cấu hình (`config.yaml`)
 
 | khoá | mặc định | ý nghĩa |

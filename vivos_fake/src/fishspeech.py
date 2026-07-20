@@ -14,6 +14,7 @@ Weights + package are installed by setup_fish.sh, not here.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,10 @@ _T2S = "fish_speech/models/text2semantic/inference.py"
 
 
 def pick_device(pref: str = "auto") -> str:
+    # env override wins (Docker: no MPS -> FISH_DEVICE=cpu; Linux+NVIDIA -> cuda)
+    env = os.environ.get("FISH_DEVICE")
+    if env:
+        return env
     if pref and pref != "auto":
         return pref
     try:

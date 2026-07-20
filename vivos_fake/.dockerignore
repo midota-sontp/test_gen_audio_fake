@@ -1,0 +1,8 @@
+# keep the build context small — these are mounted at runtime, not baked in
+vivos/
+dataset/
+third_party/
+**/__pycache__/
+*.pyc
+.git/
+.hfcache/
