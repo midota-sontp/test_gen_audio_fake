@@ -1,0 +1,36 @@
+# Fake-speech dataset generation (VIVOS real + Fish Speech S2 clones).
+# CLI flags --dataset / --output override dataset_root / output_root.
+
+dataset_root: vivos # folder containing train/ and test/ (waves/, prompts.txt)
+output_root: dataset # where real/, fake/, reference/, metadata/ are written
+
+splits: [train, test] # VIVOS splits to process; metadata `split` = these names
+
+# How many audio to generate. Each selected utterance -> 1 real + 1 fake pair.
+limit: 100 # null = ALL utterances; or an int, e.g. 200 -> 200 real + 200 fake
+max_per_speaker:
+  null # null = no cap; or an int to cap utterances per speaker
+  # (selection is round-robin across speakers, so `limit` stays balanced)
+
+reference_seconds: 15 # target reference length per speaker (kept within 10-20s)
+sample_rate: 16000 # all audio normalized to this
+mono: true
+peak_normalize: true # peak-normalize real & fake alike (fair for a detector)
+
+generator: FishSpeechS2 # generator backend (factory in src/fishspeech.py)
+num_workers:
+  4 # parallelism for real-audio normalization + references
+  # (fake generation is serialized on the accelerator)
+overwrite: false # false => resume: skip audio already generated
+
+# Fish Speech S2 (fishaudio/s2-pro) local inference — set up once with setup_fish.sh.
+fishspeech:
+  repo_dir: third_party/fish-speech
+  checkpoint_dir: third_party/fish-speech/checkpoints/s2-pro
+  device: auto # auto -> mps on Apple Silicon, else cpu/cuda
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 30
+  max_new_tokens: 0 # 0 = model default
+  seed: 42
+  step_timeout: 900 # seconds per CLI step (MPS ~25-70s/sentence)

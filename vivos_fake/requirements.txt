@@ -1,0 +1,9 @@
+# Dataset-generation deps. Fish Speech S2 itself (the `fish_speech` package +
+# its own torch pin) is installed separately by setup_fish.sh.
+PyYAML>=6.0
+numpy>=1.24
+soundfile>=0.12
+librosa>=0.10
+tqdm>=4.66
+kagglehub>=0.3.0            # optional: only if you pull VIVOS from Kaggle
+huggingface_hub[cli]>=0.24  # for `huggingface-cli download fishaudio/s2-pro`
