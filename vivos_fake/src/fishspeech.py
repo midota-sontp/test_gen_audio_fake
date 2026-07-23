@@ -165,7 +165,7 @@ class FishSpeechS2Generator(Generator):
         if self._checked:
             return
         missing = []
-        if self.invoke == "module":
+        if self.invoke in ("module", "worker"):
             import importlib.util
             if importlib.util.find_spec("fish_speech") is None:
                 missing.append("python package `fish_speech` not importable (use the Docker image "
