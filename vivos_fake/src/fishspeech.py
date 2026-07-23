@@ -117,8 +117,12 @@ class FishSpeechS2Generator(Generator):
 
     def _run(self, which: str, args: list[str], cwd: Path) -> None:
         cmd = [*self._base_cmd(which), *args]
+        # reduce CUDA fragmentation — on tight cards (e.g. T4 16GB) the t2s KV
+        # cache leaves only a few hundred MB free; expandable_segments recovers it
+        env = dict(os.environ)
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True,
-                              text=True, timeout=self.step_timeout)
+                              text=True, timeout=self.step_timeout, env=env)
         if proc.returncode != 0:
             tail = "\n".join((proc.stderr or proc.stdout or "").strip().splitlines()[-25:])
             raise RuntimeError(f"{which} step failed (exit {proc.returncode}, device={self.device}):\n{tail}")
