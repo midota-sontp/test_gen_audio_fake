@@ -25,14 +25,19 @@ overwrite: false # false => resume: skip audio already generated
 
 # Fish Speech S2 (fishaudio/s2-pro) local inference — set up once with setup_fish.sh.
 fishspeech:
-  invoke: module # "module" (Docker image / pip-installed) | "script" (cloned repo files)
+  invoke: module # "module" (pip-installed CLI) | "script" (repo files) | "worker" (persistent, model loaded once — fastest)
   repo_dir: third_party/fish-speech # only used when invoke: script
   checkpoint_dir: third_party/fish-speech/checkpoints/s2-pro
   device: auto # auto -> mps on Apple Silicon, else cpu/cuda (Docker overrides via FISH_DEVICE)
   temperature: 0.7
   top_p: 0.9
   top_k: 30
-  max_new_tokens: 0 # 0 = model default
+  max_new_tokens: 0 # 0 = model default; e.g. 512 caps generation length (and KV cache with invoke: worker)
   seed: 42
   half: false # true -> fp16, ~half the RAM (helps CPU OOM on the 4B model; needs ~8GB instead of ~16GB)
-  step_timeout: 900 # seconds per CLI step (MPS ~25-70s/sentence)
+  step_timeout: 900 # seconds per CLI step / per worker request (first worker gen includes compile warmup)
+  # --- invoke: worker only (persistent in-process backend, big speedup on GPU) ---
+  compile: true # torch.compile the decode step (slow first gen, fast after)
+  chunk_length: 300 # text chunk size fed to generate_long
+  max_seq_len: 2048 # caps the KV cache so the 4B model fits a 16GB GPU (T4)
+  load_timeout: 600 # seconds to wait for the worker to load the model on startup

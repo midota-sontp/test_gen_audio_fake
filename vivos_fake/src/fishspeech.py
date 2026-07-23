@@ -13,12 +13,15 @@ Weights + package are installed by setup_fish.sh, not here.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -49,6 +52,68 @@ def pick_device(pref: str = "auto") -> str:
     return "cpu"
 
 
+class _FishWorker:
+    """Drives a persistent fish_worker.py subprocess (model loaded once). A
+    background thread drains the worker's stdout so its pipe never blocks; only
+    lines tagged with SENT are treated as protocol responses (everything else,
+    e.g. loguru/torch logs on a stray stdout write, is ignored)."""
+
+    SENT = "@@FWRESP@@"
+
+    def __init__(self, cmd: list[str], cwd: Path, env: dict,
+                 load_timeout: int, req_timeout: int):
+        self.req_timeout = req_timeout
+        self.proc = subprocess.Popen(
+            cmd, cwd=str(cwd), env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        self._q: queue.Queue = queue.Queue()
+        threading.Thread(target=self._reader, daemon=True).start()
+        try:
+            ev = self._q.get(timeout=load_timeout)
+        except queue.Empty:
+            raise RuntimeError(f"fish worker did not become ready within {load_timeout}s")
+        if ev.get("event") != "ready":
+            raise RuntimeError(f"fish worker sent unexpected first message: {ev}")
+
+    def _reader(self) -> None:
+        for line in self.proc.stdout:  # inherits worker stdout until EOF
+            line = line.strip()
+            if line.startswith(self.SENT):
+                try:
+                    self._q.put(json.loads(line[len(self.SENT):]))
+                except Exception:
+                    pass
+        self._q.put({"event": "eof"})
+
+    def request(self, obj: dict) -> dict:
+        if self.proc.poll() is not None:
+            raise RuntimeError(f"fish worker already exited (code {self.proc.returncode})")
+        self.proc.stdin.write(json.dumps(obj) + "\n")
+        self.proc.stdin.flush()
+        try:
+            r = self._q.get(timeout=self.req_timeout)
+        except queue.Empty:
+            raise RuntimeError(f"fish worker request timed out after {self.req_timeout}s")
+        if r.get("event") == "eof":
+            raise RuntimeError("fish worker process died")
+        if not r.get("ok"):
+            raise RuntimeError(r.get("error", "fish worker error"))
+        return r
+
+    def close(self) -> None:
+        try:
+            self.proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
+            self.proc.stdin.flush()
+            self.proc.wait(timeout=10)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+
 class Generator:
     """Backend interface. `prepare_speaker` returns an opaque handle passed to
     `generate` for every utterance of that speaker."""
@@ -68,7 +133,10 @@ class FishSpeechS2Generator(Generator):
     folder = "fishspeech"          # dataset/fake/<folder>/<spk>/
 
     def __init__(self, cfg: dict, cache_dir: str | Path):
-        self.invoke = cfg.get("invoke", "module")  # "module" (installed pkg) | "script" (repo files)
+        # "module"/"script": one CLI subprocess per step (reloads the model each
+        # clip). "worker": one persistent process, model loaded once (much faster).
+        self.invoke = cfg.get("invoke", "module")
+        self.use_worker = self.invoke == "worker"
         self.repo_dir = Path(cfg.get("repo_dir", "third_party/fish-speech")).resolve()
         self.ckpt = Path(cfg.get("checkpoint_dir",
                                  "third_party/fish-speech/checkpoints/s2-pro")).resolve()
@@ -83,7 +151,14 @@ class FishSpeechS2Generator(Generator):
         self.seed = int(cfg.get("seed", 42))
         self.half = bool(cfg.get("half", False))  # fp16 -> ~half the RAM (helps CPU OOM)
         self.step_timeout = int(cfg.get("step_timeout", 900))
+        # worker-only knobs
+        self.compile = bool(cfg.get("compile", True))       # torch.compile decode (fast after warmup)
+        self.chunk_length = int(cfg.get("chunk_length", 300))
+        self.max_seq_len = int(cfg.get("max_seq_len", 2048))  # caps KV cache (T4 16GB safe)
+        self.load_timeout = int(cfg.get("load_timeout", 600))
         self._checked = False
+        self._worker: _FishWorker | None = None
+        self._req_id = 0
 
     # -- setup validation -------------------------------------------------
     def ensure_ready(self) -> None:
@@ -108,6 +183,41 @@ class FishSpeechS2Generator(Generator):
             )
         log.info("Fish S2 ready | invoke=%s device=%s ckpt=%s", self.invoke, self.device, self.ckpt)
         self._checked = True
+        if self.use_worker:
+            self._start_worker()
+
+    # -- persistent worker ------------------------------------------------
+    def _next_id(self) -> int:
+        self._req_id += 1
+        return self._req_id
+
+    def _start_worker(self) -> None:
+        if self._worker is not None:
+            return
+        worker_py = Path(__file__).with_name("fish_worker.py")
+        cmd = [
+            sys.executable, str(worker_py),
+            "--checkpoint-path", str(self.ckpt),
+            "--device", self.device,
+            "--temperature", str(self.temperature),
+            "--top-p", str(self.top_p),
+            "--top-k", str(self.top_k),
+            "--max-new-tokens", str(self.max_new_tokens if self.max_new_tokens > 0 else 512),
+            "--chunk-length", str(self.chunk_length),
+            "--max-seq-len", str(self.max_seq_len),
+        ]
+        if self.half:
+            cmd.append("--half")
+        if self.compile:
+            cmd.append("--compile")
+        env = dict(os.environ)
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        log.info("starting persistent Fish worker (compile=%s half=%s) — loading model once ...",
+                 self.compile, self.half)
+        # first generate() triggers torch.compile warmup, so requests get step_timeout
+        self._worker = _FishWorker(cmd, cwd=Path.cwd(), env=env,
+                                   load_timeout=self.load_timeout, req_timeout=self.step_timeout)
+        log.info("Fish worker ready")
 
     # -- subprocess helper ------------------------------------------------
     def _base_cmd(self, which: str) -> list[str]:
@@ -130,6 +240,12 @@ class FishSpeechS2Generator(Generator):
     # -- step 1: encode reference (cached per speaker) --------------------
     def prepare_speaker(self, speaker: str, ref_wav: Path, ref_text: str):
         self.ensure_ready()
+        if self.use_worker:
+            self._worker.request({
+                "cmd": "prepare", "id": self._next_id(), "speaker": speaker,
+                "ref_wav": str(Path(ref_wav).resolve()), "ref_text": ref_text,
+            })
+            return {"speaker": speaker}
         npy = self.cache_dir / f"prompt_{speaker}.npy"
         if not npy.exists():
             with tempfile.TemporaryDirectory(dir=self.cache_dir) as td:
@@ -154,6 +270,15 @@ class FishSpeechS2Generator(Generator):
         if out_wav.exists():
             return out_wav
         out_wav.parent.mkdir(parents=True, exist_ok=True)
+        if self.use_worker:
+            self._worker.request({
+                "cmd": "gen", "id": self._next_id(), "speaker": handle["speaker"],
+                "text": target_text, "out_wav": str(out_wav.resolve()),
+                "seed": self.seed if seed is None else seed,
+            })
+            if not out_wav.exists():
+                raise RuntimeError(f"worker produced no wav at {out_wav}")
+            return out_wav
         with tempfile.TemporaryDirectory(dir=self.cache_dir) as td:
             tdp = Path(td)
             t2s = [
