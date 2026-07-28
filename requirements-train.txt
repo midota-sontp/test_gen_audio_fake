@@ -20,3 +20,7 @@ matplotlib==3.9.2
 PyYAML==6.0.2
 tqdm==4.66.5
 psutil==6.0.0
+
+# Realtime dashboard (reads pipeline artifacts; pulls pandas). Optional but bundled
+# so `docker compose up` can run training + dashboard together.
+streamlit==1.37.1

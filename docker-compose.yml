@@ -22,5 +22,23 @@ services:
       - hf_cache:/hf_cache
     command: ["python", "run_pipeline.py", "--config", "configs/mvp.yaml"]
 
+  # Realtime dashboard (tiếng Việt) — đọc artifact mà service `train` ghi ra.
+  # Mở http://localhost:8501 . Dùng chung image + các mount data/reports/experiments.
+  dashboard:
+    image: ai-detector:train
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.train
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/workspace/data
+      - ./reports:/workspace/reports
+      - ./experiments:/workspace/experiments
+      - ./configs:/workspace/configs
+    command: ["streamlit", "run", "src/dashboard/app.py",
+              "--server.port", "8501", "--server.address", "0.0.0.0",
+              "--server.headless", "true", "--browser.gatherUsageStats", "false"]
+
 volumes:
   hf_cache:

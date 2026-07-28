@@ -41,6 +41,18 @@ python run_pipeline.py --only extract train evaluate   # tái dùng data đã pr
 python run_pipeline.py --skip download preprocess
 ```
 
+## Xem tiến độ + kết quả trực tiếp trên dashboard
+Bảng điều khiển realtime (tiếng Việt) đọc các artifact pipeline ghi ra: tiến độ từng
+bước + ETA, đường cong loss/val_loss theo epoch, cảnh báo overfitting, và kết quả test
+(EER + biểu đồ ROC/PR/confusion). Cập nhật mỗi vài giây.
+
+- **Docker**: `docker compose up --build` chạy sẵn cả `train` lẫn `dashboard`.
+  Mở **http://localhost:8501** để theo dõi trong lúc train.
+- **Native**: mở terminal thứ hai (cùng venv) và chạy song song lúc train:
+  ```bash
+  streamlit run src/dashboard/app.py     # hoặc: python scripts/dashboard.py
+  ```
+
 ## Kết quả
 - `reports/metrics.json` — Accuracy / Precision / Recall / F1 / ROC-AUC / **EER** (metric chính) + ngưỡng EER.
 - `reports/roc.png`, `pr.png`, `confusion_matrix.png`, `classification_report.txt`, `predictions.csv`.
