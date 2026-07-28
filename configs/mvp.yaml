@@ -86,15 +86,16 @@ model:
 
 train:
   device: auto
-  epochs: 50
+  epochs: 200
   batch_size: 32
   lr: 0.0005                    # baseline
   weight_decay: 0.01            # baseline L2
   scheduler:
     factor: 0.5
-    patience: 3                 # LR scheduler patience (epochs)
+    patience: 5                 # LR scheduler patience (epochs)
   early_stopping:
-    patience: 8                 # early-stop patience (epochs)
+    patience: 30                # early-stop patience (raised for the longer 200-epoch run;
+                                # still guards against overfit if val_loss stalls)
     min_delta: 0.0001
     monitor: val_loss           # lower is better
   num_workers: 0
