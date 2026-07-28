@@ -1,0 +1,154 @@
+# MVP configuration — WavLM (frozen) + MLP deepfake-audio detector.
+# All stages read this single file. Paths are relative to the repo root.
+
+seed: 42
+
+paths:
+  # Frozen WavLM backbone. On first run transformers downloads it (~360MB, cached).
+  # If a local ./models/wavlm-base dir is present it is used automatically (offline),
+  # so weights never need to ship through git (they exceed GitHub's file limit).
+  wavlm_checkpoint: microsoft/wavlm-base
+  raw_dir: data/raw
+  processed_dir: data/processed
+  manifest_dir: data/manifests
+  embedding_dir: data/embeddings
+  checkpoint_dir: checkpoints
+  report_dir: reports
+
+# ---------------------------------------------------------------------------
+# Stage 00 — dataset download & speaker-disjoint split
+# ---------------------------------------------------------------------------
+dataset:
+  # source: local -> ingest a pre-split local dataset (dataset/metadata.csv);
+  #         hf    -> download+split from HuggingFace (legacy VSASV path below).
+  source: local
+  local_metadata: dataset/metadata/metadata.csv   # audio_path,label,speaker,text,generator,split
+  local_root: dataset                             # prefixed onto each audio_path
+  val_ratio: 0.15                                 # carved speaker-disjoint from TRAIN
+
+  # (legacy HF path — kept so evaluate.py's experiment registry has dataset.hf_id)
+  hf_id: vivos-fishspeech-s2   # local dataset name recorded in the run registry
+  # Set HF_TOKEN env var, or run `huggingface-cli login`.
+  source_split: train           # HF split to draw samples from (VSASV has only `train`)
+  n_real: 2000
+  n_fake: 2000
+  max_shards: 40                # download budget (boundary probes + data shards)
+  # VSASV keeps bonafide & spoof on DISJOINT speaker sets, so same-speaker pairing
+  # isn't possible here — leave false. (Kept for datasets that do share speakers.)
+  # The confound is instead handled by a speaker-disjoint split: test speakers are
+  # never seen in training, so the model must learn spoof cues, not speaker identity.
+  shared_speakers: false
+  split_ratios: [0.70, 0.15, 0.15]   # train / val / test
+  speaker_disjoint: true
+  prefer_language: vi           # soft preference when the column exists; not required
+  # Column names are auto-detected at runtime; override here if detection fails.
+  columns:
+    audio: null                 # e.g. "audio"
+    label: null                 # e.g. "label" / "is_spoof" / "class"
+    speaker: null               # e.g. "speaker_id" / "spk"
+    language: null              # e.g. "language" / "lang"
+  # Which values mean fake/spoof vs real. The class column is auto-detected by
+  # matching these values (not by column name), so VSASV's `utt_type` is found
+  # even though a `label` (speaker-id) column also exists. Override/extend if needed.
+  fake_label_values: ["spoof", "fake", "1", 1, "deepfake", "tts", "vc",
+                      "voice_conversion", "converted", "synthetic", "replay"]
+  real_label_values: ["bonafide", "real", "genuine", "0", 0, "human", "natural", "live"]
+
+# ---------------------------------------------------------------------------
+# Stage 01 — preprocessing
+# ---------------------------------------------------------------------------
+preprocess:
+  sample_rate: 16000
+  target_seconds: 3.0           # normalized clip length (crop/pad to this)
+  min_seconds: 1.0              # keep clips >=1s of voiced audio (VSASV spoof clips are short;
+                                # 3.0 dropped ~45% of samples and skewed test toward real)
+  vad:
+    enable: true
+    top_db: 30                  # librosa.effects.split threshold (dB below peak)
+  bit_depth: PCM_16
+
+# ---------------------------------------------------------------------------
+# Stage 02 — WavLM embedding extraction
+# ---------------------------------------------------------------------------
+extract:
+  device: auto                  # auto | cpu | mps | cuda  (Docker => cpu)
+  output_layer: 6               # probe: layer 6 separates spoof best; layers 7-12 hurt
+  pooling: mean                 # mean pooling over the time axis (layer-6 frames)
+  batch_log_every: 20
+
+# ---------------------------------------------------------------------------
+# Stage 03 — classifier training
+# ---------------------------------------------------------------------------
+model:
+  input_dim: 768                # WavLM-Base hidden size (layer-6 mean pooling)
+  hidden_dim: 256               # reg is not the bottleneck, data is
+  dropout: 0.3                  # LayerNorm in the head aids calibration
+
+train:
+  device: auto
+  epochs: 50
+  batch_size: 32
+  lr: 0.0005                    # baseline
+  weight_decay: 0.01            # baseline L2
+  scheduler:
+    factor: 0.5
+    patience: 3                 # LR scheduler patience (epochs)
+  early_stopping:
+    patience: 8                 # early-stop patience (epochs)
+    min_delta: 0.0001
+    monitor: val_loss           # lower is better
+  num_workers: 0
+
+# ---------------------------------------------------------------------------
+# Stage 04 — evaluation
+# ---------------------------------------------------------------------------
+evaluate:
+  decision_threshold: 0.5
+  n_prediction_samples: 24        # rows written to reports/predictions.csv for the dashboard
+
+# ---------------------------------------------------------------------------
+# Stage 03b — partial WavLM fine-tuning  (scripts/finetune.py)
+# Probe showed layer ~6 is best and layers 7-12 hurt, so truncate at layer 6 and
+# fine-tune only the top few of those layers + head. CPU-friendly: caches the
+# frozen CNN features once, backprops through the top layers only.
+# ---------------------------------------------------------------------------
+finetune:
+  n_keep_layers: 6              # truncate WavLM after this transformer layer
+  n_trainable_layers: 2         # unfreeze the top-N kept layers (here 5 & 6)
+  pooling: mean                 # mean | mean_std  (over the layer-6 frame sequence)
+  hidden_dim: 256
+  dropout: 0.3
+  epochs: 12
+  batch_size: 16
+  lr_head: 0.0005               # higher LR for the fresh head
+  lr_backbone: 0.00001          # tiny LR for the unfrozen WavLM layers
+  weight_decay: 0.01
+  min_delta: 0.0001
+  early_stopping_patience: 5
+  feat_dir: data/ft_feats       # cached encoder-input (CNN) features
+
+# ---------------------------------------------------------------------------
+# Monitoring / experiment tracking / dashboard  (all optional & fail-safe)
+# ---------------------------------------------------------------------------
+tracking:
+  tensorboard:
+    enable: true
+    log_dir: reports/tensorboard
+  mlflow:
+    enable: false                # off by default — heavy, and OOM-prone in small Docker VMs
+    tracking_uri: sqlite:///reports/mlflow.db   # DB backend (MLflow 3.x deprecates file store)
+    artifact_dir: reports/mlartifacts
+    experiment: wavlm-mvp
+  registry: experiments/registry.jsonl   # one JSON line per finished run
+
+monitoring:
+  status_file: reports/run_status.json   # live pipeline status the dashboard polls
+  overfitting:                           # generalization gap = val_loss - train_loss
+    excellent: 0.05
+    good: 0.15
+    warning: 0.30
+    trend_window: 3                      # epochs used for the "val rising / train falling" check
+
+dashboard:
+  refresh_seconds: 5
+  port: 8501

@@ -1,0 +1,22 @@
+# Training-only deps (local dataset + frozen HF WavLM + MLP head).
+# torch/torchaudio are installed from the CPU index in docker/Dockerfile.train.
+# Slim on purpose: no HF-download stack (datasets/pyarrow), no mlflow/streamlit/
+# tensorboard/rich — those are optional and imported lazily/guarded in the code.
+
+# Frozen WavLM backbone (pulls huggingface_hub, tokenizers, safetensors)
+transformers==4.44.2
+
+# Audio processing
+librosa==0.10.2.post1
+soundfile==0.12.1
+
+# ML / metrics / plots
+scikit-learn==1.5.1
+numpy==1.26.4
+scipy==1.13.1
+matplotlib==3.9.2
+
+# Config + progress + resource monitor
+PyYAML==6.0.2
+tqdm==4.66.5
+psutil==6.0.0

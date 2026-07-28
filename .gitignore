@@ -1,0 +1,9 @@
+/dataset/
+# --- WavLM training pipeline artifacts ---
+models/
+data/
+checkpoints/
+reports/
+experiments/
+__pycache__/
+*.pyc
