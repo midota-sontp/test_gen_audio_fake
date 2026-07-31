@@ -34,6 +34,8 @@ def main() -> None:
     ap.add_argument("--output", help="override output_root")
     ap.add_argument("--splits", nargs="*", help="override splits, e.g. --splits train")
     ap.add_argument("--overwrite", action="store_true", help="regenerate even if outputs exist")
+    ap.add_argument("--kaggle-handle", help="enable Kaggle sync to '<user>/<slug>' (shards: <slug>-001, ...)")
+    ap.add_argument("--no-kaggle-sync", action="store_true", help="disable Kaggle sync for this run")
     args = ap.parse_args()
 
     cfg_path = Path(args.config)
@@ -50,13 +52,19 @@ def main() -> None:
         config["splits"] = args.splits
     if args.overwrite:
         config["overwrite"] = True
+    if args.kaggle_handle:
+        config.setdefault("kaggle_sync", {}).update(enabled=True, handle=args.kaggle_handle)
+    if args.no_kaggle_sync:
+        config.setdefault("kaggle_sync", {})["enabled"] = False
 
     output_root = Path(config["output_root"])
     setup_logging(output_root)
     log = logging.getLogger("cli")
-    log.info("dataset_root=%s output_root=%s generator=%s splits=%s overwrite=%s",
+    ks = config.get("kaggle_sync") or {}
+    log.info("dataset_root=%s output_root=%s generator=%s splits=%s overwrite=%s kaggle_sync=%s",
              config["dataset_root"], config["output_root"],
-             config.get("generator"), config.get("splits"), config.get("overwrite"))
+             config.get("generator"), config.get("splits"), config.get("overwrite"),
+             ks.get("handle") if ks.get("enabled") else "off")
 
     DatasetGenerator(config).run()
 

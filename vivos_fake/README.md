@@ -109,6 +109,85 @@ Tải VIVOS cần token Kaggle: mount sẵn `~/.kaggle`, hoặc đặt `KAGGLE_U
 >   half: true
 > ```
 
+## Đồng bộ lên Kaggle (chạy nhiều phiên, không mất tiến độ)
+
+Chạy full VIVOS (~12.4k câu) mất khoảng **30 giờ GPU** → vượt giới hạn 1 phiên Kaggle, và
+`/kaggle/working` **bị xoá khi phiên kết thúc**. Bật `kaggle_sync` để dataset sống trên
+Kaggle thay vì trong thư mục tạm:
+
+```yaml
+kaggle_sync:
+  enabled: true
+  handle: "sonpham12/vivos-fake"
+  single_dataset: true
+  every_clips: 1
+```
+
+hoặc `python cli.py --kaggle-handle <user>/<slug> ...`; chạy local không có token thì `--no-kaggle-sync`.
+
+- **Khởi động**: tải toàn bộ shard đã có về `output_root`, gộp `metadata.csv` → chạy tiếp
+  đúng chỗ đã dừng (kết hợp với logic resume sẵn có).
+- **Trong lúc chạy**: cứ mỗi `every_clips` fake mới (hoặc `every_minutes` phút) thì
+  checkpoint. Upload chạy **thread nền** nên không chặn việc sinh audio; nếu lần upload
+  trước chưa xong thì bỏ qua nhịp này.
+- **Kết thúc / Ctrl-C / crash**: `finally` luôn đẩy nốt phần còn lại.
+
+Audio được gói vào một **payload zip** (`.sync/vivos-fake-data.zip`) rồi upload cùng
+`metadata.csv`. Hai chế độ:
+
+- `single_dataset: true` — tất cả nằm trong đúng một dataset. Mỗi lần đẩy là **upload lại
+  toàn bộ payload** (Kaggle Dataset là *artifact có version*, không phải filesystem —
+  kagglehub không có delta), nên payload càng lớn thì mỗi lần đẩy càng lâu: vài giây lúc
+  đầu, ~10 phút khi dataset đã 3.5GB.
+- `single_dataset: false` — chia **shard**: `<handle>-001`, `-002`, ... Checkpoint chỉ
+  upload lại shard đang mở; shard vượt `shard_mb` thì niêm phong (không đụng lại, xoá zip
+  local cho nhẹ đĩa). Tổng upload cả run ≈ kích thước dataset thay vì O(n²).
+
+Với `every_clips: 1` thì mỗi audio hợp lệ đều kích hoạt đẩy; nhịp nào rơi vào lúc đang
+upload thì bị gộp, nên thực tế là "đẩy liên tục hết mức có thể" chứ không xếp hàng chồng lên nhau.
+
+Nếu dataset trên Kaggle có sẵn zip từ luồng cũ (`zip -r dataset.zip dataset`), pull vẫn giải
+nén đúng chỗ (tự bỏ tiền tố `dataset/`) và **gói lại vào payload của mình** — nếu không, version
+sau sẽ làm mất đám file đó.
+
+| khoá | mặc định | ý nghĩa |
+|---|---|---|
+| `enabled` | `false` | bật/tắt |
+| `handle` | — | `<username>/<slug>` |
+| `single_dataset` | `false` | `true` = **tất cả** nằm trong đúng `handle` (không chia shard, không niêm phong) |
+| `pull_on_start` | `true` | tải dữ liệu đã có về trước khi chạy |
+| `every_clips` | `200` | checkpoint sau mỗi N fake mới (`1` = sau mỗi audio; 0 = tắt) |
+| `every_minutes` | `20` | ...hoặc sau ngần này phút (0 = tắt) |
+| `shard_mb` | `400` | ngưỡng niêm phong shard — bỏ qua khi `single_dataset: true` |
+| `include` | `[real, fake, reference]` | **đẩy những gì lên dataset** (xem dưới) |
+| `exclude_patterns` | `[]` | lọc thêm theo wildcard, vd `["real/VIVOSSPK01/*"]` |
+| `include_real` | — | cách viết tắt cũ; `false` = bỏ `real` khỏi `include` |
+
+### Đẩy những gì lên dataset
+
+| giá trị trong `include` | nội dung | bỏ đi thì sao |
+|---|---|---|
+| `real` | `real/` — audio thật đã chuẩn hoá | phiên sau tự sinh lại từ VIVOS (~1 phút), nhưng dataset trên Kaggle sẽ thiếu lớp real |
+| `fake` | `fake/fishspeech/` — audio giả | mất thứ đắt nhất; đừng bỏ |
+| `reference` | `reference/` — giọng mẫu 10–20s mỗi speaker | rất nhẹ, phải dựng lại từ VIVOS |
+| `logs` | `logs/*.log` của phiên hiện tại | không ảnh hưởng dữ liệu |
+
+`metadata.csv` **luôn** được đẩy — nó chính là trạng thái resume, bỏ đi là mất khả năng chạy
+tiếp. Nó và `logs/` nằm **rời** cạnh zip và được làm mới mỗi lần đẩy (vì chúng thay đổi liên
+tục); audio thì gói vào zip đúng một lần.
+
+Chỉ file **đã có trong `metadata.csv`** mới được upload — mà một dòng metadata chỉ được ghi
+sau khi audio đã validate, nên wav ghi dở không bao giờ lên Kaggle. Dataset tạo ra ở chế độ
+**private**. Sai tên trong `include` thì dừng ngay lúc khởi động kèm danh sách hợp lệ.
+
+Đổi `include` giữa chừng chỉ ảnh hưởng file **thêm mới từ đó trở đi** — phần đã nằm trong
+payload đã publish thì vẫn còn; muốn dựng lại sạch thì xoá `<output>/.sync/` rồi đẩy lại
+(sẽ có cảnh báo trong log khi phát hiện `include` đổi).
+
+**Auth**: `KAGGLE_USERNAME` + `KAGGLE_KEY`, hoặc `~/.kaggle/kaggle.json`. Trên Kaggle notebook:
+Add-ons → Secrets rồi export thành 2 biến môi trường đó. Token được kiểm tra ngay lúc khởi
+động (`whoami`) để sai token thì hỏng trong vài giây, không phải sau nhiều giờ sinh audio.
+
 ## Cấu hình (`config.yaml`)
 
 | khoá | mặc định | ý nghĩa |
@@ -123,6 +202,7 @@ Tải VIVOS cần token Kaggle: mount sẵn `~/.kaggle`, hoặc đặt `KAGGLE_U
 | `generator` | `FishSpeechS2` | backend sinh giả (factory trong `src/fishspeech.py`) |
 | `num_workers` | `4` | song song hoá pha real + reference |
 | `overwrite` | `false` | `false` = resume (bỏ qua file đã có) |
+| `kaggle_sync.*` | tắt | checkpoint dataset lên Kaggle + kéo về khi khởi động (xem mục trên) |
 | `fishspeech.*` | | device/temperature/top_p/top_k/seed/step_timeout của S2 |
 
 ## Kiến trúc mã (module hoá)
@@ -134,6 +214,7 @@ Tải VIVOS cần token Kaggle: mount sẵn `~/.kaggle`, hoặc đặt `KAGGLE_U
 | `src/reference_builder.py` | dựng giọng mẫu 10–20s/speaker (ghép clip dài nhất) |
 | `src/fishspeech.py` | backend Fish Speech S2 (CLI 3 bước: encode → text2semantic → decode), cache prompt tokens |
 | `src/metadata.py` | ghi `metadata.csv` tăng dần, resume-safe, thread-safe |
+| `src/kaggle_sync.py` | checkpoint theo shard lên Kaggle (thread nền) + pull/gộp metadata khi khởi động |
 | `src/generator.py` | điều phối: pha real+reference (song song) → pha fake (tuần tự) |
 | `cli.py` | argparse + đọc YAML + chạy |
 

@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .fishspeech import get_generator
+from .kaggle_sync import make_sync
 from .metadata import MetadataWriter
 from .parser import Utterance, group_by_speaker, scan_dataset
 from .preprocess import normalize_file, validate_audio
@@ -45,7 +46,14 @@ class DatasetGenerator:
         self.real_dir = self.out / "real"
         self.ref_dir = self.out / "reference"
         self.cache_dir = self.out / ".cache"
-        self.meta = MetadataWriter(self.out / "metadata" / "metadata.csv")
+
+        # Kaggle round-trip: pull a previous session's state BEFORE metadata is read,
+        # so the writer starts from the merged "already done" list.
+        meta_path = self.out / "metadata" / "metadata.csv"
+        self.sync = make_sync(config.get("kaggle_sync"), self.out, meta_path)
+        self.sync.preflight()
+        self.sync.pull()
+        self.meta = MetadataWriter(meta_path)
 
         self.gen = get_generator(
             config.get("generator", "FishSpeechS2"),
@@ -167,6 +175,7 @@ class DatasetGenerator:
                 self.meta.add(rel, 1, u.speaker, u.text, self.gen.name, u.split)
                 made += 1
                 bar.update(1)
+                self.sync.tick()   # checkpoints to Kaggle on its own cadence, in the background
         bar.close()
         log.info("Phase B done: generated=%d errors=%d", made, errors)
 
@@ -199,7 +208,10 @@ class DatasetGenerator:
         records = self._select(records)
         groups = group_by_speaker(records)
         log.info("Processing %d utterances across %d speakers", len(records), len(groups))
-        self._phase_real(records)
-        refs = self._build_refs(groups)
-        self._phase_fakes(groups, refs)
-        log.info("Complete. metadata rows=%d -> %s", len(self.meta), self.meta.path)
+        try:
+            self._phase_real(records)
+            refs = self._build_refs(groups)
+            self._phase_fakes(groups, refs)
+            log.info("Complete. metadata rows=%d -> %s", len(self.meta), self.meta.path)
+        finally:
+            self.sync.flush()   # also runs on Ctrl-C / crash, so a session never loses its tail

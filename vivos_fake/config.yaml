@@ -7,7 +7,7 @@ output_root: dataset # where real/, fake/, reference/, metadata/ are written
 splits: [train, test] # VIVOS splits to process; metadata `split` = these names
 
 # How many audio to generate. Each selected utterance -> 1 real + 1 fake pair.
-limit: 100 # null = ALL utterances; or an int, e.g. 200 -> 200 real + 200 fake
+limit: null # null = ALL utterances; or an int, e.g. 200 -> 200 real + 200 fake
 max_per_speaker:
   null # null = no cap; or an int to cap utterances per speaker
   # (selection is round-robin across speakers, so `limit` stays balanced)
@@ -22,6 +22,25 @@ num_workers:
   4 # parallelism for real-audio normalization + references
   # (fake generation is serialized on the accelerator)
 overwrite: false # false => resume: skip audio already generated
+
+# Đồng bộ dataset lên Kaggle + kéo về khi khởi động (resume qua nhiều phiên Kaggle).
+# Chạy local không có token thì tắt bằng --no-kaggle-sync (hoặc enabled: false).
+kaggle_sync:
+  enabled: true # cần KAGGLE_USERNAME/KAGGLE_KEY hoặc ~/.kaggle/kaggle.json
+  handle: "sonpham12/vivos-fake" # https://www.kaggle.com/datasets/sonpham12/vivos-fake
+  single_dataset: true # true = TẤT CẢ nằm trong đúng dataset này (không chia shard -001, -002)
+  pull_on_start: true # khởi động: tải dataset trên về output_root => chạy tiếp chỗ đã dừng
+  every_clips: 1 # đẩy sau MỖI audio hợp lệ (upload chạy nền; đang upload thì gộp nhịp kế tiếp)
+  every_minutes: 0 # 0 = chỉ dựa vào every_clips
+  shard_mb: 400 # chỉ dùng khi single_dataset: false
+
+  # ĐẨY NHỮNG GÌ LÊN DATASET. metadata.csv luôn đi kèm (nó là trạng thái resume).
+  #   real      audio thật đã chuẩn hoá (real/)      -> bỏ cũng được, sinh lại từ VIVOS ~1 phút
+  #   fake      audio giả (fake/fishspeech/)         -> thứ đắt nhất, đừng bỏ
+  #   reference giọng mẫu 10-20s mỗi speaker         -> nhẹ, cần để tái tạo fake
+  #   logs      logs/*.log của phiên hiện tại        -> tiện theo dõi từ xa
+  include: [real, fake, reference]
+  exclude_patterns: [] # lọc thêm theo wildcard, vd ["real/VIVOSSPK01/*", "*_R00?.wav"]
 
 # Fish Speech S2 (fishaudio/s2-pro) local inference — set up once with setup_fish.sh.
 fishspeech:
