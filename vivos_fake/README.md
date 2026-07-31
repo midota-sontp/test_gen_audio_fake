@@ -184,9 +184,21 @@ sau khi audio đã validate, nên wav ghi dở không bao giờ lên Kaggle. Dat
 payload đã publish thì vẫn còn; muốn dựng lại sạch thì xoá `<output>/.sync/` rồi đẩy lại
 (sẽ có cảnh báo trong log khi phát hiện `include` đổi).
 
-**Auth**: `KAGGLE_USERNAME` + `KAGGLE_KEY`, hoặc `~/.kaggle/kaggle.json`. Trên Kaggle notebook:
-Add-ons → Secrets rồi export thành 2 biến môi trường đó. Token được kiểm tra ngay lúc khởi
-động (`whoami`) để sai token thì hỏng trong vài giây, không phải sau nhiều giờ sinh audio.
+**Auth** — lấy token ở <https://www.kaggle.com/settings/api> ("Generate New Token", hoặc
+"Create Legacy API Key" nếu muốn cặp username/key). kagglehub dò theo đúng thứ tự này:
+
+1. token ngầm của phiên Kaggle notebook (biến `KAGGLE_API_V1_TOKEN_PATH`)
+2. `KAGGLE_API_TOKEN`
+3. `~/.kaggle/access_token`
+4. `KAGGLE_USERNAME` + `KAGGLE_KEY`
+5. `~/.kaggle/kaggle.json`
+
+⚠️ Trong Kaggle notebook, (1) **thắng** mọi credential bạn tự đặt. Nếu token phiên không đủ
+quyền ghi dataset, phải `os.environ.pop("KAGGLE_API_V1_TOKEN_PATH", None)` trước rồi mới đặt
+token của mình.
+
+Token được kiểm tra ngay lúc khởi động (`whoami`) để sai token thì hỏng trong vài giây, không
+phải sau nhiều giờ sinh audio.
 
 ## Cấu hình (`config.yaml`)
 

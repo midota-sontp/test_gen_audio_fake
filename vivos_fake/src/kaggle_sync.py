@@ -136,8 +136,13 @@ class KaggleSync:
         except Exception as e:
             raise SystemExit(
                 f"Kaggle auth failed ({e}).\n"
-                "Set KAGGLE_USERNAME + KAGGLE_KEY, or put a token at ~/.kaggle/kaggle.json.\n"
-                "On a Kaggle notebook: Add-ons -> Secrets, then expose them as those env vars.\n"
+                "Credentials, in the order kagglehub tries them: the Kaggle-notebook session "
+                "token, KAGGLE_API_TOKEN, ~/.kaggle/access_token, KAGGLE_USERNAME + KAGGLE_KEY, "
+                "~/.kaggle/kaggle.json.\n"
+                "Get one at https://www.kaggle.com/settings/api ('Generate New Token', or "
+                "'Create Legacy API Key' for the username/key pair).\n"
+                "Inside a Kaggle notebook the session token wins unless you drop "
+                "KAGGLE_API_V1_TOKEN_PATH from the environment first.\n"
                 "Or disable syncing with kaggle_sync.enabled: false / --no-kaggle-sync."
             )
         log.info("Kaggle sync -> %s (auth ok: %s) | uploading: %s + metadata.csv%s",
