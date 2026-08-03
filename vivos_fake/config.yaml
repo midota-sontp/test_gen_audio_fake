@@ -30,9 +30,13 @@ kaggle_sync:
   handle: "sonpham12/vivos-fake" # https://www.kaggle.com/datasets/sonpham12/vivos-fake
   single_dataset: true # true = TẤT CẢ nằm trong đúng dataset này (không chia shard -001, -002)
   pull_on_start: true # khởi động: tải dataset trên về output_root => chạy tiếp chỗ đã dừng
-  every_clips: 1 # đẩy sau MỖI audio hợp lệ (upload chạy nền; đang upload thì gộp nhịp kế tiếp)
+  every_clips: 50 # checkpoint sau mỗi N audio hợp lệ (upload chạy nền; đang upload thì gộp nhịp)
+  #         với single_dataset: true thì MỖI lần đẩy là upload lại toàn bộ payload,
+  #         nên every_clips: 1 ở dataset vài GB = đốt băng thông liên tục
   every_minutes: 0 # 0 = chỉ dựa vào every_clips
   shard_mb: 400 # chỉ dùng khi single_dataset: false
+  allow_delete: false # false = từ chối đẩy nếu version mới sẽ làm mất file đã publish
+  #         (mỗi version publish payload nguyên khối: thiếu file = Kaggle xoá file đó)
 
   # ĐẨY NHỮNG GÌ LÊN DATASET. metadata.csv luôn đi kèm (nó là trạng thái resume).
   #   real      audio thật đã chuẩn hoá (real/)      -> bỏ cũng được, sinh lại từ VIVOS ~1 phút

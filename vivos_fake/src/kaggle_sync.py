@@ -23,9 +23,21 @@ Pushes run on a background thread (generation keeps going) and are coalesced: if
 is still uploading, the next tick is skipped. `flush()` is blocking and runs from the
 `finally` of the pipeline, so Ctrl-C still checkpoints.
 
-Resume across sessions = `pull()` on start: download every shard, extract into
+Resume across sessions = `pull()` on start: download every shard, restore its files into
 output_root, merge metadata. Combined with the existing skip logic, a run started on a
 fresh Kaggle session picks up exactly where the previous one stopped.
+
+Two Kaggle behaviours drive the bookkeeping here, and getting either wrong loses data:
+
+  * **Kaggle unzips what you upload.** `shard-001.zip` comes back as loose files under
+    `shard-001/...`, not as the zip. So the zip is an upload container only — never a
+    thing we can download again — and `pull()` restores file by file.
+  * **Every version publishes the payload WHOLE.** Anything absent from the payload is
+    deleted from the dataset. So the payload must always carry everything already
+    published in the open shard; `open_files` tracks that, and `push()` re-packs whatever
+    the local payload has lost (fresh machine, wiped `/kaggle/working`, deleted `.sync`)
+    before uploading. If such a file is missing from disk too, the push is refused rather
+    than published as a deletion (override: `allow_delete: true`).
 
 Auth: KAGGLE_USERNAME/KAGGLE_KEY, or ~/.kaggle/kaggle.json. Checked up front (whoami)
 so a bad token fails in seconds rather than after hours of generation.
@@ -81,6 +93,9 @@ class KaggleSync:
         # with the dataset — that is inherent to Kaggle versioning, not a bug here.
         self.single = bool(cfg.get("single_dataset", False))
         self.pull_on_start = bool(cfg.get("pull_on_start", True))
+        # A published file that is gone from disk normally means "state is broken", not
+        # "delete it": refuse the push. Set true to let the dataset shrink on purpose.
+        self.allow_delete = bool(cfg.get("allow_delete", False))
         self.include = _parse_include(cfg)
         self.exclude = list(cfg.get("exclude_patterns") or [])
 
@@ -93,6 +108,12 @@ class KaggleSync:
         self._last_push = time.monotonic()
         self._state = self._load_state()
         self._assigned: set[str] = set(self._state.get("assigned", []))
+        # subset of _assigned published in the OPEN shard: every one of these must be in
+        # the payload of the next upload, or that version silently deletes them
+        if "open_files" in self._state:
+            self._open_files: set[str] = set(self._state["open_files"])
+        else:   # state from an older version: the payload itself is the only record
+            self._open_files = self._zip_names(self._zip_path(int(self._state.get("open", 1))))
         # persisted: a crash between "zipped" and "uploaded" must still upload on restart
         self._pending = bool(self._state.get("pending", False))
 
@@ -116,6 +137,7 @@ class KaggleSync:
 
     def _save_state(self) -> None:
         self._state["assigned"] = sorted(self._assigned)
+        self._state["open_files"] = sorted(self._open_files)
         self._state["pending"] = self._pending
         tmp = self.sync_dir / (_STATE + ".tmp")
         tmp.write_text(json.dumps(self._state), encoding="utf-8")
@@ -127,6 +149,19 @@ class KaggleSync:
     def _zip_path(self, index: int) -> Path:
         name = "vivos-fake-data.zip" if self.single else f"shard-{index:03d}.zip"
         return self.sync_dir / name
+
+    def _zip_names(self, zpath: Path) -> set[str]:
+        """What the local payload actually holds. An unreadable payload is thrown away so
+        push() rebuilds it from disk instead of publishing a truncated version."""
+        if not zpath.exists():
+            return set()
+        try:
+            with zipfile.ZipFile(zpath) as z:
+                return {n for n in z.namelist() if not n.endswith("/")}
+        except Exception as e:
+            log.warning("unreadable payload %s (%s) — it will be rebuilt from disk", zpath, e)
+            zpath.unlink()
+            return set()
 
     # -- auth -------------------------------------------------------------
     def preflight(self) -> None:
@@ -202,15 +237,42 @@ class KaggleSync:
             index = int(self._state.get("open", 1))
             zpath = self._zip_path(index)
             new = [r for r in self._committed_files() if r not in self._assigned]
-            if not new and not self._pending:
+
+            # A version publishes the payload WHOLE: what it omits, Kaggle deletes. So
+            # anything already published in the open shard that the local payload no
+            # longer has (fresh machine, wiped /kaggle/working, deleted .sync) must be
+            # packed again — otherwise this upload erases it.
+            held = self._zip_names(zpath)
+            lost = sorted(r for r in self._open_files if r not in held)
+            gone = [r for r in lost if not (self.out / r).is_file()]
+            if gone and not self.allow_delete:
+                log.error(
+                    "refusing to publish: %d file(s) already on %s are missing from both the "
+                    "local payload and %s, so this version would delete them (e.g. %s). Let "
+                    "pull_on_start restore them, or accept the loss with allow_delete: true.",
+                    len(gone), self._shard_handle(index), self.out, gone[0])
+                return
+            if gone:                        # allow_delete: stop tracking them and move on
+                log.warning("no longer tracking %d vanished file(s); the next published "
+                            "version of %s will not carry them (allow_delete)",
+                            len(gone), self._shard_handle(index))
+                self._open_files.difference_update(gone)
+                self._assigned.difference_update(gone)
+                self._save_state()          # so a push with nothing new does not re-warn
+            repack = [r for r in lost if (self.out / r).is_file()]
+            if repack:
+                log.warning("payload lost %d already-published file(s) — re-packing them so "
+                            "this version keeps them", len(repack))
+
+            queue = repack + new
+            if not queue and not self._pending:
                 return          # nothing added since the last successful upload
 
-            added = 0
             with zipfile.ZipFile(zpath, "a", compression=zipfile.ZIP_STORED) as z:
-                for rel in new:
+                for rel in queue:
                     z.write(self.out / rel, arcname=rel)
-                    added += 1
-            self._assigned.update(new)
+            self._assigned.update(queue)
+            self._open_files.update(queue)
             self._pending = True
             self._save_state()
 
@@ -227,12 +289,13 @@ class KaggleSync:
                         (up / "logs").mkdir(exist_ok=True)
                         shutil.copy2(lg, up / "logs" / lg.name)
                 size_mb = zpath.stat().st_size / 1e6
-                log.info("Kaggle checkpoint: +%d files -> %s (%.0f MB)%s",
-                         added, self._shard_handle(index), size_mb, " [final]" if final else "")
+                log.info("Kaggle checkpoint: +%d new%s -> %s (%.0f MB)%s",
+                         len(new), f" (+{len(repack)} re-packed)" if repack else "",
+                         self._shard_handle(index), size_mb, " [final]" if final else "")
                 import kagglehub
                 kagglehub.dataset_upload(
                     self._shard_handle(index), str(up),
-                    version_notes=f"{len(self._assigned)} files, +{added} new",
+                    version_notes=f"{len(self._assigned)} files, +{len(new)} new",
                 )
             finally:
                 shutil.rmtree(up, ignore_errors=True)
@@ -241,6 +304,7 @@ class KaggleSync:
 
             if not self.single and zpath.stat().st_size / 1e6 >= self.shard_mb and not final:
                 self._state["open"] = index + 1     # seal: this shard is never re-uploaded
+                self._open_files = set()            # ...so nothing of it belongs in the next payload
                 self._save_state()
                 zpath.unlink()                      # ...so the local copy is dead weight
                 log.info("shard %03d sealed (>= %.0f MB) — next checkpoint opens %03d",
@@ -258,7 +322,12 @@ class KaggleSync:
 
     # -- pull -------------------------------------------------------------
     def pull(self) -> None:
-        """Restore state from Kaggle: extract every shard into output_root, merge metadata.
+        """Restore state from Kaggle: put every published file back under output_root.
+
+        Kaggle *unzips whatever it is given*, so a published payload comes back as loose
+        files under the zip's basename — the zip we uploaded is not downloadable. Every
+        file found in a shard's dataset is therefore restored one by one and recorded as
+        already published in that shard.
 
         Existing local files win (they are already validated), so pulling on top of a
         partially-populated output dir is safe.
@@ -267,7 +336,7 @@ class KaggleSync:
             return
         import kagglehub
 
-        index, restored = 1, 0
+        index, restored, per_shard = 1, 0, {}
         while True:
             h = self._shard_handle(index)
             tmp = Path(tempfile.mkdtemp(prefix=f"kgl-{index:03d}-", dir=str(self.sync_dir)))
@@ -279,70 +348,91 @@ class KaggleSync:
                     break
                 raise SystemExit(f"Kaggle pull failed on {h}: {e}")
             try:
-                for csv_file in path.rglob("metadata.csv"):
-                    self._merge_metadata(csv_file)
-                zips = sorted(path.rglob("*.zip"))   # our payload, or a zip from an older flow
-                keep = self._zip_path(index)
-                for zf in zips:
-                    restored += self._extract(zf, ours=(zf.name == keep.name))
-                # keep the payload we append to (ours if present, else start from theirs)
-                mine = [z for z in zips if z.name == keep.name]
-                if mine and not keep.exists():
-                    shutil.copy2(mine[0], keep)
-                prev = self._zip_path(index - 1)
-                if not self.single and prev.exists():
-                    prev.unlink()
+                rels, n = self._restore(path)
+                per_shard[index] = rels
+                restored += n
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
-            if self.single:
-                index += 1
-                break                               # one dataset holds everything
+            self._assigned.update(rels)
+            prev = self._zip_path(index - 1)
+            if not self.single and prev.exists():
+                prev.unlink()               # sealed shard: its local payload is dead weight
             index += 1
+            if self.single:
+                break                       # one dataset holds everything
 
-        if index == 1:
+        if not per_shard:
             log.info("Kaggle: nothing at %s yet — a new dataset will be created on the first push",
                      self._shard_handle(1))
             return
-        self._state["open"] = index - 1             # append to the newest shard; it seals on size
+        open_index = max(per_shard)
+        self._state["open"] = open_index    # append to the newest shard; it seals on size
+        # These are published in the open shard, so the next payload has to carry them
+        # again — push() re-packs them from the files just restored.
+        self._open_files = set(per_shard[open_index])
         self._save_state()
-        log.info("Kaggle pull: %d dataset(s), %d file(s) restored, %d tracked",
-                 index - 1, restored, len(self._assigned))
+        log.info("Kaggle pull: %d dataset(s), %d file(s) restored, %d tracked (%d in the open shard)",
+                 len(per_shard), restored, len(self._assigned), len(self._open_files))
 
-    def _extract(self, zf: Path, ours: bool) -> int:
-        """Unpack a payload zip into output_root.
+    def _restore(self, root: Path) -> tuple[list[str], int]:
+        """Copy one downloaded dataset into output_root.
 
-        `ours` = this is the zip we append to, so its entries are already published and
-        must not be packed again. A foreign zip (e.g. one from an older manual flow) is
-        deliberately left unassigned: the next push re-packs those files into our payload,
-        otherwise the new dataset version would silently drop them.
+        Returns (relative paths published in it, files actually written). Handles both
+        payload shapes: loose files (what Kaggle serves after unzipping our payload) and a
+        literal .zip (a payload Kaggle kept as-is, or one from an older manual flow).
         """
-        n = 0
-        meta_rel = self.meta_path.relative_to(self.out).as_posix()
+        names = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+        strip = _common_prefix(names)       # 'shard-001/' or 'dataset/' — Kaggle's unzip dir
+        rels: list[str] = []
+        written = 0
+        for name in names:
+            rel = _strip(name, strip)
+            if _skip(rel):
+                continue
+            if Path(rel).name == "metadata.csv":    # merge rows, never overwrite the CSV
+                self._merge_metadata(root / name)
+                continue
+            if rel.lower().endswith(".zip"):
+                z_rels, z_written = self._extract(root / name)
+                rels += z_rels
+                written += z_written
+                continue
+            rels.append(rel)
+            written += self._write(rel, lambda: open(root / name, "rb"))
+        self._save_state()
+        return rels, written
+
+    def _extract(self, zf: Path) -> tuple[list[str], int]:
+        """Unpack a payload zip into output_root; same contract as _restore."""
+        rels: list[str] = []
+        written = 0
         with zipfile.ZipFile(zf) as z:
             names = [x for x in z.namelist() if not x.endswith("/")]
             strip = _common_prefix(names)   # tolerates a zip made with `zip -r x.zip dataset`
             for name in names:
-                rel = name[len(strip):] if strip else name
-                if not rel or rel.startswith(".sync/"):
+                rel = _strip(name, strip)
+                if _skip(rel):
                     continue
-                if rel == meta_rel:                 # merge rows, never overwrite the CSV
+                if Path(rel).name == "metadata.csv":
                     tmpf = self.sync_dir / "_meta_in.csv"
                     with z.open(name) as src, open(tmpf, "wb") as out:
                         shutil.copyfileobj(src, out)
                     self._merge_metadata(tmpf)
                     tmpf.unlink()
                     continue
-                if ours:
-                    self._assigned.add(rel)
-                dst = self.out / rel
-                if dst.exists() and dst.stat().st_size > 0:
-                    continue                        # local copy already there — keep it
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(name) as src, open(dst, "wb") as out:
-                    shutil.copyfileobj(src, out)
-                n += 1
-        self._save_state()
-        return n
+                rels.append(rel)
+                written += self._write(rel, lambda n=name: z.open(n))
+        return rels, written
+
+    def _write(self, rel: str, opener) -> int:
+        """Materialize one restored file, keeping any local copy (it is already validated)."""
+        dst = self.out / rel
+        if dst.exists() and dst.stat().st_size > 0:
+            return 0
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with opener() as src, open(dst, "wb") as out:
+            shutil.copyfileobj(src, out)
+        return 1
 
     def _merge_metadata(self, remote_csv: Path) -> None:
         """Union remote rows into the local metadata.csv (dedup on audio_path)."""
@@ -403,9 +493,11 @@ def _parse_include(cfg: dict) -> set[str]:
 
 
 def _common_prefix(names: list[str]) -> str:
-    """'dataset/' for a zip built as `zip -r dataset.zip dataset`, '' for ours.
+    """The wrapper dir to drop: 'shard-001/' after Kaggle unzips our payload, 'dataset/'
+    for a zip built as `zip -r dataset.zip dataset`, '' when the roots are already ours.
 
-    Lets a payload from an older/manual flow be restored into output_root unchanged.
+    Root-level files (metadata.csv) are ignored when deciding — they never sit under the
+    wrapper — and _strip() leaves them alone.
     """
     tops = {n.split("/", 1)[0] for n in names if "/" in n}
     if len(tops) == 1:
@@ -413,6 +505,16 @@ def _common_prefix(names: list[str]) -> str:
         if top not in _ROOTS:
             return top + "/"
     return ""
+
+
+def _strip(name: str, prefix: str) -> str:
+    return name[len(prefix):] if prefix and name.startswith(prefix) else name
+
+
+def _skip(rel: str) -> bool:
+    """Never restore our own sync state, nor dotfiles (.DS_Store, kagglehub markers) —
+    they would then be packed into the payload and published as dataset content."""
+    return not rel or any(part.startswith(".") for part in rel.split("/"))
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:

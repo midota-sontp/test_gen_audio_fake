@@ -125,8 +125,9 @@ kaggle_sync:
 
 hoặc `python cli.py --kaggle-handle <user>/<slug> ...`; chạy local không có token thì `--no-kaggle-sync`.
 
-- **Khởi động**: tải toàn bộ shard đã có về `output_root`, gộp `metadata.csv` → chạy tiếp
-  đúng chỗ đã dừng (kết hợp với logic resume sẵn có).
+- **Khởi động**: tải toàn bộ shard đã có về `output_root` (từng file một), gộp
+  `metadata.csv` → chạy tiếp đúng chỗ đã dừng (kết hợp với logic resume sẵn có). File đã có
+  ở local thì **giữ nguyên**, không bị ghi đè.
 - **Trong lúc chạy**: cứ mỗi `every_clips` fake mới (hoặc `every_minutes` phút) thì
   checkpoint. Upload chạy **thread nền** nên không chặn việc sinh audio; nếu lần upload
   trước chưa xong thì bỏ qua nhịp này.
@@ -146,9 +147,21 @@ Audio được gói vào một **payload zip** (`.sync/vivos-fake-data.zip`) r�
 Với `every_clips: 1` thì mỗi audio hợp lệ đều kích hoạt đẩy; nhịp nào rơi vào lúc đang
 upload thì bị gộp, nên thực tế là "đẩy liên tục hết mức có thể" chứ không xếp hàng chồng lên nhau.
 
-Nếu dataset trên Kaggle có sẵn zip từ luồng cũ (`zip -r dataset.zip dataset`), pull vẫn giải
-nén đúng chỗ (tự bỏ tiền tố `dataset/`) và **gói lại vào payload của mình** — nếu không, version
-sau sẽ làm mất đám file đó.
+### Hai hành vi của Kaggle quyết định cách resume (⚠️ sai là mất dữ liệu)
+
+1. **Kaggle tự giải nén file zip mình upload.** `vivos-fake-data.zip` lên tới Kaggle thì
+   thành các file rời trong thư mục `vivos-fake-data/...` — **không tải lại được cái zip**.
+   Nên zip chỉ là *bao bì để upload*, còn `pull()` phục hồi **từng file rời** (tự bỏ tiền tố
+   `vivos-fake-data/`, `shard-001/`, hay `dataset/` của luồng cũ).
+2. **Mỗi version publish payload NGUYÊN KHỐI** — thứ gì không có trong payload là Kaggle
+   **xoá** khỏi dataset. Nên payload luôn phải mang theo mọi file đã publish ở shard đang
+   mở: `.sync/state.json` ghi lại danh sách đó (`open_files`), và trước mỗi lần đẩy,
+   `push()` **gói lại** những file đã publish mà payload local đang thiếu (máy mới,
+   `/kaggle/working` bị xoá, xoá `.sync/`).
+
+Nếu một file đã publish mà **vừa** không có trong payload **vừa** không có trên đĩa thì
+lần đẩy đó bị **từ chối** (log `refusing to publish: ...`) thay vì publish một version xoá
+mất nó. Muốn cho dataset co lại thật thì đặt `allow_delete: true`.
 
 | khoá | mặc định | ý nghĩa |
 |---|---|---|
@@ -159,6 +172,7 @@ sau sẽ làm mất đám file đó.
 | `every_clips` | `200` | checkpoint sau mỗi N fake mới (`1` = sau mỗi audio; 0 = tắt) |
 | `every_minutes` | `20` | ...hoặc sau ngần này phút (0 = tắt) |
 | `shard_mb` | `400` | ngưỡng niêm phong shard — bỏ qua khi `single_dataset: true` |
+| `allow_delete` | `false` | `true` = cho phép publish version thiếu file đã publish (dataset co lại) |
 | `include` | `[real, fake, reference]` | **đẩy những gì lên dataset** (xem dưới) |
 | `exclude_patterns` | `[]` | lọc thêm theo wildcard, vd `["real/VIVOSSPK01/*"]` |
 | `include_real` | — | cách viết tắt cũ; `false` = bỏ `real` khỏi `include` |
@@ -174,7 +188,7 @@ sau sẽ làm mất đám file đó.
 
 `metadata.csv` **luôn** được đẩy — nó chính là trạng thái resume, bỏ đi là mất khả năng chạy
 tiếp. Nó và `logs/` nằm **rời** cạnh zip và được làm mới mỗi lần đẩy (vì chúng thay đổi liên
-tục); audio thì gói vào zip đúng một lần.
+tục); audio thì gói vào zip một lần cho mỗi shard.
 
 Chỉ file **đã có trong `metadata.csv`** mới được upload — mà một dòng metadata chỉ được ghi
 sau khi audio đã validate, nên wav ghi dở không bao giờ lên Kaggle. Dataset tạo ra ở chế độ
