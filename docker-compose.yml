@@ -33,6 +33,7 @@ services:
       - "8501:8501"
     volumes:
       - ./data:/workspace/data
+      - ./checkpoints:/workspace/checkpoints
       - ./reports:/workspace/reports
       - ./experiments:/workspace/experiments
       - ./configs:/workspace/configs
