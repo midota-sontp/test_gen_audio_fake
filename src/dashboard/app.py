@@ -79,6 +79,8 @@ def main() -> None:
 
     st.title("Giám sát pipeline")
 
+    _section_self_detect(cfg)
+    st.divider()
     _section_pipeline(status)
     c1, c2 = st.columns(2)
     with c1:
@@ -96,6 +98,50 @@ def main() -> None:
     if auto:
         time.sleep(int(interval))
         st.rerun()
+
+
+@st.cache_resource(show_spinner="Đang tải mô hình (WavLM + MLP)...")
+def _load_self_detect_models(_cfg, ckpt_path: str, ckpt_mtime: float):
+    from src.inference.detect import load_classifier, load_extractor
+    extractor = load_extractor(_cfg)
+    model = load_classifier(_cfg, ckpt_path)
+    return extractor, model
+
+
+def _section_self_detect(cfg) -> None:
+    st.subheader("🔍 Tự kiểm tra file âm thanh của bạn")
+    ckpt_path = resolve(cfg.paths.checkpoint_dir) / "best.pt"
+    if not ckpt_path.exists():
+        st.info("Chưa có checkpoint đã huấn luyện (`checkpoints/best.pt`). "
+                 "Hãy chạy xong bước huấn luyện trước khi dùng mục này.")
+        return
+
+    uploaded = st.file_uploader(
+        "Tải lên một file âm thanh để kiểm tra thật/giả",
+        type=["wav", "mp3", "flac", "ogg", "m4a"],
+    )
+    if uploaded is None:
+        return
+
+    st.audio(uploaded)
+    from src.inference.detect import predict_bytes
+    with st.spinner("Đang phân tích..."):
+        try:
+            extractor, model = _load_self_detect_models(
+                cfg, str(ckpt_path), ckpt_path.stat().st_mtime)
+            result = predict_bytes(cfg, extractor, model, uploaded.getvalue())
+        except Exception as e:
+            st.error(f"Lỗi khi phân tích: {e}")
+            return
+
+    prob = result["probability_fake"]
+    if result["prediction"] == "fake":
+        st.error(f"🔴 Dự đoán: **GIẢ (AI)** — xác suất giả = {prob:.1%}")
+    else:
+        st.success(f"🟢 Dự đoán: **THẬT** — xác suất giả = {prob:.1%}")
+    st.progress(min(1.0, max(0.0, prob)))
+    st.caption(f"Độ dài file: {result['raw_seconds']}s · ngưỡng quyết định = "
+               f"{cfg.evaluate.decision_threshold}")
 
 
 def _section_pipeline(status: dict) -> None:
