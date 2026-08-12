@@ -1,0 +1,43 @@
+# =============================================================================
+# Cấu hình cho Kaggle Notebook (GPU T4 / P100).
+# Dùng: python -m aidetector run -c configs/kaggle.yaml
+#
+# Khác bản mặc định ở ba điểm:
+#   1. Đường dẫn nằm trong /kaggle/working (nơi duy nhất ghi được và được lưu lại).
+#   2. Bật OmniVoice — voice cloning chỉ thực sự chạy nổi khi có GPU.
+#   3. Batch lớn hơn để tận dụng GPU khi trích đặc trưng.
+# =============================================================================
+
+extends: default.yaml
+
+paths:
+  corpus: /kaggle/working/corpus
+  features: /kaggle/working/features
+  checkpoints: /kaggle/working/checkpoints
+  reports: /kaggle/working/reports
+
+generate:
+  device: cuda
+  # OmniVoice là engine cloning: cùng speaker, cùng câu nói với real ⇒ dữ liệu khó
+  # nhất và giá trị nhất. Trên CPU gần như không chạy nổi, nên chỉ bật ở đây.
+  engines: [piper, kokoro, omnivoice]
+  options:
+    piper:
+      data_dir: /kaggle/working/models/piper
+    omnivoice:
+      # Bản fine-tune tiếng Việt; đổi về k2-fsa/OmniVoice nếu muốn bản gốc đa ngữ.
+      checkpoint: g-group-ai-lab/g-omnivoice
+      dtype: float16
+
+features:
+  device: cuda
+  batch_size: 32          # GPU 16GB thoải mái với clip 10 giây
+
+train:
+  device: cuda
+  batch_size: 128
+
+# Giữ một engine riêng cho test để biết mô hình có tổng quát sang engine lạ không.
+# Bỏ trống nếu muốn dùng toàn bộ dữ liệu để huấn luyện.
+splits:
+  holdout_generators: []

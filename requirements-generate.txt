@@ -1,0 +1,12 @@
+# Engine sinh audio giả — cài riêng vì nặng và không bắt buộc để huấn luyện.
+# Cài từng cái cũng được; engine thiếu sẽ tự bị bỏ qua (xem `python -m aidetector info`).
+
+# Piper — ONNX, chạy rất nhanh trên CPU (kể cả Apple Silicon).
+piper-tts>=1.3.0
+
+# Kokoro tiếng Việt — bản fine-tune cộng đồng của Kokoro-82M (13 giọng vi).
+kokoro-vietnamese @ git+https://github.com/iamdinhthuan/Kokoro-Vietnamese.git
+
+# OmniVoice — zero-shot voice cloning, 600+ ngôn ngữ. Nên có GPU (CUDA) hoặc MPS.
+# Bản fine-tune riêng cho tiếng Việt: checkpoint `g-group-ai-lab/g-omnivoice`.
+omnivoice>=0.1.0

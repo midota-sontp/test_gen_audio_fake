@@ -1,9 +1,25 @@
-/dataset/
-# --- WavLM training pipeline artifacts ---
-models/
-data/
-checkpoints/
-reports/
-experiments/
+# --- Dữ liệu & artifact (không đẩy lên git) ---
+# Neo bằng "/" ở đầu: nếu không, `corpus/` sẽ khớp cả package nguồn
+# aidetector/corpus/ và loại nhầm code khỏi repo.
+/corpus/
+/features/
+/checkpoints/
+/reports/
+/experiments/
+/models/
+/raw/
+/noise/
+/rir/
+/samples/
+
+# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Hệ thống ---
+.DS_Store

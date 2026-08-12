@@ -1,45 +1,46 @@
-services:
-  # Full training pipeline on the LOCAL dataset:
-  #   download(local ingest) -> preprocess -> extract(WavLM) -> train -> evaluate
-  # CPU-only. WavLM weights download once into the hf_cache volume (needs internet on
-  # the first run); mount ./models/wavlm-base instead to run fully offline.
-  train:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.train
-    image: ai-detector:train
-    volumes:
-      # Input dataset (read-only).
-      - ./dataset:/workspace/dataset:ro
-      # Optional offline WavLM weights (used automatically if present).
-      - ./models:/workspace/models:ro
-      # Persisted artifacts + HF weights cache (survive container restarts).
-      - ./data:/workspace/data
-      - ./checkpoints:/workspace/checkpoints
-      - ./reports:/workspace/reports
-      - ./experiments:/workspace/experiments
-      - ./configs:/workspace/configs
-      - hf_cache:/hf_cache
-    command: ["python", "run_pipeline.py", "--config", "configs/mvp.yaml"]
+# Tất cả service dùng chung một image và cùng bộ mount, chỉ khác lệnh chạy.
+# Dữ liệu host cần ingest: đặt vào ./raw (hoặc sửa mount `- ./raw:/data:ro`).
 
-  # Realtime dashboard (tiếng Việt) — đọc artifact mà service `train` ghi ra.
-  # Mở http://localhost:8501 . Dùng chung image + các mount data/reports/experiments.
-  dashboard:
-    image: ai-detector:train
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.train
-    ports:
-      - "8501:8501"
-    volumes:
-      - ./data:/workspace/data
-      - ./checkpoints:/workspace/checkpoints
-      - ./reports:/workspace/reports
-      - ./experiments:/workspace/experiments
-      - ./configs:/workspace/configs
-    command: ["streamlit", "run", "src/dashboard/app.py",
-              "--server.port", "8501", "--server.address", "0.0.0.0",
-              "--server.headless", "true", "--browser.gatherUsageStats", "false"]
+x-common: &common
+  image: ai-detector:latest
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+    args:
+      # Đặt 1 để cài luôn piper / kokoro / omnivoice vào image.
+      WITH_GENERATORS: ${WITH_GENERATORS:-0}
+  volumes:
+    - ./raw:/data:ro              # dataset thô (chỉ đọc)
+    - ./corpus:/workspace/corpus  # dữ liệu đã chuẩn hoá + manifest.csv
+    - ./features:/workspace/features
+    - ./checkpoints:/workspace/checkpoints
+    - ./reports:/workspace/reports
+    - ./models:/workspace/models  # giọng Piper, checkpoint tải về
+    - ./configs:/workspace/configs
+    - hf_cache:/hf_cache          # cache WavLM & HuggingFace
+  environment:
+    - HF_TOKEN=${HF_TOKEN:-}
+
+services:
+  # Nạp dataset thật: docker compose run --rm ingest /data/vivos
+  ingest:
+    <<: *common
+    command: ["ingest"]
+
+  # Sinh fake: docker compose run --rm generate --engines piper --count 1000
+  generate:
+    <<: *common
+    command: ["generate"]
+
+  # Huấn luyện trọn gói từ corpus đã có: split → features → train → evaluate
+  pipeline:
+    <<: *common
+    command: ["run", "split", "features", "train", "evaluate"]
+
+  # Lệnh tuỳ ý: docker compose run --rm cli detect /data/thu.wav
+  cli:
+    <<: *common
+    command: ["info"]
 
 volumes:
   hf_cache:

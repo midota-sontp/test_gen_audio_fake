@@ -1,28 +1,34 @@
-# CPU-only image (Docker on macOS cannot access Apple MPS/Metal).
+# CPU-only image cho toàn pipeline (chuẩn hoá dữ liệu → WavLM → classifier).
+# Engine sinh fake cài thêm qua ARG WITH_GENERATORS=1.
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/workspace/data/.hfcache
+    HF_HOME=/hf_cache \
+    OMP_NUM_THREADS=4
+
+# ffmpeg cần cho augment MP3/AAC và đọc mp3/m4a; libsndfile cho soundfile.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg libsndfile1 git \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
-# System deps for librosa/soundfile audio decoding
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libsndfile1 ffmpeg git && \
-    rm -rf /var/lib/apt/lists/*
+# Torch CPU trước (bánh xe riêng, nhẹ hơn bản mặc định rất nhiều).
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+        torch torchaudio
 
-# Install CPU-only torch/torchaudio, then the rest of the requirements
-COPY requirements.txt .
-RUN pip install --index-url https://download.pytorch.org/whl/cpu \
-        torch==2.2.2 torchaudio==2.2.2 && \
-    pip install -r requirements.txt
+COPY requirements.txt requirements-generate.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Project code (data/checkpoints/reports come in via mounted volumes)
-COPY src/ src/
-COPY scripts/ scripts/
-COPY configs/ configs/
-COPY run_pipeline.py .
+# Engine TTS/cloning là tuỳ chọn: docker compose build --build-arg WITH_GENERATORS=1
+ARG WITH_GENERATORS=0
+RUN if [ "$WITH_GENERATORS" = "1" ]; then \
+        pip install --no-cache-dir -r requirements-generate.txt; \
+    fi
 
-CMD ["python", "run_pipeline.py", "--config", "configs/mvp.yaml"]
+COPY aidetector ./aidetector
+COPY configs ./configs
+
+ENTRYPOINT ["python", "-m", "aidetector"]
+CMD ["info"]

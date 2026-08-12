@@ -1,0 +1,120 @@
+# =============================================================================
+# ai-detector — cấu hình mặc định
+# Mọi stage đọc đúng file này. Ghi đè nhanh từ CLI: --set train.lr=1e-4
+# =============================================================================
+
+seed: 42
+language: vi
+
+paths:
+  corpus: corpus          # dữ liệu đã chuẩn hoá + manifest.csv
+  features: features      # cache embedding (tách thư mục theo từng backbone)
+  checkpoints: checkpoints
+  reports: reports
+
+# -----------------------------------------------------------------------------
+# CHUẨN AUDIO — mọi file trong corpus đều bị ép về đúng các thông số này.
+# -----------------------------------------------------------------------------
+audio:
+  sample_rate: 16000
+  channels: 1
+  subtype: PCM_16          # 16-bit PCM
+  min_seconds: 3.0
+  max_seconds: 10.0
+  target_rms_dbfs: -23.0   # chuẩn hoá mức âm lượng
+  peak_ceiling_dbfs: -1.0  # chừa headroom, tránh clipping
+  trim_silence: true
+  trim_top_db: 35.0
+  keep_silence_ms: 60.0
+  long_policy: split       # split | crop | drop  — file dài hơn max_seconds
+  short_policy: drop       # drop | pad           — file ngắn hơn min_seconds
+
+# -----------------------------------------------------------------------------
+# Sinh FAKE dataset
+# Thêm engine mới: tạo file trong aidetector/generate/ rồi thêm tên vào đây.
+# -----------------------------------------------------------------------------
+generate:
+  device: auto             # cpu | mps | cuda | auto
+  engines: [piper, kokoro] # thêm `omnivoice` khi máy có GPU/MPS
+  fake_to_real_ratio: 1.0  # tổng fake ≈ tổng real, chia đều cho các engine
+  min_words: 6             # lọc câu để audio ra rơi vào khoảng 3–10 giây
+  max_words: 40
+  # texts_file: data/texts_vi.txt   # chỉ dùng khi corpus REAL không có transcript
+
+  voices:                  # bỏ trống ⇒ dùng toàn bộ giọng mặc định của engine
+    piper: [vi_VN-vais1000-medium, vi_VN-25hours_single-low, vi_VN-vivos-x_low]
+    kokoro: [diem_trinh, hung_thinh, mai_linh, manh_dung, my_yen, ngoc_huyen,
+             phat_tai, thanh_dat, tuan_ngoc]
+
+  options:
+    piper:
+      data_dir: models/piper
+    omnivoice:
+      checkpoint: k2-fsa/OmniVoice    # bản vi: g-group-ai-lab/g-omnivoice
+      dtype: auto
+
+# -----------------------------------------------------------------------------
+# Augmentation — áp dụng NHƯ NHAU cho real và fake; bản clean luôn được giữ lại.
+# -----------------------------------------------------------------------------
+augment:
+  copies: 1                # số bản biến dạng cho mỗi utterance
+  max_ops: 2               # tối đa bao nhiêu phép chồng lên nhau
+  splits: [train]          # chỉ augment train; val/test giữ sạch để đo cho đúng
+  # noise_dir: noise       # thư mục nhiễu nền thật (MUSAN, WHAM, ...)
+  # rir_dir: rir           # thư mục impulse response
+  ops:
+    codec:            {p: 0.50, codecs: [mp3, aac], bitrates: [32, 48, 64, 96]}
+    background_noise: {p: 0.40, snr_range: [5.0, 20.0]}
+    band_limit:       {p: 0.25}
+    reverb:           {p: 0.20, rt60_range: [0.15, 0.6]}
+    gain:             {p: 0.20, db_range: [-6.0, 6.0]}
+    speed_perturb:    {p: 0.10}
+
+# -----------------------------------------------------------------------------
+# Chia tập
+# -----------------------------------------------------------------------------
+splits:
+  ratios: [0.70, 0.15, 0.15]
+  respect_source_hints: false   # true ⇒ tôn trọng train/test có sẵn của nguồn
+  holdout_generators: []        # vd [piper] ⇒ đo khả năng tổng quát sang engine lạ
+
+# -----------------------------------------------------------------------------
+# Backbone trích đặc trưng (đóng băng)
+# Đổi model khác: name = wavlm | wav2vec2 | hubert | whisper
+# -----------------------------------------------------------------------------
+features:
+  device: auto
+  batch_size: 8
+  backbone:
+    name: wavlm
+    checkpoint: microsoft/wavlm-base-plus
+    output_layer: 6        # layer giữa tách dấu vết tổng hợp tốt hơn layer cuối
+    pooling: mean          # mean | mean_std | max | first
+                           # mean_std nhân đôi số chiều đầu vào (tự động nhận)
+
+# -----------------------------------------------------------------------------
+# Classifier head
+# -----------------------------------------------------------------------------
+model:
+  head: mlp                # linear | mlp | deep_mlp
+  hidden_dim: 256
+  dropout: 0.3
+
+train:
+  device: auto
+  epochs: 100
+  batch_size: 64
+  lr: 0.0005
+  weight_decay: 0.01
+  num_workers: 0
+  scheduler:
+    factor: 0.5
+    patience: 5
+  early_stopping:
+    monitor: val_eer       # val_eer | val_loss
+    patience: 20
+    min_delta: 0.0001
+
+monitoring:
+  overfitting:
+    warning: 0.30          # cảnh báo khi val_loss - train_loss vượt mức này
