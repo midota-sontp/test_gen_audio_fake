@@ -10,7 +10,7 @@ import numpy as np
 from ..corpus.manifest import Manifest
 from ..corpus.schema import LABEL_FAKE, LABEL_REAL, Record, make_utt_id
 from ..corpus.spec import AudioSpec, normalize
-from ..utils import get_logger, progress, stable_rand
+from ..utils import get_logger, progress, stable_id, stable_rand
 from .base import (  # noqa: F401
     KIND_CLONE,
     KIND_TTS,
@@ -26,6 +26,9 @@ from .texts import FALLBACK_SENTENCES, is_usable, load_texts
 from . import kokoro_vi, omnivoice, piper  # noqa: F401,E402
 
 log = get_logger("aidetector.generate")
+
+#: Nguồn ghi vào manifest cho fake sinh từ câu dự phòng (không có real đối chứng).
+FALLBACK_SOURCE = "fallback"
 
 # Reference cho voice cloning: OmniVoice khuyến nghị 3–25 giây.
 MIN_REF_SECONDS = 3.0
@@ -140,12 +143,19 @@ def generate_fakes(
         fallback = load_texts(extra_texts) if extra_texts else FALLBACK_SENTENCES
         log.warning(
             "Corpus REAL không có transcript dùng được — chuyển sang %d câu dự phòng. "
-            "Fake sẽ không ghép cặp được theo nội dung với real.", len(fallback)
+            "Fake sẽ KHÔNG ghép cặp được với real (khác nội dung, khác người nói), nên "
+            "mô hình dễ học nhầm sang đặc trưng nội dung. Hãy dùng bộ dữ liệu có "
+            "transcript (VIVOS, Common Voice) nếu muốn kết quả đáng tin.",
+            len(fallback),
         )
+        # `speaker` để RỖNG có chủ đích: câu dự phòng không thuộc về người nói thật
+        # nào cả. Bịa ra speaker giả ở đây sẽ khiến bước chia tập speaker-disjoint
+        # tưởng chúng là người thật và rải fake khắp các split, trong khi toàn bộ
+        # real (ít speaker) dồn vào một split — kết cục là train/val mất hẳn một lớp.
         targets = [
-            Record(utt_id="", path="", label=LABEL_REAL, source="fallback",
-                   speaker=f"text{i:04d}", text=text)
-            for i, text in enumerate(fallback * (count // max(len(fallback), 1) + 1))
+            Record(utt_id="", path="", label=LABEL_REAL, source=FALLBACK_SOURCE,
+                   speaker="", text=text)
+            for text in (fallback * (count // max(len(fallback), 1) + 1))
         ][:count]
 
     log.info(
@@ -157,7 +167,10 @@ def generate_fakes(
     stats: Counter[str] = Counter()
     for i, target in enumerate(progress(targets, total=len(targets), label=f"generate:{engine_id}")):
         voice = voice_list[i % len(voice_list)]
-        utt_id = make_utt_id(engine_id, target.speaker, f"{target.utt_id}|{voice}")
+        # Câu dự phòng không có utt gốc ⇒ lấy chính nội dung câu làm khoá, nếu không
+        # mọi bản sinh ra sẽ trùng utt_id và đè lên nhau.
+        key = f"{target.utt_id}|{voice}" if target.utt_id else f"fallback:{stable_id(target.text)}|{voice}"
+        utt_id = make_utt_id(engine_id, target.speaker, key)
         if not overwrite and utt_id in manifest:
             stats["skip_exists"] += 1
             continue

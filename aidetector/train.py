@@ -28,7 +28,18 @@ def _load_split(store: FeatureStore, manifest: Manifest, split: str):
         raise RuntimeError(
             f"Split {split!r} không có embedding nào. Chạy `python -m aidetector features` trước."
         )
-    log.info("  %-5s: %d mẫu (real=%d fake=%d)", split, len(y), int((y == 0).sum()), int((y == 1).sum()))
+    n_real, n_fake = int((y == 0).sum()), int((y == 1).sum())
+    log.info("  %-5s: %d mẫu (real=%d fake=%d)", split, len(y), n_real, n_fake)
+    # Thiếu một lớp là hỏng từ gốc: loss vẫn giảm đẹp, EER ra nan, và mô hình học
+    # được đúng một điều là "đoán bừa một lớp". Chặn ngay thay vì để chạy tiếp.
+    if n_real == 0 or n_fake == 0:
+        missing = "real" if n_real == 0 else "fake"
+        raise RuntimeError(
+            f"Split {split!r} không có mẫu {missing} nào (real={n_real}, fake={n_fake}) — "
+            f"không huấn luyện/đo được. Kiểm tra `python -m aidetector split` xem hai lớp "
+            f"có được chia đều không; thường là do corpus quá ít speaker hoặc fake không "
+            f"gắn với speaker thật."
+        )
     return X, y, records
 
 
@@ -129,6 +140,12 @@ def train(
         history.append(row)
 
         primary = val_eer if monitor == "val_eer" else val_loss
+        if not np.isfinite(primary):
+            # Không để một chỉ số hỏng làm mọi epoch đều "không cải thiện" (mọi so
+            # sánh với nan đều False) rồi kết thúc mà chẳng lưu checkpoint nào.
+            log.warning("Chỉ số %s = %s ở epoch %d — tạm theo dõi val_loss thay thế",
+                        monitor, primary, epoch)
+            primary = val_loss
         score = (primary, val_loss)
         improved = primary < best_score[0] - min_delta or (
             abs(primary - best_score[0]) <= min_delta and val_loss < best_score[1]
@@ -174,6 +191,15 @@ def train(
         writer = csv.DictWriter(fh, fieldnames=list(history[0]))
         writer.writeheader()
         writer.writerows(history)
+
+    # Không bao giờ được báo thành công khi chưa ghi được checkpoint nào — nếu không
+    # lỗi sẽ nổ ở `evaluate` dưới dạng "thiếu best.pt", rất khó lần ngược nguyên nhân.
+    checkpoint = Path(checkpoint_dir) / "best.pt"
+    if best_epoch < 0 or not checkpoint.exists():
+        raise RuntimeError(
+            f"Huấn luyện kết thúc mà không lưu được checkpoint nào ({checkpoint}). "
+            f"Chỉ số theo dõi ({monitor}) không hợp lệ ở mọi epoch — xem {history_path}."
+        )
 
     summary = {
         "epochs_run": len(history),

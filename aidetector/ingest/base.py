@@ -74,19 +74,73 @@ def available_adapters() -> dict[str, type[SourceAdapter]]:
     return dict(_REGISTRY)
 
 
-def detect_adapter(root: Path) -> tuple[type[SourceAdapter], float]:
-    """Chọn adapter khớp nhất với thư mục `root`."""
+#: Số tầng thư mục con được dò khi thư mục gốc không khớp adapter chuyên biệt nào.
+#: Cần vì Kaggle/Zenodo hay bọc thêm vài tầng: <slug>/archive/vivos/train/waves/...
+#: Dò sâu vẫn rẻ nhờ rào "bỏ qua thư mục có quá nhiều con" bên dưới.
+MAX_PROBE_DEPTH = 4
+
+
+def _candidate_roots(root: Path, max_depth: int) -> list[Path]:
+    """`root` và các thư mục con của nó, nông trước sâu sau."""
+    candidates = [root]
+    frontier = [root]
+    for _ in range(max_depth):
+        nxt: list[Path] = []
+        for parent in frontier:
+            try:
+                children = sorted(
+                    p for p in parent.iterdir() if p.is_dir() and not p.name.startswith(".")
+                )
+            except (OSError, PermissionError):
+                continue
+            # Thư mục chứa quá nhiều thư mục con thường là kho speaker/clip, không
+            # phải lớp bọc — chui vào đó chỉ tốn thời gian.
+            if len(children) > 24:
+                continue
+            nxt.extend(children)
+        candidates.extend(nxt)
+        frontier = nxt
+    return candidates
+
+
+def _best_adapter_at(root: Path) -> tuple[float, type[SourceAdapter]] | None:
     scores = sorted(
         ((cls.probe(root), cls) for cls in _REGISTRY.values()),
-        key=lambda pair: pair[0],
+        key=lambda pair: (pair[0], pair[1].name),
         reverse=True,
     )
-    if not scores or scores[0][0] <= 0:
+    return scores[0] if scores and scores[0][0] > 0 else None
+
+
+def detect_adapter(
+    root: Path, max_depth: int = MAX_PROBE_DEPTH
+) -> tuple[type[SourceAdapter], float, Path]:
+    """Chọn adapter khớp nhất, dò cả các thư mục con.
+
+    Trả về `(adapter, điểm, thư mục thực sự dùng)` — thư mục trả về có thể nằm sâu
+    hơn `root` khi dataset bị bọc thêm tầng.
+    """
+    best: tuple[float, type[SourceAdapter], Path] | None = None
+    for candidate in _candidate_roots(root, max_depth):
+        found = _best_adapter_at(candidate)
+        if found is None:
+            continue
+        score, cls = found
+        # Nông hơn thì thắng khi điểm bằng nhau: ưu tiên bao trọn dataset.
+        depth = len(candidate.relative_to(root).parts)
+        if best is None or (score, -depth) > (best[0], -len(best[2].relative_to(root).parts)):
+            best = (score, cls, candidate)
+
+    if best is None:
         raise ValueError(
-            f"Không nhận diện được dataset tại {root}. "
+            f"Không nhận diện được dataset tại {root} (đã dò tới {max_depth} tầng con). "
             f"Chỉ định thủ công bằng --adapter <{'|'.join(sorted(_REGISTRY))}>"
         )
-    score, cls = scores[0]
-    others = ", ".join(f"{c.name}={s:.2f}" for s, c in scores[1:4])
-    log.info("Nhận diện dataset: %s (điểm %.2f)%s", cls.name, score, f" · khác: {others}" if others else "")
-    return cls, score
+
+    score, cls, effective = best
+    where = "" if effective == root else f" tại {effective.relative_to(root)}/"
+    log.info("Nhận diện dataset: %s (điểm %.2f)%s", cls.name, score, where)
+    if effective != root:
+        log.info("Bỏ qua %d tầng thư mục bọc ngoài — dùng %s",
+                 len(effective.relative_to(root).parts), effective)
+    return cls, score, effective

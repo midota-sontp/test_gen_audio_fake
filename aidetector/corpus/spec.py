@@ -21,6 +21,7 @@ hình học "mẹo" theo định dạng thay vì theo dấu vết giả mạo).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -217,11 +218,23 @@ def check_quality(
     return issues
 
 
-def iter_audio_files(root: str | Path, extensions: tuple[str, ...] = (
-    ".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".aac", ".wma",
-)) -> Iterator[Path]:
-    """Duyệt đệ quy mọi file audio dưới `root` (bỏ file ẩn)."""
-    root = Path(root)
-    for path in sorted(root.rglob("*")):
-        if path.is_file() and path.suffix.lower() in extensions and not path.name.startswith("."):
-            yield path
+AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".aac", ".wma")
+
+
+def iter_audio_files(
+    root: str | Path, extensions: tuple[str, ...] = AUDIO_EXTENSIONS
+) -> Iterator[Path]:
+    """Duyệt đệ quy mọi file audio dưới `root` (bỏ file ẩn).
+
+    Lười thật sự: sinh ra tới đâu duyệt tới đó thay vì liệt kê hết cây thư mục
+    trước. Quan trọng vì `probe()` chỉ cần biết "có file audio nào không" — với bộ
+    dữ liệu hàng chục nghìn file, `sorted(rglob("*"))` sẽ tốn hàng giây mỗi lần dò.
+    Thứ tự vẫn tất định nhờ sắp xếp trong từng thư mục.
+    """
+    for dirpath, dirnames, filenames in os.walk(Path(root)):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        for name in sorted(filenames):
+            if name.startswith("."):
+                continue
+            if Path(name).suffix.lower() in extensions:
+                yield Path(dirpath) / name

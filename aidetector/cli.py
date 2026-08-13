@@ -74,7 +74,11 @@ def cmd_ingest(args) -> int:
         if not root.exists():
             log.error("Không tồn tại: %s", root)
             return 2
-        cls = get_adapter(args.adapter) if args.adapter != "auto" else detect_adapter(root)[0]
+        if args.adapter == "auto":
+            # `root` có thể bị đẩy xuống sâu hơn: Kaggle/Zenodo hay bọc thêm tầng.
+            cls, _, root = detect_adapter(root)
+        else:
+            cls = get_adapter(args.adapter)
         adapter = cls()
         name = args.name or root.name
 

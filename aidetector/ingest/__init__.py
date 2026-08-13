@@ -108,6 +108,20 @@ def ingest_source(
         "Ingest %s: giữ %d · bỏ (không đạt chuẩn) %d · đã có sẵn %d · %d speaker",
         source_name, stats["kept"], stats["drop_invalid"], stats["skip_exists"], len(speaker_count),
     )
+    # Corpus một speaker không chia speaker-disjoint được — báo ngay ở đây thay vì
+    # để lỗi lộ ra ba bước sau dưới dạng "split thiếu một lớp".
+    if stats["kept"] and len(speaker_count) < 3:
+        log.warning(
+            "Chỉ nhận diện được %d speaker — không đủ để chia train/val/test "
+            "speaker-disjoint. Có thể adapter %r đọc sai cấu trúc thư mục; kiểm tra cột "
+            "`speaker` trong manifest.csv.", len(speaker_count), type(adapter).name,
+        )
+    if stats["skip_speaker_full"] > 10 * max(stats["kept"], 1):
+        log.warning(
+            "Bỏ qua %d utterance vì chạm trần --per-speaker=%s trong khi chỉ giữ được %d "
+            "— trần này đang siết quá chặt so với số speaker thực tế.",
+            stats["skip_speaker_full"], per_speaker, stats["kept"],
+        )
     # Trả về đủ mọi khoá (kể cả 0) để phía gọi không phải dò KeyError.
     keys = ("kept", "drop_invalid", "skip_exists", "skip_no_audio", "skip_speaker_full")
     return {

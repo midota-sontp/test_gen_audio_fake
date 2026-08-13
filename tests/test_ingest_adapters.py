@@ -26,8 +26,9 @@ def _wav(path, seconds=4.0, seed=0):
 
 # ------------------------------------------------------------------ nhận diện
 def test_detects_vivos(vivos_like):
-    cls, score = detect_adapter(vivos_like)
+    cls, score, root = detect_adapter(vivos_like)
     assert cls is VivosAdapter and score > 0.5
+    assert root == vivos_like
 
 
 def test_detects_common_voice(tmp_path):
@@ -39,8 +40,8 @@ def test_detects_common_voice(tmp_path):
         writer.writerow(["client_id", "path", "sentence"])
         writer.writerow(["abcdef0123456789", "a.wav", "câu thứ nhất trong bộ dữ liệu"])
         writer.writerow(["abcdef0123456789", "b.wav", "câu thứ hai trong bộ dữ liệu"])
-    cls, score = detect_adapter(root)
-    assert cls is CommonVoiceAdapter and score > 0.8
+    cls, score, effective = detect_adapter(root)
+    assert cls is CommonVoiceAdapter and score > 0.8 and effective == root
 
     manifest = Manifest(tmp_path / "corpus")
     ingest_source(manifest, cls(), root, "cv", SPEC)
@@ -53,8 +54,8 @@ def test_detects_labeled_folder(tmp_path):
     root = tmp_path / "mixed"
     _wav(root / "real" / "spk1" / "a.wav", seed=3)
     _wav(root / "fake" / "some_engine" / "b.wav", seed=4)
-    cls, score = detect_adapter(root)
-    assert cls is LabeledFolderAdapter and score > 0.8
+    cls, score, effective = detect_adapter(root)
+    assert cls is LabeledFolderAdapter and score > 0.8 and effective == root
 
     manifest = Manifest(tmp_path / "corpus")
     ingest_source(manifest, cls(), root, "mixed", SPEC)
@@ -68,8 +69,8 @@ def test_falls_back_to_plain_folder(tmp_path):
     root = tmp_path / "loose"
     _wav(root / "spkA" / "x.wav", seed=5)
     _wav(root / "spkB" / "y.wav", seed=6)
-    cls, _ = detect_adapter(root)
-    assert cls is FolderAdapter
+    cls, _, effective = detect_adapter(root)
+    assert cls is FolderAdapter and effective == root
 
     manifest = Manifest(tmp_path / "corpus")
     ingest_source(manifest, cls(), root, "loose", SPEC)

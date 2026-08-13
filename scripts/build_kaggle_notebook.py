@@ -205,13 +205,22 @@ if RAW is None:
         print("Có nhiều dataset, đang dùng cái đầu:", ", ".join(p.name for p in found))
 
 if SMOKE:
-    N_REAL, PER_SPEAKER, N_FAKE_TTS, N_FAKE_CLONE = 40, 5, 20, 10
+    N_REAL, PER_SPEAKER, N_FAKE_TTS, N_FAKE_CLONE = 60, 8, 30, 15
 else:
     N_REAL, PER_SPEAKER, N_FAKE_TTS, N_FAKE_CLONE = 4000, 120, 1200, 800
 
 print(f"Nguồn REAL : {RAW}")
 print(f"Chế độ     : {'CHẠY THỬ' if SMOKE else 'CHẠY THẬT'}")
 print(f"Quy mô     : {N_REAL} real · {N_FAKE_TTS} fake TTS · {N_FAKE_CLONE} fake cloning")
+
+# Xem qua cấu trúc: dataset Kaggle thường bọc thêm một tầng (<slug>/vivos/...).
+# `ingest` tự chui xuống tìm, nhưng nhìn cây thư mục vẫn giúp phát hiện nhầm lẫn sớm.
+print("\\nCấu trúc thư mục (2 tầng đầu):")
+for lvl1 in sorted(Path(RAW).iterdir())[:8]:
+    print(f"  {lvl1.name}{'/' if lvl1.is_dir() else ''}")
+    if lvl1.is_dir():
+        for lvl2 in sorted(lvl1.iterdir())[:6]:
+            print(f"    {lvl2.name}{'/' if lvl2.is_dir() else ''}")
 """),
 
 md("""
@@ -233,6 +242,32 @@ lớp bằng định dạng hay độ to.
 """),
 code("""
 !python -m aidetector ingest {RAW} -c {CFG} --limit {N_REAL} --per-speaker {PER_SPEAKER}
+"""),
+code("""
+# Chặn sớm: ba điều kiện dưới đây mà không đạt thì mọi bước sau đều vô nghĩa.
+from aidetector.config import Config
+from aidetector.corpus.manifest import Manifest
+
+manifest = Manifest.load(Config.load(CFG)["paths.corpus"], required=True)
+n_real = len(manifest.reals)
+n_speakers = len(manifest.speakers("real"))
+n_text = sum(1 for r in manifest.reals if r.text)
+
+print(f"real={n_real} · speaker={n_speakers} · có transcript={n_text}")
+problems = []
+if n_real < 10:
+    problems.append(f"Chỉ nạp được {n_real} audio thật — kiểm tra RAW có trỏ đúng dataset không.")
+if n_speakers < 3:
+    problems.append(
+        f"Chỉ có {n_speakers} speaker — không chia được train/val/test speaker-disjoint. "
+        "Adapter có thể đang đọc sai cấu trúc thư mục.")
+if n_text == 0:
+    problems.append(
+        "Không có transcript nào — fake sẽ phải dùng câu dự phòng và không ghép cặp "
+        "được với real. Hãy dùng bộ dữ liệu có transcript (VIVOS, Common Voice).")
+if problems:
+    raise SystemExit("DỪNG LẠI:\\n" + "\\n".join(f"  • {p}" for p in problems))
+print("✔ dataset thật đủ điều kiện để sinh fake")
 """),
 
 md("""

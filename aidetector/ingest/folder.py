@@ -64,9 +64,13 @@ def _load_transcripts(root: Path) -> dict[str, str]:
 
 
 def _speaker_from_path(audio: Path, root: Path) -> str:
-    """Thư mục con trực tiếp dưới root thường là speaker; file phẳng ⇒ unknown."""
-    rel = audio.relative_to(root)
-    return rel.parts[0] if len(rel.parts) > 1 else "unknown"
+    """Thư mục chứa file thường là speaker; file nằm phẳng ngay dưới root ⇒ unknown.
+
+    Lấy thư mục *gần file nhất* chứ không phải tầng đầu tiên dưới root: bố cục hay
+    gặp là `<bộ dữ liệu>/<split>/<speaker>/x.wav`, dùng tầng đầu sẽ gom tất cả về
+    một speaker duy nhất và làm hỏng bước chia tập speaker-disjoint.
+    """
+    return audio.parent.name if audio.parent != root else "unknown"
 
 
 @register

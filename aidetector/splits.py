@@ -32,8 +32,14 @@ def assign_splits(
     seed: int = 42,
     holdout_generators: list[str] | None = None,
     respect_source_hints: bool = False,
+    strict: bool = True,
 ) -> dict:
-    """Gán cột `split` cho mọi bản ghi trong manifest (ghi đè giá trị cũ)."""
+    """Gán cột `split` cho mọi bản ghi trong manifest (ghi đè giá trị cũ).
+
+    `strict=True` (mặc định) ném lỗi nếu có split thiếu hẳn một lớp — trạng thái đó
+    khiến train/evaluate vô nghĩa, và nếu để lọt thì lỗi chỉ lộ ra ở bước sau dưới
+    dạng khó hiểu ("EER nan", "thiếu best.pt").
+    """
     if abs(sum(ratios) - 1.0) > 1e-6:
         raise ValueError(f"Tổng ratios phải bằng 1, nhận {ratios} = {sum(ratios)}")
     holdout = {g.lower() for g in (holdout_generators or [])}
@@ -78,11 +84,28 @@ def assign_splits(
 
     # --- 2. Gán cho từng bản ghi -------------------------------------------
     by_id = {r.utt_id: r for r in records}
+    # Bản ghi không thuộc speaker nào (vd fake sinh từ câu dự phòng) không thể chia
+    # theo speaker — rải theo đúng tỉ lệ, tất định theo utt_id.
+    homeless = [r for r in records if not (by_id.get(r.parent_utt_id) or r).speaker]
+    homeless.sort(key=lambda r: r.utt_id)
+    if homeless:
+        log.info("%d bản ghi không có speaker — chia theo tỉ lệ thay vì theo speaker",
+                 len(homeless))
+    homeless_split = {}
+    n_train, n_val = int(len(homeless) * ratios[0]), int(len(homeless) * ratios[1])
+    for i, rec in enumerate(stable_rand("homeless", seed).sample(homeless, len(homeless))):
+        homeless_split[rec.utt_id] = (
+            "train" if i < n_train else ("val" if i < n_train + n_val else "test")
+        )
+
     for rec in records:
         # Bản augment luôn bám theo bản gốc.
         parent = by_id.get(rec.parent_utt_id) if rec.parent_utt_id else None
-        base_speaker = (parent or rec).speaker
-        rec.split = speaker_split.get(base_speaker, "train")
+        base = parent or rec
+        if not base.speaker:
+            rec.split = homeless_split.get(base.utt_id, "train")
+            continue
+        rec.split = speaker_split.get(base.speaker, "train")
 
     # --- 3. Engine bị giữ lại chỉ để test ----------------------------------
     moved = 0
@@ -103,16 +126,55 @@ def assign_splits(
     else:
         log.info("Không có rò rỉ speaker giữa các split ✔")
 
+    broken = []
     for split in SPLITS:
         counts = report["counts"][split]
+        n_real, n_fake = counts.get(LABEL_REAL, 0), counts.get(LABEL_FAKE, 0)
         log.info(
             "  %-5s: %5d utt (real=%d fake=%d) · %d speaker",
-            split, sum(counts.values()), counts.get(LABEL_REAL, 0),
-            counts.get(LABEL_FAKE, 0), report["speakers"][split],
+            split, sum(counts.values()), n_real, n_fake, report["speakers"][split],
         )
-        if counts.get(LABEL_REAL, 0) == 0 or counts.get(LABEL_FAKE, 0) == 0:
-            log.warning("  ⚠ split %s thiếu một trong hai lớp — số đo sẽ vô nghĩa", split)
+        if n_real == 0 or n_fake == 0:
+            broken.append(f"{split} (real={n_real}, fake={n_fake})")
+
+    if broken:
+        message = (
+            "Split thiếu một trong hai lớp: " + "; ".join(broken) + ".\n"
+            + _diagnose(manifest, report)
+        )
+        if strict:
+            raise ValueError(message)
+        log.warning(message)
     return report
+
+
+def _diagnose(manifest: Manifest, report: dict) -> str:
+    """Đoán nguyên nhân thường gặp để người dùng biết phải sửa ở đâu."""
+    n_speakers = len(report["speaker_split"])
+    real_speakers = {r.speaker for r in manifest.reals if r.speaker}
+    unpaired = [r for r in manifest.fakes if r.ref_utt_id not in manifest]
+    hints = []
+
+    if n_speakers < len(SPLITS):
+        hints.append(
+            f"Chỉ có {n_speakers} speaker — không đủ để chia speaker-disjoint thành "
+            f"{len(SPLITS)} tập. Cần bộ dữ liệu nhiều người nói hơn, hoặc bỏ bớt "
+            f"`--per-speaker` khi ingest."
+        )
+    if len(real_speakers) <= 1:
+        hints.append(
+            f"Toàn bộ audio thật chỉ thuộc {len(real_speakers)} speaker nên dồn hết vào "
+            f"một tập. Kiểm tra adapter ingest có nhận đúng speaker không "
+            f"(`python -m aidetector validate` và cột `speaker` trong manifest.csv)."
+        )
+    if unpaired:
+        hints.append(
+            f"{len(unpaired)}/{len(manifest.fakes)} audio giả không gắn với utterance "
+            f"thật nào — thường do corpus REAL thiếu transcript nên `generate` phải "
+            f"dùng câu dự phòng. Hãy dùng bộ dữ liệu có transcript."
+        )
+    return "\n".join(f"  → {h}" for h in hints) if hints else \
+        "  → Kiểm tra lại tỉ lệ real/fake trong corpus (`python -m aidetector info`)."
 
 
 def _report(manifest: Manifest, speaker_split: dict[str, str]) -> dict:
