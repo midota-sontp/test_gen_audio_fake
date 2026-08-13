@@ -1,14 +1,27 @@
 # Engine sinh audio giả — cài riêng vì nặng và không bắt buộc để huấn luyện.
-# Cài từng cái cũng được; engine thiếu sẽ tự bị bỏ qua (xem `python -m aidetector info`).
+# Engine thiếu sẽ tự bị bỏ qua; `python -m aidetector info` cho biết cái nào dùng
+# được ngay bây giờ và thiếu gì thì cài bằng lệnh nào.
+#
+# ⚠ KOKORO VÀ OMNIVOICE KHÔNG SỐNG CHUNG ĐƯỢC TRONG MỘT MÔI TRƯỜNG:
+#     kokoro-vietnamese  cần transformers <5      (API 4.x)
+#     omnivoice          cần transformers >=5.3   (HiggsAudioV2TokenizerModel)
+# Vì `generate` là idempotent và corpus cộng dồn, cách xử lý là sinh THÀNH HAI LƯỢT:
+#
+#     pip install piper-tts git+https://github.com/iamdinhthuan/Kokoro-Vietnamese.git
+#     pip install "transformers>=4.48,<5"
+#     python -m aidetector generate --engines piper kokoro
+#
+#     pip install omnivoice "transformers>=5.3"
+#     python -m aidetector generate --engines omnivoice
+#
+# Backbone WavLM chạy tốt trên cả hai nhánh, nên sau lượt hai cứ train bình thường.
 
-# Piper — ONNX, chạy rất nhanh trên CPU (kể cả Apple Silicon).
+# Piper — ONNX, chạy rất nhanh trên CPU (kể cả Apple Silicon). Không đụng transformers.
 piper-tts>=1.3.0
 
-# Kokoro tiếng Việt — bản fine-tune cộng đồng của Kokoro-82M (13 giọng vi).
-# Cần transformers 4.x (xem trần <5 trong requirements.txt). Trên môi trường có
-# transformers 5.x, engine tự báo "không dùng được" thay vì chết giữa chừng.
+# Kokoro tiếng Việt — Kokoro-82M fine-tune, 13 giọng vi. Lượt 1, transformers 4.x.
 kokoro-vietnamese @ git+https://github.com/iamdinhthuan/Kokoro-Vietnamese.git
 
-# OmniVoice — zero-shot voice cloning, 600+ ngôn ngữ. Nên có GPU (CUDA) hoặc MPS.
-# Bản fine-tune riêng cho tiếng Việt: checkpoint `g-group-ai-lab/g-omnivoice`.
-omnivoice>=0.1.0
+# OmniVoice — zero-shot voice cloning, 600+ ngôn ngữ. Lượt 2, transformers >=5.3.
+# Nên có GPU (CUDA) hoặc MPS. Bản fine-tune tiếng Việt: `g-group-ai-lab/g-omnivoice`.
+omnivoice>=0.2.0

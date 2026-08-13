@@ -17,7 +17,14 @@ from typing import Sequence
 import numpy as np
 
 from ..utils import get_logger
-from .base import KIND_TTS, Availability, Generator, register
+from .base import (
+    KIND_TTS,
+    Availability,
+    Generator,
+    check_transformers_range,
+    is_installed,
+    register,
+)
 
 log = get_logger("aidetector.generate.kokoro_vi")
 
@@ -41,33 +48,23 @@ class KokoroVietnameseGenerator(Generator):
         self._voice_names = list(options.get("voices") or DEFAULT_VOICES)
         self._engines: dict[str, object] = {}
 
-    #: Kokoro-Vietnamese dựa trên API transformers 4.x và tự từ chối chạy trên 5.x.
-    MAX_TRANSFORMERS_MAJOR = 4
-
     @classmethod
     def availability(cls) -> Availability:
-        try:
-            import kokoro_vietnamese  # noqa: F401
-        except ImportError:
+        if not is_installed("kokoro_vietnamese"):
             return Availability(
                 False,
                 "chưa cài kokoro-vietnamese",
                 "pip install git+https://github.com/iamdinhthuan/Kokoro-Vietnamese.git",
             )
-        # Kiểm tra ở đây thay vì để nổ lúc nạp model: nếu không, engine sẽ chết giữa
-        # chừng sau khi các engine khác đã sinh xong (Kaggle mặc định có transformers 5).
+        # Kokoro chạy trên transformers 4.x, OmniVoice cần >=5.3 — hai engine này
+        # không sống chung được, phải sinh fake thành hai lượt.
+        conflict = check_transformers_range("kokoro-vietnamese", below_major=5)
+        if conflict is not None:
+            return conflict
         try:
-            import transformers
-
-            major = int(transformers.__version__.split(".")[0])
-        except Exception:  # noqa: BLE001 — thiếu/lạ version thì cứ để engine tự thử
-            return Availability(True)
-        if major > cls.MAX_TRANSFORMERS_MAJOR:
-            return Availability(
-                False,
-                f"kokoro-vietnamese chưa hỗ trợ transformers {transformers.__version__}",
-                'pip install "transformers>=4.48,<5"',
-            )
+            import kokoro_vietnamese  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            return Availability(False, f"kokoro-vietnamese lỗi khi import: {exc}", "")
         return Availability(True)
 
     def voices(self) -> Sequence[str]:

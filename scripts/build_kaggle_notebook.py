@@ -194,20 +194,19 @@ if _stale:
 """),
 
 md("""
-Cài thư viện. Kaggle có sẵn torch + CUDA nên chỉ cài phần thiếu; ba engine sinh
-fake cài riêng — cái nào lỗi thì bỏ qua, ô `info` ngay dưới cho biết cái nào dùng được.
+Cài thư viện — **lượt 1: Piper + Kokoro**.
+
+Kokoro chạy trên `transformers` 4.x còn Kaggle cài sẵn 5.x, nên phải ghim lại sau
+khi cài. OmniVoice cần đúng chiều ngược lại (`>=5.3`) nên để dành cho lượt 2 ở mục
+A3b — hai engine đó không sống chung được trong một môi trường.
 """),
 code("""
-# Engine cài trước, requirements.txt cài SAU CÙNG: nó ghim transformers <5 (bản
-# Kaggle cài sẵn là 5.x, mà kokoro-vietnamese chỉ chạy trên 4.x), nên phải để nó
-# nói tiếng nói cuối cùng.
+!pip install -q -r requirements.txt
+!apt-get -qq install -y ffmpeg > /dev/null 2>&1 || true   # cần cho augment MP3/AAC
+
 !pip install -q piper-tts                                                 || true
 !pip install -q git+https://github.com/iamdinhthuan/Kokoro-Vietnamese.git || true
-!pip install -q omnivoice                                                 || true
-
-!pip install -q -r requirements.txt
-
-!apt-get -qq install -y ffmpeg > /dev/null 2>&1 || true   # cần cho augment MP3/AAC
+!pip install -q "transformers>=4.48,<5"
 
 import transformers, torch
 print(f"transformers {transformers.__version__} · torch {torch.__version__} "
@@ -342,10 +341,33 @@ code("""
 # Hai engine TTS giọng cố định — nhanh, chạy được cả trên CPU.
 run("generate", "--engines", "piper", "kokoro", "--count", N_FAKE_TTS)
 """),
+md("""
+### A3b. OmniVoice — lượt hai, phải nâng transformers trước
+
+Đây là engine **giá trị nhất về mặt dữ liệu**: nó clone thẳng giọng của chính
+speaker thật, nên audio giả trùng với real **cả nội dung lẫn danh tính người nói**.
+Piper và Kokoro chỉ có giọng cố định — nếu dataset chỉ có hai engine đó, mô hình rất
+dễ học lối tắt *"nghe thấy mấy giọng này ⇒ fake"* thay vì học dấu vết tổng hợp.
+
+Nhưng hai engine **không sống chung được trong một môi trường**:
+
+| Engine | Cần |
+|---|---|
+| `kokoro` | `transformers <5` |
+| `omnivoice` | `transformers >=5.3` |
+
+Vì `generate` là idempotent và corpus cộng dồn, ta chạy hai lượt: Kokoro xong rồi
+mới nâng transformers lên cho OmniVoice. Sau ô này Kokoro không dùng được nữa —
+không sao, nó đã sinh xong ở trên. Backbone WavLM chạy tốt trên cả hai nhánh nên
+phần huấn luyện không bị ảnh hưởng.
+"""),
 code("""
-# OmniVoice: voice cloning zero-shot, clone thẳng giọng speaker thật từ một câu
-# khác của họ. Đây là engine TUỲ CHỌN — chậm hơn nhiều và cần GPU. Chưa cài được
-# thì ô này chỉ báo bỏ qua, Piper/Kokoro ở trên đã đủ để đi tiếp.
+!pip install -q omnivoice "transformers>=5.3"
+"""),
+code("""
+run("info")     # xác nhận omnivoice đã ✔ trước khi tốn thời gian sinh
+"""),
+code("""
 run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE)
 """),
 

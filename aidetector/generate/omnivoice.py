@@ -17,7 +17,14 @@ from typing import Sequence
 import numpy as np
 
 from ..utils import get_logger
-from .base import KIND_CLONE, Availability, Generator, register
+from .base import (
+    KIND_CLONE,
+    Availability,
+    Generator,
+    check_transformers_range,
+    is_installed,
+    register,
+)
 
 log = get_logger("aidetector.generate.omnivoice")
 
@@ -38,12 +45,22 @@ class OmniVoiceGenerator(Generator):
         self.dtype = options.get("dtype", "auto")
         self._model = None
 
+    #: OmniVoice 0.2.x dùng HiggsAudioV2TokenizerModel, chỉ có từ transformers 5.3.
+    MIN_TRANSFORMERS = (5, 3)
+
     @classmethod
     def availability(cls) -> Availability:
+        if not is_installed("omnivoice"):
+            return Availability(False, "chưa cài omnivoice", "pip install omnivoice")
+        # Ngược chiều với Kokoro: engine này cần transformers 5.x. Báo rõ ở đây để
+        # người dùng biết phải sinh fake thành hai lượt chứ không phải engine hỏng.
+        conflict = check_transformers_range("omnivoice", minimum=cls.MIN_TRANSFORMERS)
+        if conflict is not None:
+            return conflict
         try:
             import omnivoice  # noqa: F401
-        except ImportError:
-            return Availability(False, "chưa cài omnivoice", "pip install omnivoice")
+        except Exception as exc:  # noqa: BLE001
+            return Availability(False, f"omnivoice lỗi khi import: {exc}", "")
         return Availability(True)
 
     def voices(self) -> Sequence[str]:

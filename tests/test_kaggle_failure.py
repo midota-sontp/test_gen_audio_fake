@@ -152,24 +152,54 @@ def test_stage_fails_only_when_no_engine_produced_anything(tmp_path, vivos_like,
                  "--count", "4", "--log-level", "ERROR"]) == 1
 
 
-def test_kokoro_reports_transformers_conflict_before_running(monkeypatch):
-    """Phải báo ở bước `info`, không để nổ giữa chừng sau khi engine khác đã chạy."""
+def test_kokoro_and_omnivoice_need_opposite_transformers(monkeypatch):
+    """Hai engine đòi hai nhánh transformers ngược nhau — `info` phải nói rõ.
+
+    Không kiểm ở đây thì lỗi chỉ lộ lúc nạp model, tức là sau khi các engine khác
+    đã sinh xong, và trông như "engine hỏng" chứ không phải "cần chạy hai lượt".
+    """
     import sys
     import types
 
+    import importlib.util
+
     from aidetector.generate.kokoro_vi import KokoroVietnameseGenerator
+    from aidetector.generate.omnivoice import OmniVoiceGenerator
 
-    monkeypatch.setitem(sys.modules, "kokoro_vietnamese", types.ModuleType("kokoro_vietnamese"))
-    monkeypatch.setitem(sys.modules, "transformers",
-                        types.SimpleNamespace(__version__="5.15.0"))
-    status = KokoroVietnameseGenerator.availability()
+    # Giả vờ cả hai gói đều đã cài (patch ở tầng importlib để cả hai engine cùng thấy).
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: object())
+
+    def set_transformers(version: str):
+        monkeypatch.setitem(sys.modules, "transformers",
+                            types.SimpleNamespace(__version__=version))
+
+    # transformers 5.x: OmniVoice chạy được, Kokoro thì không.
+    set_transformers("5.15.0")
+    kokoro = KokoroVietnameseGenerator.availability()
+    assert not kokoro
+    assert "5.15" in kokoro.reason and "<5" in kokoro.hint
+
+    # transformers 4.x: ngược lại.
+    set_transformers("4.57.6")
+    omni = OmniVoiceGenerator.availability()
+    assert not omni
+    assert "4.57" in omni.reason and ">=5.3" in omni.hint
+
+    # 5.2 vẫn chưa đủ cho OmniVoice (cần >= 5.3).
+    set_transformers("5.2.0")
+    assert not OmniVoiceGenerator.availability()
+
+
+def test_uninstalled_engine_reports_missing_not_version_conflict(monkeypatch):
+    """Chưa cài thì phải bảo là chưa cài, đừng đổ cho phiên bản transformers."""
+    import importlib.util
+
+    from aidetector.generate.omnivoice import OmniVoiceGenerator
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **k: None)
+    status = OmniVoiceGenerator.availability()
     assert not status
-    assert "5.15.0" in status.reason
-    assert "<5" in status.hint
-
-    monkeypatch.setitem(sys.modules, "transformers",
-                        types.SimpleNamespace(__version__="4.57.6"))
-    assert KokoroVietnameseGenerator.availability()
+    assert "chưa cài" in status.reason
 
 
 # ─────────────────────────── mắt xích 2: speaker suy ra từ thư mục sai tầng

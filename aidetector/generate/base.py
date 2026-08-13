@@ -87,6 +87,55 @@ class Generator:
         return f"<{type(self).__name__} id={self.id} kind={self.kind} device={self.device}>"
 
 
+def transformers_version() -> tuple[int, int] | None:
+    """(major, minor) của transformers, hoặc None nếu chưa cài/không đọc được."""
+    try:
+        import transformers
+
+        parts = transformers.__version__.split(".")
+        return int(parts[0]), int(parts[1])
+    except Exception:  # noqa: BLE001 — thiếu hoặc version lạ đều coi như không biết
+        return None
+
+
+def check_transformers_range(
+    package: str, minimum: tuple[int, int] | None = None, below_major: int | None = None
+) -> Availability | None:
+    """Kiểm tra transformers có nằm trong khoảng engine cần không.
+
+    Kokoro-Vietnamese chạy trên transformers 4.x, OmniVoice cần >=5.3 — hai engine
+    này **không sống chung được trong một môi trường**. Kiểm ở đây để `info` nói rõ
+    engine nào dùng được ngay bây giờ, thay vì để nổ lúc nạp model.
+    """
+    version = transformers_version()
+    if version is None:
+        return None
+    if below_major is not None and version[0] >= below_major:
+        return Availability(
+            False,
+            f"{package} cần transformers <{below_major}, đang có {version[0]}.{version[1]}",
+            f'pip install "transformers>=4.48,<{below_major}"',
+        )
+    if minimum is not None and version < minimum:
+        return Availability(
+            False,
+            f"{package} cần transformers >={minimum[0]}.{minimum[1]}, "
+            f"đang có {version[0]}.{version[1]}",
+            f'pip install "transformers>={minimum[0]}.{minimum[1]}"',
+        )
+    return None
+
+
+def is_installed(module: str) -> bool:
+    """Có gói này trên đĩa không — không thực thi mã của nó."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 _REGISTRY: dict[str, type[Generator]] = {}
 
 
