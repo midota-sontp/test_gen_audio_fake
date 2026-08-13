@@ -31,7 +31,8 @@ Phát hiện audio do TTS / voice-cloning sinh ra, tập trung vào tiếng Vi�
 ```
 
 Hướng dẫn chạy từng bước: **[run.md](run.md)**.
-Chạy trên GPU miễn phí của Kaggle: **[notebooks/kaggle_pipeline.ipynb](notebooks/kaggle_pipeline.ipynb)**.
+Chạy trên GPU miễn phí của Kaggle: **[notebooks/aidetector_kaggle.ipynb](notebooks/aidetector_kaggle.ipynb)**
+— một file tự chứa toàn bộ mã nguồn, import lên Kaggle là chạy.
 
 ## Ý tưởng thiết kế
 

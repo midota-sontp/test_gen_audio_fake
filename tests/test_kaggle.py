@@ -53,7 +53,6 @@ def test_kaggle_config_inherits_defaults_and_overrides_paths():
     cfg = Config.load("configs/kaggle.yaml")
     # Ghi đè
     assert cfg["paths.corpus"] == "/kaggle/working/corpus"
-    assert cfg["features.device"] == "cuda"
     assert "omnivoice" in cfg["generate.engines"]
     assert cfg["features.batch_size"] == 32
     # Kế thừa từ default.yaml — chuẩn audio và backbone không được đổi
@@ -67,6 +66,31 @@ def test_kaggle_config_paths_all_live_under_working():
     cfg = Config.load("configs/kaggle.yaml")
     for key in ("corpus", "features", "checkpoints", "reports"):
         assert cfg[f"paths.{key}"].startswith("/kaggle/working/")
+
+
+def test_kaggle_config_never_hardcodes_cuda():
+    """Quên bật Accelerator không được làm chết pipeline giữa chừng."""
+    cfg = Config.load("configs/kaggle.yaml")
+    for key in ("generate.device", "features.device", "train.device"):
+        assert cfg[key] == "auto", f"{key} phải là auto, không ghi cứng thiết bị"
+
+
+def test_unavailable_device_falls_back_with_a_warning(monkeypatch, caplog):
+    import torch
+
+    from aidetector.utils import resolve_device
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with caplog.at_level("WARNING"):
+        device = resolve_device("cuda")
+    assert device != "cuda"
+    assert "Accelerator" in caplog.text
+
+
+def test_explicit_cpu_is_always_respected():
+    from aidetector.utils import resolve_device
+
+    assert resolve_device("cpu") == "cpu"
 
 
 # -------------------------------------------------------------------- đóng gói
@@ -130,19 +154,99 @@ def test_unpack_is_incremental(corpus, tmp_path):
 
 
 # ------------------------------------------------------------------- notebook
-def test_kaggle_notebook_is_valid_and_uses_the_kaggle_config():
-    nb = json.loads(Path("notebooks/kaggle_pipeline.ipynb").read_text(encoding="utf-8"))
-    assert nb["nbformat"] == 4
-    assert nb["cells"], "notebook rỗng"
-    for cell in nb["cells"]:
+NOTEBOOK = Path("notebooks/aidetector_kaggle.ipynb")
+
+
+@pytest.fixture(scope="module")
+def notebook() -> dict:
+    return json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def notebook_text(notebook) -> str:
+    return "".join("".join(c["source"]) for c in notebook["cells"])
+
+
+def test_there_is_exactly_one_notebook():
+    """Một file duy nhất để import — hai bản song song chỉ gây nhầm."""
+    assert sorted(p.name for p in Path("notebooks").glob("*.ipynb")) == [NOTEBOOK.name]
+
+
+def test_notebook_is_valid_nbformat(notebook):
+    assert notebook["nbformat"] == 4
+    assert notebook["cells"], "notebook rỗng"
+    for cell in notebook["cells"]:
         assert cell["cell_type"] in ("markdown", "code")
         assert isinstance(cell["source"], list)
 
-    text = "".join("".join(c["source"]) for c in nb["cells"])
-    assert "configs/kaggle.yaml" in text
-    for stage in ("ingest", "generate", "split", "augment", "features", "train", "evaluate"):
-        assert f"aidetector {stage}" in text, f"notebook thiếu stage {stage}"
-    # split phải đứng trước augment, đúng như thứ tự pipeline
-    assert text.index("aidetector split") < text.index("aidetector augment")
-    # phải nhắc người dùng lưu lại trước khi hết phiên
-    assert "aidetector pack" in text and "unpack" in text
+
+def test_every_code_cell_parses_as_python(notebook):
+    """Bỏ dòng magic `!...` của IPython rồi kiểm tra cú pháp Python thuần."""
+    import ast
+
+    for i, cell in enumerate(notebook["cells"]):
+        if cell["cell_type"] != "code":
+            continue
+        source = "".join(cell["source"])
+        pure = "\n".join(l for l in source.splitlines() if not l.lstrip().startswith("!"))
+        ast.parse(pure)  # ném SyntaxError kèm số dòng nếu hỏng
+
+
+def test_notebook_is_self_contained(notebook_text):
+    """Không được phụ thuộc vào việc clone repo hay mount dataset chứa code."""
+    assert "_PAYLOAD" in notebook_text and "base64.b64decode" in notebook_text
+    assert "git clone" not in notebook_text
+
+
+def _load_builder():
+    """Nạp scripts/build_kaggle_notebook.py (thư mục scripts/ không phải package)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_kaggle_notebook", Path("scripts/build_kaggle_notebook.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_payload_is_deterministic():
+    """Cùng mã nguồn phải cho cùng payload — nếu không, notebook diff bẩn mỗi lần build."""
+    builder = _load_builder()
+    files = builder.collect_files()
+    assert builder.build_payload(files) == builder.build_payload(files)
+
+
+def test_notebook_payload_matches_the_current_source(notebook_text):
+    """Payload nhúng phải khớp code trong repo; lệch ⇒ chạy lại script build."""
+    builder = _load_builder()
+    _, sha, _ = builder.build_payload(builder.collect_files())
+    assert sha in notebook_text, (
+        "notebook đã lệch với mã nguồn — chạy: python scripts/build_kaggle_notebook.py"
+    )
+
+
+def test_notebook_covers_every_stage(notebook_text):
+    assert "configs/kaggle.yaml" in notebook_text
+    for stage in ("ingest", "generate", "validate", "split", "augment",
+                  "features", "train", "evaluate", "pack"):
+        assert f"aidetector {stage}" in notebook_text, f"notebook thiếu stage {stage}"
+
+
+def test_dataset_phase_comes_before_training_phase(notebook_text):
+    """Phải tạo + kiểm tra dataset xong mới tới huấn luyện."""
+    assert notebook_text.index("PHẦN A") < notebook_text.index("PHẦN B")
+    assert notebook_text.index("aidetector generate") < notebook_text.index("aidetector train")
+    # split trước augment: bản augment chỉ được sinh cho train
+    assert notebook_text.index("aidetector split") < notebook_text.index("aidetector augment")
+    # đóng gói dataset nằm trong phần A, trước khi huấn luyện
+    assert notebook_text.index("aidetector pack") < notebook_text.index("aidetector train")
+
+
+def test_dataset_phase_has_a_smoke_switch_and_inspection(notebook_text):
+    assert "SMOKE = True" in notebook_text
+    assert "aidetector validate" in notebook_text
+    # nghe thử + nhìn phổ trước khi tốn thời gian train
+    assert "Audio(" in notebook_text and "specgram" in notebook_text
+    # kiểm tra fake có real đối chứng
+    assert "ref_utt_id" in notebook_text

@@ -17,7 +17,8 @@ paths:
   reports: /kaggle/working/reports
 
 generate:
-  device: cuda
+  # `auto` = cuda khi có GPU, tự hạ về cpu nếu quên bật Accelerator.
+  device: auto
   # OmniVoice là engine cloning: cùng speaker, cùng câu nói với real ⇒ dữ liệu khó
   # nhất và giá trị nhất. Trên CPU gần như không chạy nổi, nên chỉ bật ở đây.
   engines: [piper, kokoro, omnivoice]
@@ -30,11 +31,11 @@ generate:
       dtype: float16
 
 features:
-  device: cuda
+  device: auto
   batch_size: 32          # GPU 16GB thoải mái với clip 10 giây
 
 train:
-  device: cuda
+  device: auto
   batch_size: 128
 
 # Giữ một engine riêng cho test để biết mô hình có tổng quát sang engine lạ không.

@@ -246,23 +246,38 @@ python -m aidetector run --skip ingest generate
 
 ## Chạy trên Kaggle (GPU miễn phí)
 
-Notebook sẵn sàng: **[notebooks/kaggle_pipeline.ipynb](notebooks/kaggle_pipeline.ipynb)**
-— upload lên Kaggle, sửa 2 biến (`REPO`, `RAW`) rồi Run All.
-
-Config riêng: **[configs/kaggle.yaml](configs/kaggle.yaml)** (kế thừa `default.yaml`,
-chỉ đổi đường dẫn sang `/kaggle/working`, bật `cuda` và bật thêm `omnivoice`).
-
-```python
-CFG = "configs/kaggle.yaml"
-!python -m aidetector info     -c {CFG}                 # in cả GPU, đĩa trống, dataset đã mount
-!python -m aidetector ingest   /kaggle/input/vivos -c {CFG} --limit 4000
-!python -m aidetector generate -c {CFG} --engines piper kokoro omnivoice
-!python -m aidetector run split augment features train evaluate -c {CFG}
-```
+**Một file duy nhất: [notebooks/aidetector_kaggle.ipynb](notebooks/aidetector_kaggle.ipynb)**
+— `File → Import Notebook` trên Kaggle rồi chạy. Notebook **nhúng sẵn toàn bộ mã
+nguồn** (base64 của `aidetector/` + `configs/`), không cần clone repo hay thêm
+dataset chứa code.
 
 **Trong panel bên phải phải bật:** Accelerator = `GPU T4 x2`/`P100`, Internet = `On`.
-Không có GPU thì OmniVoice (voice cloning) gần như không chạy nổi — bỏ nó khỏi
-`--engines`, Piper và Kokoro vẫn chạy tốt trên CPU.
+Rồi Add Input → Datasets một bộ giọng thật tiếng Việt. Không có GPU thì OmniVoice
+(voice cloning) gần như không chạy nổi — bỏ nó khỏi `--engines`, Piper và Kokoro vẫn
+chạy tốt trên CPU.
+
+Notebook chia hai phần, **chạy phần A trước**:
+
+| | Làm gì | Ghi chú |
+|---|---|---|
+| **PHẦN A** | ingest → generate → validate → **nghe thử + xem phổ** → `pack` | có công tắc `SMOKE = True` chạy thử ~40 mẫu vài phút |
+| **PHẦN B** | split → augment → features → train → evaluate | chỉ chạy khi dataset đã ưng |
+
+Phần A dừng lại ở một dataset đóng gói sẵn, nên bạn kiểm tra được dữ liệu **trước
+khi** tốn giờ GPU huấn luyện: thống kê cân bằng real/fake, số lượng theo từng engine,
+tỉ lệ fake có real đối chứng, và nghe trực tiếp từng cặp real/fake cùng câu cùng giọng.
+
+Sau khi sửa code trong repo, build lại notebook cho khớp:
+
+```bash
+python scripts/build_kaggle_notebook.py
+```
+
+Payload tất định (cùng code ⇒ cùng hash) và có test chặn notebook lệch khỏi repo.
+
+Config riêng: **[configs/kaggle.yaml](configs/kaggle.yaml)** — kế thừa `default.yaml`,
+chỉ đổi đường dẫn sang `/kaggle/working`, tăng batch và bật thêm `omnivoice`. Thiết bị
+để `auto` nên quên bật Accelerator cũng chỉ chậm chứ không chết giữa chừng.
 
 ### Giữ dữ liệu giữa các phiên
 

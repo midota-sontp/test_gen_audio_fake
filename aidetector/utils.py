@@ -72,18 +72,32 @@ def set_seed(seed: int) -> None:
 
 
 def resolve_device(spec: str = "auto") -> str:
-    """`auto` -> cuda > mps > cpu. Các giá trị khác được trả nguyên vẹn."""
-    if spec and spec != "auto":
-        return spec
+    """`auto` -> cuda > mps > cpu.
+
+    Thiết bị chỉ định tường minh mà máy không có (hay gặp: chạy notebook Kaggle
+    nhưng quên bật Accelerator) sẽ được hạ về thiết bị sẵn có kèm cảnh báo, thay vì
+    để pipeline chết giữa chừng sau khi đã xử lý xong hàng nghìn file.
+    """
     try:
         import torch
     except ImportError:  # pragma: no cover
         return "cpu"
-    if torch.cuda.is_available():
-        return "cuda"
-    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+
+    has_cuda = torch.cuda.is_available()
+    has_mps = (
+        getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
+    )
+    best = "cuda" if has_cuda else ("mps" if has_mps else "cpu")
+
+    if not spec or spec == "auto":
+        return best
+    if (spec.startswith("cuda") and not has_cuda) or (spec == "mps" and not has_mps):
+        get_logger("aidetector").warning(
+            "Không có thiết bị %r trên máy này — dùng %r. "
+            "(Trên Kaggle: bật Accelerator ở panel bên phải.)", spec, best,
+        )
+        return best
+    return spec
 
 
 def stable_id(*parts: object, length: int = 12) -> str:
