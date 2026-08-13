@@ -79,10 +79,35 @@ class OmniVoiceGenerator(Generator):
             else (torch.float16 if self.device.startswith("cuda") else torch.float32)
         )
         log.info("Nạp OmniVoice %s (device=%s, dtype=%s)", self.checkpoint, self.device, dtype)
-        self._model = OmniVoice.from_pretrained(
-            self.checkpoint, device_map=self.device, dtype=dtype
-        )
+        try:
+            self._model = OmniVoice.from_pretrained(
+                self.checkpoint, device_map=self.device, dtype=dtype
+            )
+        except Exception as exc:  # noqa: BLE001 — cần dịch lỗi HF sang việc phải làm
+            raise RuntimeError(self._explain_load_failure(exc)) from exc
         self._loaded = True
+
+    def _explain_load_failure(self, exc: Exception) -> str:
+        """Biến lỗi tải checkpoint thành việc người dùng có thể làm ngay."""
+        message = str(exc)
+        if "gated" in message or "401" in message or "restricted" in message:
+            return (
+                f"Checkpoint {self.checkpoint!r} là repo GATED trên HuggingFace — phải xin "
+                f"quyền rồi đăng nhập mới tải được.\n"
+                f"  → Cách nhanh nhất: dùng bản công khai bằng cách thêm\n"
+                f"      --set generate.options.omnivoice.checkpoint={DEFAULT_CHECKPOINT}\n"
+                f"  → Hoặc: mở https://huggingface.co/{self.checkpoint} bấm xin quyền, tạo\n"
+                f"    token ở https://huggingface.co/settings/tokens rồi đặt biến môi trường\n"
+                f"    HF_TOKEN (trên Kaggle: Add-ons → Secrets).\n"
+                f"Lỗi gốc: {message.splitlines()[0]}"
+            )
+        if "out of memory" in message.lower() or "CUDA" in message:
+            return (
+                f"Không đủ bộ nhớ GPU để nạp {self.checkpoint!r}. Thử dtype float16 "
+                f"(--set generate.options.omnivoice.dtype=float16) hoặc giảm --count.\n"
+                f"Lỗi gốc: {message.splitlines()[0]}"
+            )
+        return f"Không nạp được checkpoint {self.checkpoint!r}: {message}"
 
     def synthesize(
         self,

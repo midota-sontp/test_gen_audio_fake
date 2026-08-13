@@ -26,8 +26,11 @@ generate:
     piper:
       data_dir: /kaggle/working/models/piper
     omnivoice:
-      # Bản fine-tune tiếng Việt; đổi về k2-fsa/OmniVoice nếu muốn bản gốc đa ngữ.
-      checkpoint: g-group-ai-lab/g-omnivoice
+      # Bản gốc đa ngữ, repo CÔNG KHAI nên tải được ngay.
+      # Bản fine-tune tiếng Việt `g-group-ai-lab/g-omnivoice` cho giọng tự nhiên hơn
+      # nhưng là repo GATED: phải xin quyền trên HuggingFace rồi đặt HF_TOKEN
+      # (Kaggle: Add-ons → Secrets) mới dùng được.
+      checkpoint: k2-fsa/OmniVoice
       dtype: float16
 
 features:

@@ -178,14 +178,22 @@ CFG = "configs/kaggle.yaml"
 # Không dùng `!python -m aidetector ...`: trong Jupyter, lệnh shell lỗi vẫn để
 # notebook chạy tiếp các ô sau, nên một stage hỏng sẽ âm thầm kéo theo cả loạt lỗi
 # vô nghĩa ở dưới — hoặc tệ hơn, chạy tiếp trên dữ liệu cũ còn sót lại.
-def run(*args):
+#
+# `optional=True` dành cho bước không bắt buộc (vd một engine sinh fake cần GPU
+# hoặc cần quyền tải checkpoint): hỏng thì báo rồi đi tiếp, vì dữ liệu đã có từ
+# các bước trước vẫn dùng được.
+def run(*args, optional=False):
     import subprocess
 
     cmd = [sys.executable, "-m", "aidetector", *[str(a) for a in args], "-c", CFG]
     print("$ python -m aidetector " + " ".join(str(a) for a in args) + f" -c {{CFG}}\\n")
-    if subprocess.run(cmd).returncode != 0:
-        raise SystemExit(f"✖ Stage {{args[0]!r}} thất bại — xem log ngay phía trên, "
-                         f"đừng chạy tiếp các ô sau.")
+    if subprocess.run(cmd).returncode == 0:
+        return True
+    if optional:
+        print(f"\\n⚠ Bước tuỳ chọn {{args[0]!r}} không chạy được — bỏ qua, đi tiếp.")
+        return False
+    raise SystemExit(f"✖ Stage {{args[0]!r}} thất bại — xem log ngay phía trên, "
+                     f"đừng chạy tiếp các ô sau.")
 
 
 print(f"Đã bung {{len(_raw) / 1024:.0f}} KB mã nguồn vào {{WORK}}")
@@ -360,6 +368,11 @@ Vì `generate` là idempotent và corpus cộng dồn, ta chạy hai lượt: Ko
 mới nâng transformers lên cho OmniVoice. Sau ô này Kokoro không dùng được nữa —
 không sao, nó đã sinh xong ở trên. Backbone WavLM chạy tốt trên cả hai nhánh nên
 phần huấn luyện không bị ảnh hưởng.
+
+Mặc định dùng checkpoint công khai `k2-fsa/OmniVoice`. Bản fine-tune tiếng Việt
+`g-group-ai-lab/g-omnivoice` cho giọng tự nhiên hơn nhưng là **repo gated**: phải
+xin quyền trên HuggingFace, tạo token, rồi đặt `HF_TOKEN` (Kaggle: Add-ons →
+Secrets) và thêm `--set generate.options.omnivoice.checkpoint=g-group-ai-lab/g-omnivoice`.
 """),
 code("""
 !pip install -q omnivoice "transformers>=5.3"
@@ -368,7 +381,9 @@ code("""
 run("info")     # xác nhận omnivoice đã ✔ trước khi tốn thời gian sinh
 """),
 code("""
-run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE)
+# optional=True: OmniVoice cần GPU và cần tải checkpoint vài GB. Hỏng thì bỏ qua,
+# 30 audio giả của Piper/Kokoro ở trên vẫn đủ để đi tiếp phần B.
+run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE, optional=True)
 """),
 
 md("""

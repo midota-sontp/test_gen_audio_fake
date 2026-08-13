@@ -245,12 +245,22 @@ def test_notebook_covers_every_stage(notebook_text):
 
 def test_stages_run_through_the_fail_fast_helper(notebook_code):
     """`!python …` lỗi vẫn để notebook chạy tiếp — mọi stage phải đi qua run()."""
-    assert "def run(*args):" in notebook_code
-    assert "subprocess.run(cmd).returncode != 0" in notebook_code
+    assert "def run(*args, optional=False):" in notebook_code
+    assert "raise SystemExit(" in notebook_code
     for stage in STAGES_IN_NOTEBOOK:
         assert f"!python -m aidetector {stage}" not in notebook_code, (
             f"stage {stage} vẫn gọi bằng `!python`, lỗi sẽ bị nuốt"
         )
+
+
+def test_optional_engine_cell_does_not_halt_the_notebook(notebook_code):
+    """OmniVoice cần GPU + quyền tải checkpoint — hỏng thì bỏ qua, không dừng cả phiên."""
+    assert 'optional=True' in notebook_code
+    omnivoice_call = next(
+        line for line in notebook_code.splitlines()
+        if 'run("generate"' in line and "omnivoice" in line
+    )
+    assert "optional=True" in omnivoice_call
 
 
 def test_dataset_phase_comes_before_training_phase(notebook_text):

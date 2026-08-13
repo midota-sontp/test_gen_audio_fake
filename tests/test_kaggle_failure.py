@@ -190,6 +190,43 @@ def test_kokoro_and_omnivoice_need_opposite_transformers(monkeypatch):
     assert not OmniVoiceGenerator.availability()
 
 
+def test_gated_checkpoint_error_says_how_to_fix_it(monkeypatch):
+    """401 thô của HuggingFace không cho biết phải làm gì tiếp."""
+    import sys
+    import types
+
+    from aidetector.generate.omnivoice import OmniVoiceGenerator
+
+    fake = types.ModuleType("omnivoice")
+
+    class _OmniVoice:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            raise OSError(
+                "401 Client Error.\n\nCannot access gated repo for url "
+                "https://huggingface.co/g-group-ai-lab/g-omnivoice/resolve/f2b7/x.\n"
+                "Access to model g-group-ai-lab/g-omnivoice is restricted."
+            )
+
+    fake.OmniVoice = _OmniVoice
+    monkeypatch.setitem(sys.modules, "omnivoice", fake)
+
+    generator = OmniVoiceGenerator(device="cpu", checkpoint="g-group-ai-lab/g-omnivoice")
+    with pytest.raises(RuntimeError) as err:
+        generator.load()
+    message = str(err.value)
+    assert "GATED" in message
+    assert "k2-fsa/OmniVoice" in message      # lối thoát nhanh: dùng bản công khai
+    assert "HF_TOKEN" in message              # hoặc: xin quyền rồi đặt token
+    assert "Secrets" in message               # nói rõ chỗ đặt token trên Kaggle
+
+
+def test_default_kaggle_checkpoint_is_a_public_repo():
+    """Mặc định phải tải được ngay, không bắt người dùng đi xin quyền trước."""
+    cfg = Config.load("configs/kaggle.yaml")
+    assert cfg["generate.options.omnivoice.checkpoint"] == "k2-fsa/OmniVoice"
+
+
 def test_uninstalled_engine_reports_missing_not_version_conflict(monkeypatch):
     """Chưa cài thì phải bảo là chưa cài, đừng đổ cho phiên bản transformers."""
     import importlib.util
