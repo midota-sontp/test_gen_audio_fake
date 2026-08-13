@@ -42,7 +42,10 @@ generate:
   # texts_file: data/texts_vi.txt   # chỉ dùng khi corpus REAL không có transcript
 
   voices:                  # bỏ trống ⇒ dùng toàn bộ giọng mặc định của engine
-    piper: [vi_VN-vais1000-medium, vi_VN-25hours_single-low, vi_VN-vivos-x_low]
+    # CHỈ giọng này mã hoá được thanh điệu tiếng Việt. Hai giọng vi_VN còn lại
+    # (vi_VN-25hours_single-low, vi_VN-vivos-x_low) có bảng phoneme thiếu hẳn ký
+    # hiệu thanh điệu nên đọc ra tiếng Việt MẤT DẤU — engine sẽ tự loại và cảnh báo.
+    piper: [vi_VN-vais1000-medium]
     kokoro: [diem_trinh, hung_thinh, mai_linh, manh_dung, my_yen, ngoc_huyen,
              phat_tai, thanh_dat, tuan_ngoc]
 

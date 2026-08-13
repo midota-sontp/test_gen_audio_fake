@@ -90,6 +90,7 @@ class KokoroVietnameseGenerator(Generator):
         voice: str | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
+        language: str | None = None,   # bỏ qua: model chỉ có tiếng Việt
     ) -> tuple[np.ndarray, int]:
         name = voice or self._voice_names[0]
         result = self._engine(name).synthesize(text)

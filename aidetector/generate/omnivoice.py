@@ -43,6 +43,12 @@ class OmniVoiceGenerator(Generator):
         super().__init__(device, **options)
         self.checkpoint = options.get("checkpoint", DEFAULT_CHECKPOINT)
         self.dtype = options.get("dtype", "auto")
+        # Ngôn ngữ mặc định khi bản ghi không ghi rõ. Model phủ 600+ ngôn ngữ nên
+        # để nó tự đoán là cách nhanh nhất để ra audio "không giống tiếng Việt".
+        self.language = options.get("language", "vi")
+        # VIVOS và nhiều corpus khác lưu transcript TOÀN CHỮ HOA; bật chuẩn hoá để
+        # model không đọc chúng như chuỗi chữ cái rời rạc.
+        self.normalize_text = bool(options.get("normalize_text", True))
         self._model = None
 
     #: OmniVoice 0.2.x dùng HiggsAudioV2TokenizerModel, chỉ có từ transformers 5.3.
@@ -115,11 +121,18 @@ class OmniVoiceGenerator(Generator):
         voice: str | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
+        language: str | None = None,
     ) -> tuple[np.ndarray, int]:
         if not ref_audio:
             raise ValueError("OmniVoice cần `ref_audio` (đoạn giọng thật để clone)")
         self.ensure_loaded()
         assert self._model is not None
-        output = self._model.generate(text=text, ref_audio=str(ref_audio), ref_text=ref_text or "")
+        output = self._model.generate(
+            text=text,
+            language=language or self.language,
+            ref_audio=str(ref_audio),
+            ref_text=ref_text or "",
+            normalize_text=self.normalize_text,
+        )
         audio = np.asarray(output[0] if isinstance(output, (list, tuple)) else output, dtype=np.float32)
         return audio.reshape(-1), self.native_sample_rate

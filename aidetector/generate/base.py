@@ -74,8 +74,15 @@ class Generator:
         voice: str | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
+        language: str | None = None,
     ) -> tuple[np.ndarray, int]:
-        """Sinh audio → (mảng float32 mono, sample_rate). Ném lỗi nếu thất bại."""
+        """Sinh audio → (mảng float32 mono, sample_rate). Ném lỗi nếu thất bại.
+
+        `language` là mã ngôn ngữ của `text` (vd "vi"). Engine đa ngữ BẮT BUỘC phải
+        dùng nó: bỏ trống thì model phải tự đoán, và đoán sai nghĩa là đọc tiếng Việt
+        bằng âm vị của thứ tiếng khác. Engine một-ngôn-ngữ (giọng đã cố định sẵn
+        tiếng) có thể bỏ qua tham số này.
+        """
         raise NotImplementedError
 
     # ------------------------------------------------------------------ tiện ích

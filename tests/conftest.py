@@ -71,7 +71,7 @@ class DummyTTS(Generator):
     def voices(self):
         return ["voice_a", "voice_b"]
 
-    def synthesize(self, text, voice=None, ref_audio=None, ref_text=None):
+    def synthesize(self, text, voice=None, ref_audio=None, ref_text=None, language=None):
         seed = abs(hash((text, voice))) % 10_000
         rng = np.random.default_rng(seed)
         t = np.arange(int(5.0 * self.native_sample_rate)) / self.native_sample_rate
@@ -88,10 +88,10 @@ class DummyClone(DummyTTS):
     def voices(self):
         return []
 
-    def synthesize(self, text, voice=None, ref_audio=None, ref_text=None):
+    def synthesize(self, text, voice=None, ref_audio=None, ref_text=None, language=None):
         if not ref_audio:
             raise ValueError("cần ref_audio")
-        return super().synthesize(text, voice, ref_audio, ref_text)
+        return super().synthesize(text, voice, ref_audio, ref_text, language)
 
 
 class DummyBackbone(Backbone):

@@ -186,7 +186,8 @@ def generate_fakes(
 
         try:
             audio, sample_rate = gen.synthesize(
-                target.text, voice=voice, ref_audio=ref_path, ref_text=ref_text
+                target.text, voice=voice, ref_audio=ref_path, ref_text=ref_text,
+                language=target.language or None,
             )
         except Exception as exc:  # noqa: BLE001 — engine bên thứ ba, lỗi rất đa dạng
             log.warning("Sinh lỗi (%s, utt=%s): %s", engine_id, target.utt_id, exc)
