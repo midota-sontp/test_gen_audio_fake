@@ -167,6 +167,13 @@ def notebook_text(notebook) -> str:
     return "".join("".join(c["source"]) for c in notebook["cells"])
 
 
+@pytest.fixture(scope="module")
+def notebook_code(notebook) -> str:
+    """Chỉ phần ô code — markdown chứa ví dụ minh hoạ, không phải thứ được chạy."""
+    return "".join("".join(c["source"])
+                   for c in notebook["cells"] if c["cell_type"] == "code")
+
+
 def test_there_is_exactly_one_notebook():
     """Một file duy nhất để import — hai bản song song chỉ gây nhầm."""
     assert sorted(p.name for p in Path("notebooks").glob("*.ipynb")) == [NOTEBOOK.name]
@@ -226,26 +233,39 @@ def test_notebook_payload_matches_the_current_source(notebook_text):
     )
 
 
+STAGES_IN_NOTEBOOK = ("ingest", "generate", "validate", "split", "augment",
+                      "features", "train", "evaluate", "pack", "detect")
+
+
 def test_notebook_covers_every_stage(notebook_text):
     assert "configs/kaggle.yaml" in notebook_text
-    for stage in ("ingest", "generate", "validate", "split", "augment",
-                  "features", "train", "evaluate", "pack"):
-        assert f"aidetector {stage}" in notebook_text, f"notebook thiếu stage {stage}"
+    for stage in STAGES_IN_NOTEBOOK:
+        assert f'run("{stage}"' in notebook_text, f"notebook thiếu stage {stage}"
+
+
+def test_stages_run_through_the_fail_fast_helper(notebook_code):
+    """`!python …` lỗi vẫn để notebook chạy tiếp — mọi stage phải đi qua run()."""
+    assert "def run(*args):" in notebook_code
+    assert "subprocess.run(cmd).returncode != 0" in notebook_code
+    for stage in STAGES_IN_NOTEBOOK:
+        assert f"!python -m aidetector {stage}" not in notebook_code, (
+            f"stage {stage} vẫn gọi bằng `!python`, lỗi sẽ bị nuốt"
+        )
 
 
 def test_dataset_phase_comes_before_training_phase(notebook_text):
     """Phải tạo + kiểm tra dataset xong mới tới huấn luyện."""
     assert notebook_text.index("PHẦN A") < notebook_text.index("PHẦN B")
-    assert notebook_text.index("aidetector generate") < notebook_text.index("aidetector train")
+    assert notebook_text.index('run("generate"') < notebook_text.index('run("train")')
     # split trước augment: bản augment chỉ được sinh cho train
-    assert notebook_text.index("aidetector split") < notebook_text.index("aidetector augment")
+    assert notebook_text.index('run("split")') < notebook_text.index('run("augment"')
     # đóng gói dataset nằm trong phần A, trước khi huấn luyện
-    assert notebook_text.index("aidetector pack") < notebook_text.index("aidetector train")
+    assert notebook_text.index('run("pack"') < notebook_text.index('run("train")')
 
 
 def test_dataset_phase_has_a_smoke_switch_and_inspection(notebook_text):
     assert "SMOKE = True" in notebook_text
-    assert "aidetector validate" in notebook_text
+    assert 'run("validate")' in notebook_text
     # nghe thử + nhìn phổ trước khi tốn thời gian train
     assert "Audio(" in notebook_text and "specgram" in notebook_text
     # kiểm tra fake có real đối chứng

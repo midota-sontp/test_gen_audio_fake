@@ -155,6 +155,22 @@ with tarfile.open(fileobj=io.BytesIO(_raw), mode="r:gz") as _tf:
 os.chdir(WORK)
 sys.path.insert(0, str(WORK))
 CFG = "configs/kaggle.yaml"
+
+
+# Chạy một stage của pipeline và DỪNG notebook ngay nếu nó lỗi.
+# Không dùng `!python -m aidetector ...`: trong Jupyter, lệnh shell lỗi vẫn để
+# notebook chạy tiếp các ô sau, nên một stage hỏng sẽ âm thầm kéo theo cả loạt lỗi
+# vô nghĩa ở dưới — hoặc tệ hơn, chạy tiếp trên dữ liệu cũ còn sót lại.
+def run(*args):
+    import subprocess
+
+    cmd = [sys.executable, "-m", "aidetector", *[str(a) for a in args], "-c", CFG]
+    print("$ python -m aidetector " + " ".join(str(a) for a in args) + f" -c {{CFG}}\\n")
+    if subprocess.run(cmd).returncode != 0:
+        raise SystemExit(f"✖ Stage {{args[0]!r}} thất bại — xem log ngay phía trên, "
+                         f"đừng chạy tiếp các ô sau.")
+
+
 print(f"Đã bung {{len(_raw) / 1024:.0f}} KB mã nguồn vào {{WORK}}")
 """),
 
@@ -172,7 +188,7 @@ code("""
 !apt-get -qq install -y ffmpeg > /dev/null 2>&1 || true   # cần cho augment MP3/AAC
 """),
 code("""
-!python -m aidetector info -c {CFG}
+run("info")
 """),
 
 # ─────────────────────────────────────────────────────────── PHẦN A
@@ -241,7 +257,7 @@ Real và fake dùng **chung** chuỗi chuẩn hoá này, nên mô hình không t
 lớp bằng định dạng hay độ to.
 """),
 code("""
-!python -m aidetector ingest {RAW} -c {CFG} --limit {N_REAL} --per-speaker {PER_SPEAKER}
+run("ingest", RAW, "--limit", N_REAL, "--per-speaker", PER_SPEAKER)
 """),
 code("""
 # Chặn sớm: ba điều kiện dưới đây mà không đạt thì mọi bước sau đều vô nghĩa.
@@ -281,12 +297,12 @@ theo chủ đề câu nói hay theo danh tính người nói.
 """),
 code("""
 # Hai engine TTS giọng cố định — nhanh, chạy được cả trên CPU.
-!python -m aidetector generate -c {CFG} --engines piper kokoro --count {N_FAKE_TTS}
+run("generate", "--engines", "piper", "kokoro", "--count", N_FAKE_TTS)
 """),
 code("""
 # OmniVoice: voice cloning zero-shot, clone thẳng giọng speaker thật từ một câu
 # khác của họ. Chậm hơn nhiều và cần GPU — bỏ qua ô này nếu chạy CPU.
-!python -m aidetector generate -c {CFG} --engines omnivoice --count {N_FAKE_CLONE}
+run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE)
 """),
 
 md("""
@@ -295,7 +311,7 @@ md("""
 Ba việc: soi toàn corpus xem có file nào phạm chuẩn, xem thống kê, và **nghe thử**.
 """),
 code("""
-!python -m aidetector validate -c {CFG}
+run("validate")
 """),
 code("""
 # Thống kê chi tiết: số lượng, thời lượng, cân bằng hai lớp, phủ speaker
@@ -384,7 +400,7 @@ Chạy xong notebook: **Output → New Dataset**. Phiên sau chỉ cần add dat
 `unpack`, khỏi phải ingest và generate lại.
 """),
 code("""
-!python -m aidetector pack -c {CFG} --out /kaggle/working/corpus.zip
+run("pack", "--out", "/kaggle/working/corpus.zip")
 !ls -lh /kaggle/working/corpus.zip
 """),
 
@@ -406,7 +422,7 @@ Chạy phần này khi dataset đã ưng. Nếu dataset đến từ phiên trư�
 """),
 code("""
 # Chỉ chạy khi dùng lại dataset của phiên trước:
-# !python -m aidetector unpack /kaggle/input/<tên-dataset>/corpus.zip -c {CFG}
+# run("unpack", "/kaggle/input/<tên-dataset>/corpus.zip")
 """),
 
 md("""
@@ -420,8 +436,8 @@ Thêm `--holdout omnivoice` nếu muốn giữ hẳn một engine riêng cho tes
 đo sát thực tế nhất: mô hình có bắt được engine **chưa từng thấy** hay không.
 """),
 code("""
-!python -m aidetector split   -c {CFG}
-!python -m aidetector augment -c {CFG} --copies 1
+run("split")
+run("augment", "--copies", 1)
 """),
 
 md("""
@@ -431,9 +447,9 @@ Embedding cache theo `utt_id` nên chạy lại chỉ trích phần mới. Đổ
 `--set features.backbone.name=wav2vec2` — cache tách riêng, không đè lên nhau.
 """),
 code("""
-!python -m aidetector features -c {CFG}
-!python -m aidetector train    -c {CFG}
-!python -m aidetector evaluate -c {CFG}
+run("features")
+run("train")
+run("evaluate")
 """),
 
 md("## B3. Kết quả"),
@@ -467,7 +483,11 @@ display(Image("/kaggle/working/reports/confusion_matrix.png"))
 
 md("## B4. Thử trên file bất kỳ + lưu mô hình"),
 code("""
-!python -m aidetector detect -c {CFG} /kaggle/working/corpus/audio/fake/piper/*/*.wav | head -10
+import glob
+
+mau = sorted(glob.glob("/kaggle/working/corpus/audio/fake/piper/*/*.wav"))[:5]
+mau += sorted(glob.glob("/kaggle/working/corpus/audio/real/*/*/*.wav"))[:5]
+run("detect", *mau)
 """),
 code("""
 import shutil
@@ -482,14 +502,14 @@ md("""
 
 ```python
 # Đổi backbone (cache đặc trưng tách riêng nên không đụng nhau)
-!python -m aidetector run features train evaluate -c {CFG} --set features.backbone.name=wav2vec2
+run("run", "features", "train", "evaluate", "--set", "features.backbone.name=wav2vec2")
 
 # Đo khả năng tổng quát sang engine chưa từng thấy
-!python -m aidetector split -c {CFG} --holdout omnivoice
-!python -m aidetector run features train evaluate -c {CFG}
+run("split", "--holdout", "omnivoice")
+run("run", "features", "train", "evaluate")
 
 # Augment mạnh tay hơn nếu clean và augmented chênh lệch nhiều
-!python -m aidetector augment -c {CFG} --copies 3 --set augment.ops.codec.p=0.8
+run("augment", "--copies", 3, "--set", "augment.ops.codec.p=0.8")
 ```
 
 Toàn bộ tham số nằm trong `configs/default.yaml` (bản Kaggle kế thừa nó qua

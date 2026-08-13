@@ -68,6 +68,38 @@ def test_shallow_root_still_wins_on_a_tie(tmp_path, vivos_like):
     assert cls is VivosAdapter and effective == vivos_like
 
 
+def test_unrecognised_dataset_error_says_what_is_actually_there(tmp_path):
+    """Chỉ báo "không nhận diện được" thì người dùng không biết phải sửa gì."""
+    root = tmp_path / "input"
+    (root / "kynthesis").mkdir(parents=True)
+    (root / "kynthesis" / "train-00000.parquet").write_bytes(b"PAR1")
+    (root / "kynthesis" / "dataset_info.json").write_text("{}")
+
+    with pytest.raises(ValueError) as err:
+        detect_adapter(root)
+    message = str(err.value)
+    assert "2 file" in message
+    assert ".parquet" in message                       # nói rõ gặp đuôi gì
+    assert "train-00000.parquet" in message            # kèm ví dụ đường dẫn
+    assert "--hf" in message                           # gợi ý đúng hướng xử lý
+    assert ".wav" in message                           # liệt kê đuôi được hỗ trợ
+
+
+def test_archive_only_directory_suggests_extracting(tmp_path):
+    root = tmp_path / "input"
+    root.mkdir()
+    (root / "vivos.tar.gz").write_bytes(b"\x1f\x8b")
+    with pytest.raises(ValueError, match="giải nén"):
+        detect_adapter(root)
+
+
+def test_empty_directory_says_it_is_empty(tmp_path):
+    root = tmp_path / "trong"
+    root.mkdir()
+    with pytest.raises(ValueError, match="rỗng"):
+        detect_adapter(root)
+
+
 # ─────────────────────────── mắt xích 2: speaker suy ra từ thư mục sai tầng
 def test_folder_adapter_reads_speaker_from_the_nearest_directory(tmp_path):
     """Bố cục <bộ>/<split>/<speaker>/x.wav — tầng đầu tiên KHÔNG phải speaker."""

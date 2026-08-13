@@ -7,12 +7,14 @@ loại dataset khi người dùng chỉ đưa vào một thư mục.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
 import numpy as np
 
+from ..corpus.spec import AUDIO_EXTENSIONS
 from ..utils import get_logger
 
 log = get_logger("aidetector.ingest")
@@ -112,6 +114,54 @@ def _best_adapter_at(root: Path) -> tuple[float, type[SourceAdapter]] | None:
     return scores[0] if scores and scores[0][0] > 0 else None
 
 
+_ARCHIVE_SUFFIXES = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar"}
+_TABULAR_SUFFIXES = {".parquet", ".arrow", ".jsonl", ".json", ".csv", ".tsv"}
+
+
+def describe_directory(root: Path, max_files: int = 20_000) -> str:
+    """Mô tả thứ có thật trong thư mục, để lỗi "không nhận diện được" còn hành động được.
+
+    Không có dòng này thì người dùng chỉ biết "hỏng" mà không biết vì sao: thư mục
+    rỗng? sai đường dẫn? dataset còn nằm trong file nén? định dạng lạ?
+    """
+    from collections import Counter
+
+    suffixes: Counter[str] = Counter()
+    samples: list[str] = []
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in filenames:
+            if name.startswith("."):
+                continue
+            total += 1
+            suffixes[Path(name).suffix.lower() or "(không đuôi)"] += 1
+            if len(samples) < 5:
+                samples.append(str(Path(dirpath, name).relative_to(root)))
+            if total >= max_files:
+                break
+        if total >= max_files:
+            break
+
+    if total == 0:
+        return "  Thư mục rỗng (không có file nào) — kiểm tra lại đường dẫn."
+
+    lines = [f"  Có {total} file nhưng không file audio nào được nhận ra."]
+    lines.append("  Đuôi file gặp phải: "
+                 + ", ".join(f"{ext}×{n}" for ext, n in suffixes.most_common(8)))
+    lines.append("  Ví dụ: " + ", ".join(samples))
+
+    present = set(suffixes)
+    if present & _ARCHIVE_SUFFIXES:
+        lines.append("  → Dataset có vẻ vẫn nằm trong file nén; giải nén ra thư mục rồi ingest lại.")
+    if present & _TABULAR_SUFFIXES:
+        lines.append("  → Trông như dataset dạng bảng (parquet/arrow của HuggingFace). "
+                     "Dùng `ingest --hf <repo_id>` thay vì đọc theo thư mục.")
+    known = ", ".join(sorted(AUDIO_EXTENSIONS))
+    lines.append(f"  → Các đuôi audio được hỗ trợ: {known}")
+    return "\n".join(lines)
+
+
 def detect_adapter(
     root: Path, max_depth: int = MAX_PROBE_DEPTH
 ) -> tuple[type[SourceAdapter], float, Path]:
@@ -133,8 +183,9 @@ def detect_adapter(
 
     if best is None:
         raise ValueError(
-            f"Không nhận diện được dataset tại {root} (đã dò tới {max_depth} tầng con). "
-            f"Chỉ định thủ công bằng --adapter <{'|'.join(sorted(_REGISTRY))}>"
+            f"Không nhận diện được dataset tại {root} (đã dò tới {max_depth} tầng con).\n"
+            + describe_directory(root)
+            + f"\nHoặc chỉ định thủ công: --adapter <{'|'.join(sorted(_REGISTRY))}>"
         )
 
     score, cls, effective = best
