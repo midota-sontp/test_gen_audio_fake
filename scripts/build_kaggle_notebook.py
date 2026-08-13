@@ -369,10 +369,14 @@ mới nâng transformers lên cho OmniVoice. Sau ô này Kokoro không dùng đ�
 không sao, nó đã sinh xong ở trên. Backbone WavLM chạy tốt trên cả hai nhánh nên
 phần huấn luyện không bị ảnh hưởng.
 
-Mặc định dùng checkpoint công khai `k2-fsa/OmniVoice`. Bản fine-tune tiếng Việt
-`g-group-ai-lab/g-omnivoice` cho giọng tự nhiên hơn nhưng là **repo gated**: phải
-xin quyền trên HuggingFace, tạo token, rồi đặt `HF_TOKEN` (Kaggle: Add-ons →
-Secrets) và thêm `--set generate.options.omnivoice.checkpoint=g-group-ai-lab/g-omnivoice`.
+Checkpoint mặc định là **`splendor1811/omnivoice-vietnamese`** — fine-tune riêng cho
+tiếng Việt và là repo công khai nên tải được ngay, không cần token. Bản gốc đa ngữ
+`k2-fsa/OmniVoice` đọc tiếng Việt kém hơn rõ rệt; chỉ đổi sang nó khi cần ngôn ngữ khác:
+
+```python
+run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE,
+    "--set", "generate.options.omnivoice.checkpoint=k2-fsa/OmniVoice", optional=True)
+```
 """),
 code("""
 !pip install -q omnivoice "transformers>=5.3"

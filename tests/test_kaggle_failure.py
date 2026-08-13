@@ -216,15 +216,25 @@ def test_gated_checkpoint_error_says_how_to_fix_it(monkeypatch):
         generator.load()
     message = str(err.value)
     assert "GATED" in message
-    assert "k2-fsa/OmniVoice" in message      # lối thoát nhanh: dùng bản công khai
+    # Lối thoát nhanh: bản tiếng Việt công khai, không cần xin quyền.
+    assert "splendor1811/omnivoice-vietnamese" in message
     assert "HF_TOKEN" in message              # hoặc: xin quyền rồi đặt token
     assert "Secrets" in message               # nói rõ chỗ đặt token trên Kaggle
 
 
-def test_default_kaggle_checkpoint_is_a_public_repo():
-    """Mặc định phải tải được ngay, không bắt người dùng đi xin quyền trước."""
-    cfg = Config.load("configs/kaggle.yaml")
-    assert cfg["generate.options.omnivoice.checkpoint"] == "k2-fsa/OmniVoice"
+def test_default_checkpoint_is_the_public_vietnamese_finetune():
+    """Mặc định phải là bản tiếng Việt VÀ tải được ngay, không cần xin quyền.
+
+    `g-group-ai-lab/g-omnivoice` là bản tiếng Việt nhưng gated (401);
+    `splendor1811/omnivoice-vietnamese` cũng là fine-tune tiếng Việt nhưng công khai.
+    """
+    from aidetector.generate.omnivoice import DEFAULT_CHECKPOINT
+
+    assert DEFAULT_CHECKPOINT == "splendor1811/omnivoice-vietnamese"
+    for name in ("configs/default.yaml", "configs/kaggle.yaml"):
+        checkpoint = Config.load(name)["generate.options.omnivoice.checkpoint"]
+        assert checkpoint == DEFAULT_CHECKPOINT, name
+        assert "g-group-ai-lab" not in checkpoint, "repo gated không được làm mặc định"
 
 
 def test_uninstalled_engine_reports_missing_not_version_conflict(monkeypatch):

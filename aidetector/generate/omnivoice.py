@@ -7,7 +7,6 @@ người nói — mô hình buộc phải học dấu vết tổng hợp thay v�
 
 Cài:  pip install omnivoice
 Backend hỗ trợ CUDA, Apple Silicon (MPS) và Intel XPU; CPU thuần rất chậm.
-Bản fine-tune riêng cho tiếng Việt: `g-group-ai-lab/g-omnivoice`.
 """
 
 from __future__ import annotations
@@ -28,7 +27,13 @@ from .base import (
 
 log = get_logger("aidetector.generate.omnivoice")
 
-DEFAULT_CHECKPOINT = "k2-fsa/OmniVoice"
+#: Bản fine-tune tiếng Việt, repo CÔNG KHAI nên tải được ngay không cần token.
+#: Nó không kèm thư mục `audio_tokenizer/`, nhưng thư viện tự bù bằng
+#: `eustlb/higgs-audio-v2-tokenizer` (cũng công khai) nên vẫn nạp được bình thường.
+#: Bản gốc đa ngữ `k2-fsa/OmniVoice` đọc tiếng Việt kém hơn rõ rệt.
+DEFAULT_CHECKPOINT = "splendor1811/omnivoice-vietnamese"
+#: Bản gốc đa ngữ 600+ ngôn ngữ — dùng khi cần ngôn ngữ khác tiếng Việt.
+MULTILINGUAL_CHECKPOINT = "k2-fsa/OmniVoice"
 
 
 @register

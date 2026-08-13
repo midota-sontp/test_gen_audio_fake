@@ -77,7 +77,7 @@ python -m aidetector validate --fix     # loại bỏ bản ghi hỏng khỏi ma
 |---|---|---|---|
 | `piper` | TTS giọng cố định | CPU (rất nhanh) | 3 giọng `vi_VN`, tự tải từ `rhasspy/piper-voices` |
 | `kokoro` | TTS giọng cố định | CPU | Kokoro-Vietnamese, 13 giọng vi |
-| `omnivoice` | **voice cloning** zero-shot | GPU / Apple MPS | clone chính giọng speaker trong corpus REAL |
+| `omnivoice` | **voice cloning** zero-shot | GPU / Apple MPS | clone chính giọng speaker trong corpus REAL; mặc định dùng fine-tune tiếng Việt `splendor1811/omnivoice-vietnamese` |
 
 ```bash
 pip install piper-tts

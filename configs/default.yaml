@@ -53,8 +53,11 @@ generate:
     piper:
       data_dir: models/piper
     omnivoice:
-      checkpoint: k2-fsa/OmniVoice    # bản vi: g-group-ai-lab/g-omnivoice
+      # Fine-tune tiếng Việt (công khai). Bản gốc đa ngữ: k2-fsa/OmniVoice
+      checkpoint: splendor1811/omnivoice-vietnamese
       dtype: auto
+      language: vi          # model phủ 600+ ngôn ngữ, phải nói rõ tiếng gì
+      normalize_text: true  # transcript VIVOS toàn chữ HOA
 
 # -----------------------------------------------------------------------------
 # Augmentation — áp dụng NHƯ NHAU cho real và fake; bản clean luôn được giữ lại.
