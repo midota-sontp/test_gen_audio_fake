@@ -263,6 +263,37 @@ def test_dataset_phase_comes_before_training_phase(notebook_text):
     assert notebook_text.index('run("pack"') < notebook_text.index('run("train")')
 
 
+def test_dataset_picker_scores_every_mount(notebook_code, tmp_path, monkeypatch):
+    """Lấy bừa thư mục đầu tiên sẽ chết khi dataset rỗng đứng trước dataset thật."""
+    source = next(s for s in (notebook_code,) if "Dataset đang mount" in s)
+    cell = source[source.index("import logging"):source.index('print(f"\\nNguồn REAL')]
+
+    (tmp_path / "aaa-rong").mkdir()                     # rỗng, đứng trước theo abc
+    good = tmp_path / "zzz-vivos" / "vivos"
+    good.mkdir(parents=True)
+    for split in ("train", "test"):
+        (good / split / "waves" / "SPK1").mkdir(parents=True)
+        (good / split / "prompts.txt").write_text("SPK1_R001 xin chào", encoding="utf-8")
+
+    namespace: dict = {}
+    exec(compile(cell.replace('Path("/kaggle/input")', f'Path({str(tmp_path)!r})'),
+                 "picker", "exec"), namespace)
+    assert namespace["RAW"] == str(tmp_path / "zzz-vivos")
+
+
+def test_dataset_picker_stops_with_details_when_nothing_usable(notebook_code, tmp_path):
+    source = notebook_code
+    cell = source[source.index("import logging"):source.index('print(f"\\nNguồn REAL')]
+    (tmp_path / "chi-co-parquet").mkdir()
+    (tmp_path / "chi-co-parquet" / "train.parquet").write_bytes(b"PAR1")
+
+    with pytest.raises(SystemExit) as err:
+        exec(compile(cell.replace('Path("/kaggle/input")', f'Path({str(tmp_path)!r})'),
+                     "picker", "exec"), {})
+    assert "Không dataset nào chứa audio" in str(err.value)
+    assert ".parquet" in str(err.value)
+
+
 def test_dataset_phase_has_a_smoke_switch_and_inspection(notebook_text):
     assert "SMOKE = True" in notebook_text
     assert 'run("validate")' in notebook_text

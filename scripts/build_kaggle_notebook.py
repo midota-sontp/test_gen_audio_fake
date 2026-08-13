@@ -207,36 +207,53 @@ md("""
 ưng rồi đặt `SMOKE = False` và chạy lại từ A2 để làm thật.
 """),
 code("""
+import logging
 from pathlib import Path
+
+from aidetector.ingest import detect_adapter
+from aidetector.ingest.base import describe_directory
 
 SMOKE = True        # ← True: chạy thử nhanh · False: chạy thật
 RAW = None          # ← đặt tay nếu tự dò không đúng, vd "/kaggle/input/vivos"
-
-if RAW is None:
-    found = sorted(p for p in Path("/kaggle/input").glob("*") if p.is_dir())
-    if not found:
-        raise SystemExit("Chưa add dataset nào — Add Input → Datasets ở panel bên phải")
-    RAW = str(found[0])
-    if len(found) > 1:
-        print("Có nhiều dataset, đang dùng cái đầu:", ", ".join(p.name for p in found))
 
 if SMOKE:
     N_REAL, PER_SPEAKER, N_FAKE_TTS, N_FAKE_CLONE = 60, 8, 30, 15
 else:
     N_REAL, PER_SPEAKER, N_FAKE_TTS, N_FAKE_CLONE = 4000, 120, 1200, 800
 
-print(f"Nguồn REAL : {RAW}")
+# Soi TỪNG dataset đang mount rồi chọn cái dùng được, thay vì lấy bừa cái đầu tiên:
+# một dataset rỗng hay sai định dạng đứng đầu bảng chữ cái sẽ làm hỏng cả phiên.
+logging.getLogger("aidetector.ingest").setLevel(logging.WARNING)
+mounted = sorted(p for p in Path("/kaggle/input").glob("*") if p.is_dir())
+if not mounted:
+    raise SystemExit("Chưa add dataset nào — Add Input → Datasets ở panel bên phải.")
+
+print("Dataset đang mount:")
+usable = []
+for folder in mounted:
+    try:
+        adapter, score, effective = detect_adapter(folder)
+    except ValueError as exc:
+        reason = next((l.strip() for l in str(exc).splitlines()[1:] if l.strip()),
+                      "không nhận diện được")
+        print(f"  ✖ {folder.name:<26} {reason}")
+        continue
+    where = "" if effective == folder else f" tại {effective.relative_to(folder)}/"
+    print(f"  ✔ {folder.name:<26} {adapter.name} (điểm {score:.2f}){where}")
+    usable.append((score, folder))
+
+if RAW is None:
+    if not usable:
+        raise SystemExit(
+            "Không dataset nào chứa audio đọc được. Chi tiết:\\n"
+            + "\\n".join(f"[{p.name}]\\n" + describe_directory(p) for p in mounted)
+        )
+    usable.sort(key=lambda pair: -pair[0])
+    RAW = str(usable[0][1])
+
+print(f"\\nNguồn REAL : {RAW}")
 print(f"Chế độ     : {'CHẠY THỬ' if SMOKE else 'CHẠY THẬT'}")
 print(f"Quy mô     : {N_REAL} real · {N_FAKE_TTS} fake TTS · {N_FAKE_CLONE} fake cloning")
-
-# Xem qua cấu trúc: dataset Kaggle thường bọc thêm một tầng (<slug>/vivos/...).
-# `ingest` tự chui xuống tìm, nhưng nhìn cây thư mục vẫn giúp phát hiện nhầm lẫn sớm.
-print("\\nCấu trúc thư mục (2 tầng đầu):")
-for lvl1 in sorted(Path(RAW).iterdir())[:8]:
-    print(f"  {lvl1.name}{'/' if lvl1.is_dir() else ''}")
-    if lvl1.is_dir():
-        for lvl2 in sorted(lvl1.iterdir())[:6]:
-            print(f"    {lvl2.name}{'/' if lvl2.is_dir() else ''}")
 """),
 
 md("""
