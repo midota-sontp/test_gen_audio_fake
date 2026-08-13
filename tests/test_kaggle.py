@@ -263,6 +263,56 @@ def test_dataset_phase_comes_before_training_phase(notebook_text):
     assert notebook_text.index('run("pack"') < notebook_text.index('run("train")')
 
 
+def _bootstrap_cell(notebook: dict) -> str:
+    return "".join(next(c["source"] for c in notebook["cells"]
+                        if c["cell_type"] == "code" and "_PAYLOAD" in "".join(c["source"])))
+
+
+def test_bootstrap_drops_stale_modules_from_the_kernel(notebook, tmp_path, monkeypatch):
+    """Kernel Kaggle sống xuyên phiên: mã vừa bung phải thắng module đã import.
+
+    Không gỡ sys.modules thì Python giữ nguyên bản cũ và ném những lỗi vô lý kiểu
+    "cannot import name X" dù X nằm sờ sờ trong file.
+    """
+    import sys
+
+    work = tmp_path / "ai-detector"
+    old = work / "aidetector"
+    (old / "corpus").mkdir(parents=True)
+    (old / "__init__.py").write_text("")
+    (old / "corpus" / "__init__.py").write_text("")
+    (old / "corpus" / "spec.py").write_text("# bản cũ, chưa có AUDIO_EXTENSIONS\n")
+    (old / "chi_co_o_ban_cu.py").write_text("")
+
+    monkeypatch.syspath_prepend(str(work))
+    monkeypatch.chdir(tmp_path)
+    saved = {k: v for k, v in sys.modules.items() if k.startswith("aidetector")}
+    for key in saved:
+        del sys.modules[key]
+    try:
+        import aidetector.corpus.spec as stale_module
+
+        assert not hasattr(stale_module, "AUDIO_EXTENSIONS")
+
+        cell = _bootstrap_cell(notebook).replace(
+            'Path("/kaggle/working/ai-detector")', f"Path({str(work)!r})"
+        )
+        exec(compile(cell, "bootstrap", "exec"), {})
+
+        assert not any(m.startswith("aidetector") for m in sys.modules), \
+            "module cũ vẫn còn trong kernel"
+        # File chỉ tồn tại ở bản cũ phải bị dọn, không để lẫn vào bản mới.
+        assert not (old / "chi_co_o_ban_cu.py").exists()
+
+        from aidetector.corpus.spec import AUDIO_EXTENSIONS
+
+        assert ".wav" in AUDIO_EXTENSIONS
+    finally:
+        for key in [k for k in sys.modules if k.startswith("aidetector")]:
+            del sys.modules[key]
+        sys.modules.update(saved)
+
+
 def test_dataset_picker_scores_every_mount(notebook_code, tmp_path, monkeypatch):
     """Lấy bừa thư mục đầu tiên sẽ chết khi dataset rỗng đứng trước dataset thật."""
     source = next(s for s in (notebook_code,) if "Dataset đang mount" in s)

@@ -138,7 +138,7 @@ code(f"""
 # sha256(payload) = {sha[:16]}…
 {payload}
 
-import base64, hashlib, io, os, sys, tarfile
+import base64, hashlib, importlib, io, os, shutil, sys, tarfile
 from pathlib import Path
 
 _raw = base64.b64decode(_PAYLOAD)
@@ -146,6 +146,12 @@ assert hashlib.sha256(_raw).hexdigest() == "{sha}", "payload hỏng khi sao ché
 
 WORK = Path("/kaggle/working/ai-detector")
 WORK.mkdir(parents=True, exist_ok=True)
+
+# Xoá sạch cây mã nguồn cũ trước khi bung: chạy đè lên bản cũ sẽ để sót những file
+# đã bị bỏ ở bản mới, và để lại __pycache__ cũ.
+for _old in ("aidetector", "configs"):
+    shutil.rmtree(WORK / _old, ignore_errors=True)
+
 with tarfile.open(fileobj=io.BytesIO(_raw), mode="r:gz") as _tf:
     try:
         _tf.extractall(WORK, filter="data")     # Python >= 3.12
@@ -153,7 +159,18 @@ with tarfile.open(fileobj=io.BytesIO(_raw), mode="r:gz") as _tf:
         _tf.extractall(WORK)
 
 os.chdir(WORK)
-sys.path.insert(0, str(WORK))
+if str(WORK) not in sys.path:
+    sys.path.insert(0, str(WORK))
+
+# Kernel Kaggle sống xuyên suốt nhiều lần chạy. Nếu phiên trước đã import
+# aidetector, Python giữ nguyên module cũ trong sys.modules và lờ đi mã vừa bung —
+# biểu hiện là những lỗi rất khó hiểu kiểu "cannot import name X" dù X có trong
+# file. Phải gỡ chúng ra để lần import sau đọc lại từ đĩa.
+_stale = [m for m in sys.modules if m == "aidetector" or m.startswith("aidetector.")]
+for _m in _stale:
+    del sys.modules[_m]
+importlib.invalidate_caches()
+
 CFG = "configs/kaggle.yaml"
 
 
@@ -172,6 +189,8 @@ def run(*args):
 
 
 print(f"Đã bung {{len(_raw) / 1024:.0f}} KB mã nguồn vào {{WORK}}")
+if _stale:
+    print(f"Đã gỡ {{len(_stale)}} module aidetector cũ khỏi bộ nhớ kernel")
 """),
 
 md("""
