@@ -118,17 +118,19 @@ def cmd_generate(args) -> int:
 
     known = available_generators()
     results: list[dict] = []
-    failures: list[str] = []
+    failures: list[str] = []       # engine đã chạy nhưng hỏng
+    skipped: list[str] = []        # engine chưa cài, không hề được thử
+    unknown: list[str] = []
     for engine_id in engines:
         if engine_id not in known:
             log.error("Bỏ qua engine lạ %r (hiện có: %s)", engine_id, ", ".join(sorted(known)))
-            failures.append(f"{engine_id}: không có engine này")
+            unknown.append(engine_id)
             continue
         status = known[engine_id].availability()
         if not status:
             log.warning("Bỏ qua %s — %s%s", engine_id, status.reason,
                         f". Cài: {status.hint}" if status.hint else "")
-            failures.append(f"{engine_id}: {status.reason}")
+            skipped.append(f"{engine_id}: {status.reason}")
             continue
         try:
             with timed(f"generate {engine_id} ({per_engine} mẫu)", log):
@@ -150,13 +152,24 @@ def cmd_generate(args) -> int:
 
     print(manifest.summary())
     produced = sum(r.get("kept", 0) for r in results)
-    if failures:
-        log.warning("Engine không dùng được lần này:\n%s",
-                    "\n".join(f"  • {f}" for f in failures))
+    for label, items in (("Engine chạy lỗi", failures), ("Engine chưa cài, đã bỏ qua", skipped)):
+        if items:
+            log.warning("%s:\n%s", label, "\n".join(f"  • {i}" for i in items))
+
+    if unknown:
+        return 2                      # sai tên engine là lỗi cấu hình, phải báo
     if produced:
         return 0
-    log.error("Không engine nào sinh được audio giả.")
-    return 1
+    if failures:
+        log.error("Mọi engine được thử đều lỗi — không sinh được audio giả nào.")
+        return 1
+    # Chưa cài engine nào thì đây là bỏ qua, không phải hỏng: các engine tuỳ chọn
+    # (vd OmniVoice cần GPU) vắng mặt không được làm dừng cả pipeline.
+    log.warning(
+        "Không engine nào trong %s được cài — bỏ qua bước sinh fake. "
+        "Xem `python -m aidetector info` để biết cách cài.", ", ".join(engines),
+    )
+    return 0
 
 
 def cmd_augment(args) -> int:

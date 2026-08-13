@@ -344,3 +344,14 @@ mạng, xong trong ~12 giây.
 - `by_condition` so sánh clean vs augmented — chênh lệch lớn nghĩa là mô hình chưa
   bền với nhiễu/nén, nên tăng `augment.copies` hoặc xác suất `codec`.
 - Cảnh báo `khoảng cách val-train` trong log train là chỉ báo overfit.
+
+### Thử notebook ngay trên máy, không cần Kaggle
+
+```bash
+python scripts/run_notebook_locally.py /tmp/kaggle-sandbox /đường/dẫn/vivos
+```
+
+Thay `/kaggle/working` và `/kaggle/input` bằng thư mục sandbox rồi chạy tuần tự mọi
+ô code trong cùng một namespace, đúng như Jupyter. Bắt được những lỗi mà kiểm tra
+cú pháp bỏ sót: stage nuốt lỗi, ô đọc phải dữ liệu cũ, engine tuỳ chọn làm dừng cả
+phiên. Chạy lại sau mỗi lần `build_kaggle_notebook.py`.

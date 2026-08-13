@@ -344,7 +344,8 @@ run("generate", "--engines", "piper", "kokoro", "--count", N_FAKE_TTS)
 """),
 code("""
 # OmniVoice: voice cloning zero-shot, clone thẳng giọng speaker thật từ một câu
-# khác của họ. Chậm hơn nhiều và cần GPU — bỏ qua ô này nếu chạy CPU.
+# khác của họ. Đây là engine TUỲ CHỌN — chậm hơn nhiều và cần GPU. Chưa cài được
+# thì ô này chỉ báo bỏ qua, Piper/Kokoro ở trên đã đủ để đi tiếp.
 run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE)
 """),
 
