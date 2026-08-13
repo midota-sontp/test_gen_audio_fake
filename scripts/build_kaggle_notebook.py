@@ -198,13 +198,20 @@ Cài thư viện. Kaggle có sẵn torch + CUDA nên chỉ cài phần thiếu; 
 fake cài riêng — cái nào lỗi thì bỏ qua, ô `info` ngay dưới cho biết cái nào dùng được.
 """),
 code("""
-!pip install -q -r requirements.txt
-
+# Engine cài trước, requirements.txt cài SAU CÙNG: nó ghim transformers <5 (bản
+# Kaggle cài sẵn là 5.x, mà kokoro-vietnamese chỉ chạy trên 4.x), nên phải để nó
+# nói tiếng nói cuối cùng.
 !pip install -q piper-tts                                                 || true
 !pip install -q git+https://github.com/iamdinhthuan/Kokoro-Vietnamese.git || true
 !pip install -q omnivoice                                                 || true
 
+!pip install -q -r requirements.txt
+
 !apt-get -qq install -y ffmpeg > /dev/null 2>&1 || true   # cần cho augment MP3/AAC
+
+import transformers, torch
+print(f"transformers {transformers.__version__} · torch {torch.__version__} "
+      f"· CUDA {torch.cuda.is_available()}")
 """),
 code("""
 run("info")

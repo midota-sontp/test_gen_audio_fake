@@ -221,5 +221,14 @@ def generate_fakes(
         "Engine %s: tạo %d · lỗi %d · không đạt chuẩn %d · đã có %d",
         engine_id, stats["kept"], stats["error"], stats["drop_invalid"], stats["skip_exists"],
     )
+    attempted = stats["kept"] + stats["drop_invalid"] + stats["error"]
+    if attempted and stats["drop_invalid"] / attempted > 0.25:
+        log.warning(
+            "%d/%d mẫu bị loại vì không đạt chuẩn %g–%g giây. Câu quá ngắn thì audio "
+            "sinh ra cũng ngắn — chỉnh `generate.min_words` (đang %d) lên cao hơn để "
+            "chọn câu dài hơn.",
+            stats["drop_invalid"], attempted, spec.min_seconds, spec.max_seconds, min_words,
+        )
+
     keys = ("kept", "error", "drop_invalid", "skip_exists", "skip_no_reference")
     return {"engine": engine_id, **{key: stats[key] for key in keys}}

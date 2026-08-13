@@ -41,6 +41,9 @@ class KokoroVietnameseGenerator(Generator):
         self._voice_names = list(options.get("voices") or DEFAULT_VOICES)
         self._engines: dict[str, object] = {}
 
+    #: Kokoro-Vietnamese dựa trên API transformers 4.x và tự từ chối chạy trên 5.x.
+    MAX_TRANSFORMERS_MAJOR = 4
+
     @classmethod
     def availability(cls) -> Availability:
         try:
@@ -50,6 +53,20 @@ class KokoroVietnameseGenerator(Generator):
                 False,
                 "chưa cài kokoro-vietnamese",
                 "pip install git+https://github.com/iamdinhthuan/Kokoro-Vietnamese.git",
+            )
+        # Kiểm tra ở đây thay vì để nổ lúc nạp model: nếu không, engine sẽ chết giữa
+        # chừng sau khi các engine khác đã sinh xong (Kaggle mặc định có transformers 5).
+        try:
+            import transformers
+
+            major = int(transformers.__version__.split(".")[0])
+        except Exception:  # noqa: BLE001 — thiếu/lạ version thì cứ để engine tự thử
+            return Availability(True)
+        if major > cls.MAX_TRANSFORMERS_MAJOR:
+            return Availability(
+                False,
+                f"kokoro-vietnamese chưa hỗ trợ transformers {transformers.__version__}",
+                'pip install "transformers>=4.48,<5"',
             )
         return Availability(True)
 

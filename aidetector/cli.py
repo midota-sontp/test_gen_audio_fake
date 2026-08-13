@@ -117,30 +117,46 @@ def cmd_generate(args) -> int:
         per_engine = max(1, int(total_real * ratio / max(len(engines), 1)))
 
     known = available_generators()
-    results = []
+    results: list[dict] = []
+    failures: list[str] = []
     for engine_id in engines:
         if engine_id not in known:
             log.error("Bỏ qua engine lạ %r (hiện có: %s)", engine_id, ", ".join(sorted(known)))
+            failures.append(f"{engine_id}: không có engine này")
             continue
         status = known[engine_id].availability()
         if not status:
             log.warning("Bỏ qua %s — %s%s", engine_id, status.reason,
                         f". Cài: {status.hint}" if status.hint else "")
+            failures.append(f"{engine_id}: {status.reason}")
             continue
-        with timed(f"generate {engine_id} ({per_engine} mẫu)", log):
-            results.append(generate_fakes(
-                manifest, engine_id, spec, per_engine, device=device,
-                options=cfg.section(f"generate.options.{engine_id}"),
-                voices=cfg.get(f"generate.voices.{engine_id}"),
-                extra_texts=cfg.get("generate.texts_file"),
-                min_words=int(cfg.get("generate.min_words", 6)),
-                max_words=int(cfg.get("generate.max_words", 40)),
-                overwrite=args.overwrite,
-            ))
+        try:
+            with timed(f"generate {engine_id} ({per_engine} mẫu)", log):
+                results.append(generate_fakes(
+                    manifest, engine_id, spec, per_engine, device=device,
+                    options=cfg.section(f"generate.options.{engine_id}"),
+                    voices=cfg.get(f"generate.voices.{engine_id}"),
+                    extra_texts=cfg.get("generate.texts_file"),
+                    min_words=int(cfg.get("generate.min_words", 6)),
+                    max_words=int(cfg.get("generate.max_words", 40)),
+                    overwrite=args.overwrite,
+                ))
+        except Exception as exc:  # noqa: BLE001 — engine bên thứ ba, hỏng đủ kiểu
+            # Một engine hỏng KHÔNG được xoá công của các engine khác: dữ liệu đã
+            # sinh vẫn giữ nguyên, và các engine còn lại vẫn chạy tiếp.
+            log.error("Engine %s thất bại: %s", engine_id, exc)
+            failures.append(f"{engine_id}: {exc}")
         manifest.save()          # lưu sau mỗi engine để không mất công nếu ngắt giữa chừng
 
     print(manifest.summary())
-    return 0 if any(r.get("kept") for r in results) else 1
+    produced = sum(r.get("kept", 0) for r in results)
+    if failures:
+        log.warning("Engine không dùng được lần này:\n%s",
+                    "\n".join(f"  • {f}" for f in failures))
+    if produced:
+        return 0
+    log.error("Không engine nào sinh được audio giả.")
+    return 1
 
 
 def cmd_augment(args) -> int:

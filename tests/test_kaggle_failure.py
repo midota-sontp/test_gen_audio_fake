@@ -100,6 +100,78 @@ def test_empty_directory_says_it_is_empty(tmp_path):
         detect_adapter(root)
 
 
+# ─────────────────── một engine hỏng không được xoá công của engine khác
+def test_one_broken_engine_does_not_kill_the_whole_stage(tmp_path, vivos_like, monkeypatch):
+    """Kokoro chết vì lệch phiên bản transformers, nhưng Piper đã sinh xong 16 mẫu."""
+    from aidetector.cli import main
+    from aidetector.generate import base as gen_base
+
+    class BrokenEngine(gen_base.Generator):
+        id = "engine_hong"
+        kind = gen_base.KIND_TTS
+
+        def load(self):
+            raise RuntimeError("transformers 5.15.0 is not supported by this package")
+
+    monkeypatch.setitem(gen_base._REGISTRY, BrokenEngine.id, BrokenEngine)
+
+    corpus = tmp_path / "corpus"
+    manifest = Manifest(corpus)
+    ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", SPEC)
+    manifest.save()
+
+    code = main(["generate", "--corpus", str(corpus), "--engines", "dummy_tts", "engine_hong",
+                 "--count", "6", "--log-level", "ERROR"])
+    assert code == 0, "engine hỏng không được làm cả stage trả về lỗi"
+
+    reloaded = Manifest.load(corpus, required=True)
+    engines = {r.engine for r in reloaded.fakes}
+    assert engines == {"dummy_tts"}, "audio của engine chạy được phải còn nguyên"
+    assert len(reloaded.fakes) > 0
+
+
+def test_stage_fails_only_when_no_engine_produced_anything(tmp_path, vivos_like, monkeypatch):
+    from aidetector.cli import main
+    from aidetector.generate import base as gen_base
+
+    class BrokenEngine(gen_base.Generator):
+        id = "engine_hong_2"
+        kind = gen_base.KIND_TTS
+
+        def load(self):
+            raise RuntimeError("hỏng hoàn toàn")
+
+    monkeypatch.setitem(gen_base._REGISTRY, BrokenEngine.id, BrokenEngine)
+
+    corpus = tmp_path / "corpus"
+    manifest = Manifest(corpus)
+    ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", SPEC)
+    manifest.save()
+
+    assert main(["generate", "--corpus", str(corpus), "--engines", "engine_hong_2",
+                 "--count", "4", "--log-level", "ERROR"]) == 1
+
+
+def test_kokoro_reports_transformers_conflict_before_running(monkeypatch):
+    """Phải báo ở bước `info`, không để nổ giữa chừng sau khi engine khác đã chạy."""
+    import sys
+    import types
+
+    from aidetector.generate.kokoro_vi import KokoroVietnameseGenerator
+
+    monkeypatch.setitem(sys.modules, "kokoro_vietnamese", types.ModuleType("kokoro_vietnamese"))
+    monkeypatch.setitem(sys.modules, "transformers",
+                        types.SimpleNamespace(__version__="5.15.0"))
+    status = KokoroVietnameseGenerator.availability()
+    assert not status
+    assert "5.15.0" in status.reason
+    assert "<5" in status.hint
+
+    monkeypatch.setitem(sys.modules, "transformers",
+                        types.SimpleNamespace(__version__="4.57.6"))
+    assert KokoroVietnameseGenerator.availability()
+
+
 # ─────────────────────────── mắt xích 2: speaker suy ra từ thư mục sai tầng
 def test_folder_adapter_reads_speaker_from_the_nearest_directory(tmp_path):
     """Bố cục <bộ>/<split>/<speaker>/x.wav — tầng đầu tiên KHÔNG phải speaker."""
