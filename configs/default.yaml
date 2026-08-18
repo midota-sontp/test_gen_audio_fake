@@ -54,10 +54,19 @@ generate:
       data_dir: models/piper
     omnivoice:
       # Fine-tune tiếng Việt (công khai). Bản gốc đa ngữ: k2-fsa/OmniVoice
+      # Giọng clone nghe KHÔNG giống người nói gốc? Đổi sang bản gốc để so:
+      #   --set generate.options.omnivoice.checkpoint=k2-fsa/OmniVoice
+      # Fine-tune một-ngôn-ngữ đọc tiếng Việt chuẩn hơn nhưng thường clone danh
+      # tính kém hơn bản đa ngữ — hai tiêu chí này đánh đổi nhau.
       checkpoint: splendor1811/omnivoice-vietnamese
       dtype: auto
       language: vi          # model phủ 600+ ngôn ngữ, phải nói rõ tiếng gì
       normalize_text: true  # transcript VIVOS toàn chữ HOA
+      # Knob của bộ giải mã (bỏ trống = mặc định thư viện: 32 / 2.0 / 0.1).
+      # guidance_scale cao hơn ⇒ bám prompt chặt hơn, gồm cả giọng của reference;
+      # num_step cao hơn ⇒ audio mịn hơn, đổi bằng thời gian sinh.
+      # guidance_scale: 3.0
+      # num_step: 48
 
 # -----------------------------------------------------------------------------
 # Augmentation — áp dụng NHƯ NHAU cho real và fake; bản clean luôn được giữ lại.

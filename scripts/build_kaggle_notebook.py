@@ -434,6 +434,11 @@ if no_text:
 """),
 code("""
 # NGHE THỬ: mỗi cặp là cùng một câu, cùng một speaker — real trước, fake sau.
+#
+# Với engine cloning (omnivoice): bản REAL nghe ở đây là utterance CÙNG NỘI DUNG, KHÔNG
+# phải đoạn audio đã dùng làm reference — reference được ghép từ các utterance khác của
+# chính speaker đó. Nên chấm điểm "có giống người này không", đừng chấm "có khớp từng
+# hơi thở của bản real này không".
 from IPython.display import Audio, display
 
 pairs = []

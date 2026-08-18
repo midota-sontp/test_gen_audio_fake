@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -9,7 +11,7 @@ import numpy as np
 
 from ..corpus.manifest import Manifest
 from ..corpus.schema import LABEL_FAKE, LABEL_REAL, Record, make_utt_id
-from ..corpus.spec import AudioSpec, normalize
+from ..corpus.spec import AudioSpec, load_audio, normalize, save_audio
 from ..utils import get_logger, progress, stable_id, stable_rand
 from .base import (  # noqa: F401
     KIND_CLONE,
@@ -33,6 +35,20 @@ FALLBACK_SOURCE = "fallback"
 # Reference cho voice cloning: OmniVoice khuyến nghị 3–25 giây.
 MIN_REF_SECONDS = 3.0
 MAX_REF_SECONDS = 25.0
+#: Zero-shot cloning giống hay không phụ thuộc trước hết vào ĐỘ DÀI reference: 3 giây
+#: là mức tối thiểu chạy được, không phải mức đủ để lấy ra danh tính một người. Nhưng
+#: corpus của dự án ép mọi audio về 3–10 giây (thực tế VIVOS trung bình ~3,7 giây), nên
+#: một utterance đơn lẻ luôn nằm ở đúng cái mức tối thiểu đó. Ghép nhiều utterance của
+#: CÙNG speaker lại cho tới mốc này để reference có đủ chất liệu.
+TARGET_REF_SECONDS = 12.0
+#: Khoảng lặng chèn giữa hai utterance khi ghép — đánh dấu ranh giới câu cho model,
+#: khớp với dấu chấm nối giữa hai transcript.
+REF_GAP_SECONDS = 0.3
+#: Số tổ hợp reference khác nhau cho mỗi speaker. Nhiều tổ hợp ⇒ fake của cùng một
+#: speaker không bị đúc ra từ đúng một khuôn giọng. Nhưng mỗi tổ hợp là một file tạm
+#: phải ghi ra đĩa, nên cho mỗi mẫu một tổ hợp riêng là trả giá đĩa mà không được thêm
+#: gì: vài tổ hợp/speaker đã đủ đa dạng.
+REF_VARIANTS = 4
 
 
 def _resample(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
@@ -87,22 +103,101 @@ def _pick_targets(
     return chosen
 
 
-def _pick_reference(
-    manifest: Manifest, target: Record, spec: AudioSpec
-) -> Record | None:
-    """Chọn một utterance KHÁC của cùng speaker làm audio tham chiếu để clone."""
+def _is_partial_chunk(manifest: Manifest, rec: Record) -> bool:
+    """Bản ghi này có phải một MẢNH của file dài bị cắt không?
+
+    `long_policy: split` cắt file dài thành nhiều đoạn, nhưng mọi đoạn đều mang
+    NGUYÊN transcript của file gốc. Dùng một mảnh như vậy làm reference là đưa cho
+    engine cặp (audio 3 giây, transcript của 12 giây): gióng hàng audio–text sai
+    hoàn toàn, và bộ ước lượng độ dài của OmniVoice lấy tốc độ nói = số ký tự
+    ref_text / thời lượng ref_audio nên sẽ đọc câu đích nhanh gấp mấy lần bình thường.
+    """
+    if f"{rec.utt_id}-1" in manifest:  # đoạn 0 của một file đã bị cắt
+        return True
+    base, sep, tail = rec.utt_id.rpartition("-")
+    return bool(sep) and tail.isdigit() and base in manifest
+
+
+def _pick_reference(manifest: Manifest, target: Record) -> list[Record]:
+    """Chọn các utterance KHÁC của cùng speaker, ghép lại làm reference để clone.
+
+    Trả về danh sách theo thứ tự sẽ ghép, tổng độ dài hướng tới `TARGET_REF_SECONDS`
+    và không vượt `MAX_REF_SECONDS`. Rỗng nghĩa là speaker này không có reference
+    dùng được.
+    """
     candidates = [
         r for r in manifest.reals
         if r.speaker == target.speaker
-        and r.utt_id != target.utt_id
         and not r.augment
+        # Không có transcript thì không dùng làm reference: engine sẽ phải tự nhận
+        # dạng bằng ASR, chậm và thêm một nguồn sai.
+        and r.text.strip()
+        and not _is_partial_chunk(manifest, r)
         and MIN_REF_SECONDS <= r.duration <= MAX_REF_SECONDS
     ]
     if not candidates:
-        return None
+        return []
     candidates.sort(key=lambda r: r.utt_id)
-    rng = stable_rand("ref", target.utt_id)
-    return candidates[rng.randrange(len(candidates))]
+    # Thứ tự bốc phụ thuộc (speaker, variant) chứ không phải từng target: các target
+    # cùng speaker sẽ dùng chung một nhúm tổ hợp reference, nên file ghép được tái sử
+    # dụng thay vì mỗi mẫu ghi ra một file mới.
+    variant = stable_rand("ref-variant", target.utt_id).randrange(REF_VARIANTS)
+    stable_rand("ref", target.speaker, variant).shuffle(candidates)
+
+    chosen: list[Record] = []
+    total = 0.0
+    for rec in candidates:
+        # Clone từ chính câu đích thì fake chỉ là bản đọc lại của real đối chứng.
+        if rec.utt_id == target.utt_id:
+            continue
+        extra = rec.duration + (REF_GAP_SECONDS if chosen else 0.0)
+        if chosen and total + extra > MAX_REF_SECONDS:
+            continue
+        chosen.append(rec)
+        total += extra
+        if total >= TARGET_REF_SECONDS:
+            break
+    return chosen
+
+
+def _as_sentence(text: str) -> str:
+    """Thêm dấu kết câu nếu thiếu, để transcript ghép lại có ranh giới câu rõ ràng."""
+    text = text.strip()
+    return text if not text or text[-1] in ".!?…,;:" else text + "."
+
+
+def _materialize_reference(
+    manifest: Manifest,
+    recs: list[Record],
+    spec: AudioSpec,
+    work_dir: Path,
+    cache: dict[str, tuple[str, str]],
+) -> tuple[str, str]:
+    """Biến danh sách reference thành (đường dẫn audio, transcript tương ứng).
+
+    Một bản ghi thì dùng thẳng file trong corpus. Nhiều bản ghi thì ghép audio (chèn
+    khoảng lặng) và ghép transcript theo ĐÚNG thứ tự đó — hai bên phải khớp nhau,
+    nếu không thì reference dài ra mà chất lượng lại tệ hơn cả reference ngắn.
+    """
+    if len(recs) == 1:
+        return str(manifest.abs_path(recs[0])), recs[0].text
+
+    key = "|".join(r.utt_id for r in recs)
+    if key in cache:
+        return cache[key]
+
+    gap = np.zeros(int(REF_GAP_SECONDS * spec.sample_rate), dtype=np.float32)
+    parts: list[np.ndarray] = []
+    for rec in recs:
+        if parts:
+            parts.append(gap)
+        parts.append(load_audio(manifest.abs_path(rec), spec.sample_rate))
+    # Không chạy `normalize()` ở đây: các đoạn đã chuẩn hoá sẵn, gọi lại chỉ khiến nó
+    # bị cắt silence lần hai rồi tách trở lại thành nhiều đoạn ≤ max_seconds.
+    path = work_dir / f"ref-{stable_id(key)}.wav"
+    save_audio(path, np.concatenate(parts), spec)
+    cache[key] = (str(path), " ".join(_as_sentence(r.text) for r in recs))
+    return cache[key]
 
 
 def build_generator(engine_id: str, device: str, options: dict | None = None) -> Generator:
@@ -165,6 +260,69 @@ def generate_fakes(
     gen.ensure_loaded()
 
     stats: Counter[str] = Counter()
+    # Reference ghép từ nhiều utterance phải nằm ở đâu đó ngoài corpus — nó là đầu vào
+    # tạm của engine, không phải dữ liệu của dataset.
+    ref_dir = Path(tempfile.mkdtemp(prefix="aidetector-ref-")) if gen.kind == KIND_CLONE else None
+    ref_cache: dict[str, tuple[str, str]] = {}
+    ref_seconds: list[float] = []
+    try:
+        _run_batch(
+            gen, manifest, targets, voice_list, spec, engine_id, overwrite,
+            stats, ref_dir, ref_cache, ref_seconds,
+        )
+    finally:
+        if ref_dir is not None:
+            shutil.rmtree(ref_dir, ignore_errors=True)
+
+    gen.unload()
+    log.info(
+        "Engine %s: tạo %d · lỗi %d · không đạt chuẩn %d · đã có %d",
+        engine_id, stats["kept"], stats["error"], stats["drop_invalid"], stats["skip_exists"],
+    )
+    if ref_seconds:
+        mean_ref = sum(ref_seconds) / len(ref_seconds)
+        log.info("Reference clone: trung bình %.1f giây/mẫu", mean_ref)
+        if mean_ref < TARGET_REF_SECONDS * 0.6:
+            log.warning(
+                "Reference trung bình chỉ %.1f giây (muốn ~%.0f giây). Zero-shot cloning "
+                "ở mức này ra giọng KHÔNG giống người nói gốc. Nguyên nhân thường là mỗi "
+                "speaker có quá ít bản ghi trong corpus — tăng `--per-speaker` khi ingest "
+                "để mỗi speaker có nhiều utterance ghép lại.",
+                mean_ref, TARGET_REF_SECONDS,
+            )
+    if stats["skip_no_reference"]:
+        log.warning(
+            "%d mẫu bị bỏ vì speaker không có utterance nào dùng làm reference được "
+            "(cần bản ghi CÓ transcript, 3–25 giây, không phải mảnh của file bị cắt).",
+            stats["skip_no_reference"],
+        )
+    attempted = stats["kept"] + stats["drop_invalid"] + stats["error"]
+    if attempted and stats["drop_invalid"] / attempted > 0.25:
+        log.warning(
+            "%d/%d mẫu bị loại vì không đạt chuẩn %g–%g giây. Câu quá ngắn thì audio "
+            "sinh ra cũng ngắn — chỉnh `generate.min_words` (đang %d) lên cao hơn để "
+            "chọn câu dài hơn.",
+            stats["drop_invalid"], attempted, spec.min_seconds, spec.max_seconds, min_words,
+        )
+
+    keys = ("kept", "error", "drop_invalid", "skip_exists", "skip_no_reference")
+    return {"engine": engine_id, **{key: stats[key] for key in keys}}
+
+
+def _run_batch(
+    gen: Generator,
+    manifest: Manifest,
+    targets: list[Record],
+    voice_list: list[str | None],
+    spec: AudioSpec,
+    engine_id: str,
+    overwrite: bool,
+    stats: Counter[str],
+    ref_dir: Path | None,
+    ref_cache: dict[str, tuple[str, str]],
+    ref_seconds: list[float],
+) -> None:
+    """Vòng lặp sinh — tách khỏi `generate_fakes` để thư mục reference tạm luôn được dọn."""
     for i, target in enumerate(progress(targets, total=len(targets), label=f"generate:{engine_id}")):
         voice = voice_list[i % len(voice_list)]
         # Câu dự phòng không có utt gốc ⇒ lấy chính nội dung câu làm khoá, nếu không
@@ -177,12 +335,15 @@ def generate_fakes(
 
         ref_path = ref_text = None
         if gen.kind == KIND_CLONE:
-            ref = _pick_reference(manifest, target, spec) if target.utt_id else None
-            if ref is None:
+            assert ref_dir is not None
+            refs = _pick_reference(manifest, target) if target.utt_id else []
+            if not refs:
                 stats["skip_no_reference"] += 1
                 continue
-            ref_path = str(manifest.abs_path(ref))
-            ref_text = ref.text
+            ref_path, ref_text = _materialize_reference(
+                manifest, refs, spec, ref_dir, ref_cache
+            )
+            ref_seconds.append(sum(r.duration for r in refs))
 
         try:
             audio, sample_rate = gen.synthesize(
@@ -216,20 +377,3 @@ def generate_fakes(
             )
             manifest.write_audio(rec, chunk, spec)
             stats["kept"] += 1
-
-    gen.unload()
-    log.info(
-        "Engine %s: tạo %d · lỗi %d · không đạt chuẩn %d · đã có %d",
-        engine_id, stats["kept"], stats["error"], stats["drop_invalid"], stats["skip_exists"],
-    )
-    attempted = stats["kept"] + stats["drop_invalid"] + stats["error"]
-    if attempted and stats["drop_invalid"] / attempted > 0.25:
-        log.warning(
-            "%d/%d mẫu bị loại vì không đạt chuẩn %g–%g giây. Câu quá ngắn thì audio "
-            "sinh ra cũng ngắn — chỉnh `generate.min_words` (đang %d) lên cao hơn để "
-            "chọn câu dài hơn.",
-            stats["drop_invalid"], attempted, spec.min_seconds, spec.max_seconds, min_words,
-        )
-
-    keys = ("kept", "error", "drop_invalid", "skip_exists", "skip_no_reference")
-    return {"engine": engine_id, **{key: stats[key] for key in keys}}

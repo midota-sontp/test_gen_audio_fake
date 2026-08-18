@@ -117,3 +117,71 @@ def test_generate_fakes_forwards_the_record_language(tmp_path, vivos_like, monke
     generate_fakes(manifest, "spy_clone", SPEC, count=3)
 
     assert seen and set(seen) == {"vi"}
+
+
+# --------------------------------------------------------------------- reference
+# Ba lỗi dưới đây đều cho ra cùng một triệu chứng: engine chạy trơn, log sạch, nhưng
+# giọng clone nghe KHÔNG giống người nói gốc.
+
+
+def test_all_caps_reference_transcript_is_lowered(fake_omnivoice):
+    """`normalize_text` của OmniVoice KHÔNG áp lên ref_text — ta phải tự làm.
+
+    Mã nguồn thư viện ghi rõ: normalization chỉ chạy trên text đích, *"not ref_text,
+    which must stay aligned with the reference audio"*. Transcript VIVOS toàn chữ HOA
+    nên nếu đưa nguyên vào, cặp (audio, text) của reference gióng hàng kém và danh
+    tính giọng lấy ra được cũng nhoè theo.
+    """
+    generator = OmniVoiceGenerator(device="cpu")
+    generator.synthesize("câu đích", ref_audio="ref.wav",
+                         ref_text="CŨNG LÊN TIẾNG ỦNG HỘ CÁC KIẾN NGHỊ NÀY")
+    assert fake_omnivoice[0]["ref_text"] == "cũng lên tiếng ủng hộ các kiến nghị này"
+
+
+def test_mixed_case_reference_transcript_is_left_alone(fake_omnivoice):
+    generator = OmniVoiceGenerator(device="cpu")
+    generator.synthesize("câu đích", ref_audio="ref.wav", ref_text="Hà Nội hôm nay mưa")
+    assert fake_omnivoice[0]["ref_text"] == "Hà Nội hôm nay mưa"
+
+
+def test_empty_reference_transcript_becomes_none(fake_omnivoice):
+    """`""` nghĩa là "reference không nói gì"; `None` mới là "nhờ thư viện tự nhận dạng"."""
+    generator = OmniVoiceGenerator(device="cpu")
+    generator.synthesize("câu đích", ref_audio="ref.wav", ref_text="")
+    assert fake_omnivoice[0]["ref_text"] is None
+
+
+def test_sample_rate_comes_from_the_model_not_a_constant(monkeypatch):
+    """Tokenizer chạy ở tần số khác 24 kHz thì resample sẽ dịch cả cao độ lẫn tốc độ."""
+    module = types.ModuleType("omnivoice")
+
+    class _OmniVoice:
+        sampling_rate = 22_050
+
+        @classmethod
+        def from_pretrained(cls, checkpoint, **kwargs):
+            return cls()
+
+        def generate(self, **kwargs):
+            return [np.zeros(22_050 * 4, dtype=np.float32)]
+
+    module.OmniVoice = _OmniVoice
+    monkeypatch.setitem(sys.modules, "omnivoice", module)
+
+    generator = OmniVoiceGenerator(device="cpu")
+    _, sample_rate = generator.synthesize("câu đích", ref_audio="ref.wav", ref_text="ref")
+    assert sample_rate == 22_050
+
+
+def test_decoder_knobs_reach_the_model(fake_omnivoice):
+    generator = OmniVoiceGenerator(device="cpu", guidance_scale=3.0, num_step=48)
+    generator.synthesize("câu đích", ref_audio="ref.wav", ref_text="ref")
+    call = fake_omnivoice[0]
+    assert call["guidance_scale"] == 3.0 and call["num_step"] == 48
+
+
+def test_knobs_are_absent_when_not_configured(fake_omnivoice):
+    """Không đặt thì không truyền — để mặc định của thư viện tự quyết."""
+    generator = OmniVoiceGenerator(device="cpu")
+    generator.synthesize("câu đích", ref_audio="ref.wav", ref_text="ref")
+    assert "guidance_scale" not in fake_omnivoice[0]

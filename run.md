@@ -98,6 +98,23 @@ python -m aidetector generate --engines piper kokoro --count 1000
 python -m aidetector generate --engines omnivoice --device mps --count 500
 ```
 
+#### Khi giọng clone nghe không giống người nói gốc
+
+Biến quyết định là **reference**, không phải engine. Pipeline ghép nhiều utterance của
+cùng speaker cho tới ~12 giây (`TARGET_REF_SECONDS` trong `aidetector/generate/`), nên
+mỗi speaker cần có đủ bản ghi trong corpus — log sẽ in `Reference clone: trung bình
+N giây/mẫu` và cảnh báo nếu quá ngắn.
+
+| Triệu chứng | Việc cần làm |
+|---|---|
+| log báo reference trung bình < 7 giây | ingest lại với `--per-speaker` cao hơn để mỗi speaker có nhiều câu |
+| giọng đúng chất nhưng vẫn "lệch người" | tăng bám prompt: `--set generate.options.omnivoice.guidance_scale=3.0` |
+| phát âm chuẩn nhưng danh tính sai hẳn | thử bản đa ngữ: `--set generate.options.omnivoice.checkpoint=k2-fsa/OmniVoice` — fine-tune một-ngôn-ngữ đọc tiếng Việt tốt hơn nhưng clone kém hơn |
+| audio rè / mất chi tiết | `--set generate.options.omnivoice.num_step=48` |
+
+Corpus 16 kHz cũng là một trần cứng: OmniVoice sinh ở 24 kHz nên phần trên 8 kHz của
+reference không tồn tại và model phải tự bịa — đó là phần "chất giọng" nghe khác nhất.
+
 Fake được ghi vào `corpus/audio/fake/<engine>/<voice>/`, mỗi bản ghi mang:
 `generator` (vd `piper:vi_VN-vais1000-medium`), `ref_utt_id` (utterance real gốc)
 và **cùng `speaker` + cùng `text` với real** — nhờ vậy mô hình không thể phân loại

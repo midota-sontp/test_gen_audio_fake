@@ -5,6 +5,10 @@
 reference được lấy thẳng từ corpus REAL nên fake và real chia sẻ cùng danh tính
 người nói — mô hình buộc phải học dấu vết tổng hợp thay vì học giọng ai.
 
+Độ giống giọng phụ thuộc trước hết vào reference, không vào knob của engine: 3 giây
+là mức chạy được chứ không phải mức đủ. `aidetector.generate` ghép nhiều utterance
+cùng speaker để đạt ~12 giây (xem `TARGET_REF_SECONDS`).
+
 Cài:  pip install omnivoice
 Backend hỗ trợ CUDA, Apple Silicon (MPS) và Intel XPU; CPU thuần rất chậm.
 """
@@ -33,7 +37,17 @@ log = get_logger("aidetector.generate.omnivoice")
 #: Bản gốc đa ngữ `k2-fsa/OmniVoice` đọc tiếng Việt kém hơn rõ rệt.
 DEFAULT_CHECKPOINT = "splendor1811/omnivoice-vietnamese"
 #: Bản gốc đa ngữ 600+ ngôn ngữ — dùng khi cần ngôn ngữ khác tiếng Việt.
+#: Lưu ý khi giọng clone nghe "lệch người": fine-tune một-ngôn-ngữ đọc tiếng Việt
+#: chuẩn hơn nhưng thường clone danh tính KÉM hơn bản gốc (nó chỉ thấy lại tập
+#: speaker hẹp khi fine-tune). Nếu độ giống giọng quan trọng hơn phát âm, thử
+#: `--set generate.options.omnivoice.checkpoint=k2-fsa/OmniVoice` rồi nghe so sánh.
 MULTILINGUAL_CHECKPOINT = "k2-fsa/OmniVoice"
+
+#: Knob của bộ giải mã diffusion (OmniVoiceGenerationConfig). Không đặt thì để
+#: nguyên mặc định của thư viện: num_step=32, guidance_scale=2.0, t_shift=0.1.
+#: `guidance_scale` cao hơn ⇒ bám sát prompt hơn (gồm cả danh tính người nói),
+#: `num_step` cao hơn ⇒ audio mịn hơn nhưng chậm hơn.
+GENERATION_KEYS = ("num_step", "guidance_scale", "t_shift")
 
 
 @register
@@ -54,6 +68,10 @@ class OmniVoiceGenerator(Generator):
         # VIVOS và nhiều corpus khác lưu transcript TOÀN CHỮ HOA; bật chuẩn hoá để
         # model không đọc chúng như chuỗi chữ cái rời rạc.
         self.normalize_text = bool(options.get("normalize_text", True))
+        self.generation = {k: options[k] for k in GENERATION_KEYS if k in options}
+        # Sample rate THẬT do audio tokenizer của checkpoint quyết định; chỉ biết
+        # được sau khi nạp model. Trước đó dùng giá trị mặc định làm chỗ dựa.
+        self._sample_rate = self.native_sample_rate
         self._model = None
 
     #: OmniVoice 0.2.x dùng HiggsAudioV2TokenizerModel, chỉ có từ transformers 5.3.
@@ -96,7 +114,39 @@ class OmniVoiceGenerator(Generator):
             )
         except Exception as exc:  # noqa: BLE001 — cần dịch lỗi HF sang việc phải làm
             raise RuntimeError(self._explain_load_failure(exc)) from exc
+        # Sample rate do audio tokenizer của checkpoint quyết định, KHÔNG phải hằng số
+        # của engine. Hardcode 24 kHz mà tokenizer chạy ở tần số khác thì bước resample
+        # về chuẩn corpus sẽ dịch cả cao độ lẫn tốc độ — giọng clone nghe "lệch người"
+        # dù model chẳng làm gì sai.
+        rate = getattr(self._model, "sampling_rate", None)
+        self._sample_rate = int(rate) if rate else self.native_sample_rate
+        if self._sample_rate != self.native_sample_rate:
+            log.info(
+                "Audio tokenizer của %s chạy ở %d Hz (mặc định của engine là %d Hz)",
+                self.checkpoint, self._sample_rate, self.native_sample_rate,
+            )
         self._loaded = True
+
+    def _clean_ref_text(self, ref_text: str | None) -> str | None:
+        """Chuẩn hoá transcript của REFERENCE — thư viện không làm việc này.
+
+        `normalize_text` của OmniVoice chỉ áp lên text đích, có chú thích rõ trong
+        mã nguồn: *"not ref_text, which must stay aligned with the reference audio"*.
+        Nhưng VIVOS lưu transcript TOÀN CHỮ HOA, và chuỗi chữ hoa là dạng model gần
+        như không thấy khi huấn luyện ⇒ cặp (audio, text) của reference gióng hàng
+        kém ⇒ danh tính giọng lấy ra được cũng nhoè theo. Hạ về chữ thường không đổi
+        nội dung, chỉ đưa nó về dạng quen thuộc.
+
+        Trả `None` thay vì `""` khi không có transcript: `None` là tín hiệu để thư
+        viện tự nhận dạng bằng ASR, còn `""` bị hiểu là "reference không nói gì" —
+        đúng cách nhanh nhất để phá gióng hàng và mất luôn giọng cần clone.
+        """
+        if not ref_text or not ref_text.strip():
+            return None
+        text = ref_text.strip()
+        if any(c.isalpha() for c in text) and not any(c.islower() for c in text):
+            text = text.lower()
+        return text
 
     def _explain_load_failure(self, exc: Exception) -> str:
         """Biến lỗi tải checkpoint thành việc người dùng có thể làm ngay."""
@@ -136,8 +186,9 @@ class OmniVoiceGenerator(Generator):
             text=text,
             language=language or self.language,
             ref_audio=str(ref_audio),
-            ref_text=ref_text or "",
+            ref_text=self._clean_ref_text(ref_text),
             normalize_text=self.normalize_text,
+            **self.generation,
         )
         audio = np.asarray(output[0] if isinstance(output, (list, tuple)) else output, dtype=np.float32)
-        return audio.reshape(-1), self.native_sample_rate
+        return audio.reshape(-1), self._sample_rate
