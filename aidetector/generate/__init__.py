@@ -290,6 +290,15 @@ def generate_fakes(
                 "để mỗi speaker có nhiều utterance ghép lại.",
                 mean_ref, TARGET_REF_SECONDS,
             )
+    if stats["skip_exists"]:
+        log.warning(
+            "%d mẫu đã có sẵn nên KHÔNG sinh lại. `utt_id` chỉ gồm câu đích + giọng + "
+            "biến thể engine, nên mọi thay đổi về CÁCH tổng hợp (xử lý text, knob giải mã, "
+            "dtype, phiên bản thư viện) đều vô hình với phép kiểm này: audio cũ sống sót và "
+            "trộn lẫn với audio mới dưới cùng một tag, làm hỏng mọi phép đo chất lượng. "
+            "Vừa sửa cách tổng hợp thì phải chạy lại kèm --overwrite.",
+            stats["skip_exists"],
+        )
     if stats["skip_no_reference"]:
         log.warning(
             "%d mẫu bị bỏ vì speaker không có utterance nào dùng làm reference được "
@@ -326,8 +335,11 @@ def _run_batch(
     for i, target in enumerate(progress(targets, total=len(targets), label=f"generate:{engine_id}")):
         voice = voice_list[i % len(voice_list)]
         # Câu dự phòng không có utt gốc ⇒ lấy chính nội dung câu làm khoá, nếu không
-        # mọi bản sinh ra sẽ trùng utt_id và đè lên nhau.
-        key = f"{target.utt_id}|{voice}" if target.utt_id else f"fallback:{stable_id(target.text)}|{voice}"
+        # mọi bản sinh ra sẽ trùng utt_id và đè lên nhau. Biến thể engine (vd checkpoint
+        # khác mặc định) cũng vào khoá, để hai lượt A/B nằm cạnh nhau trong corpus thay
+        # vì lượt sau bị bỏ qua vì "đã có". Biến thể mặc định là "" ⇒ khoá y như cũ.
+        marker = f"{voice}|{gen.variant}" if gen.variant else str(voice)
+        key = f"{target.utt_id}|{marker}" if target.utt_id else f"fallback:{stable_id(target.text)}|{marker}"
         utt_id = make_utt_id(engine_id, target.speaker, key)
         if not overwrite and utt_id in manifest:
             stats["skip_exists"] += 1

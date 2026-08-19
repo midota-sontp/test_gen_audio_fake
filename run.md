@@ -112,6 +112,11 @@ N giây/mẫu` và cảnh báo nếu quá ngắn.
 | phát âm chuẩn nhưng danh tính sai hẳn | thử bản đa ngữ: `--set generate.options.omnivoice.checkpoint=k2-fsa/OmniVoice` — fine-tune một-ngôn-ngữ đọc tiếng Việt tốt hơn nhưng clone kém hơn |
 | audio rè / mất chi tiết | `--set generate.options.omnivoice.num_step=48` |
 
+Checkpoint khác mặc định được ghi thẳng vào cột `generator` (`omnivoice:k2-fsa-omnivoice`)
+và vào `utt_id`, nên hai lượt A/B nằm cạnh nhau trong cùng corpus thay vì lượt sau bị bỏ
+qua vì trùng id. Knob (`guidance_scale`, `num_step`) thì không vào id — đổi knob phải
+`--overwrite` và lượt mới đè lên lượt cũ.
+
 Corpus 16 kHz cũng là một trần cứng: OmniVoice sinh ở 24 kHz nên phần trên 8 kHz của
 reference không tồn tại và model phải tự bịa — đó là phần "chất giọng" nghe khác nhất.
 

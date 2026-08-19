@@ -370,13 +370,31 @@ không sao, nó đã sinh xong ở trên. Backbone WavLM chạy tốt trên cả
 phần huấn luyện không bị ảnh hưởng.
 
 Checkpoint mặc định là **`splendor1811/omnivoice-vietnamese`** — fine-tune riêng cho
-tiếng Việt và là repo công khai nên tải được ngay, không cần token. Bản gốc đa ngữ
-`k2-fsa/OmniVoice` đọc tiếng Việt kém hơn rõ rệt; chỉ đổi sang nó khi cần ngôn ngữ khác:
+tiếng Việt và là repo công khai nên tải được ngay, không cần token.
+
+**Nếu nghe thử ở A4 thấy giọng clone không giống người nói gốc**, xử lý theo thứ tự:
+
+| Xem log | Nghĩa là | Làm gì |
+|---|---|---|
+| `Reference clone: trung bình N giây/mẫu` với N < 7 | mỗi speaker có quá ít bản ghi để ghép | tăng `PER_SPEAKER` ở ô A1 rồi chạy lại A2 |
+| reference đủ dài nhưng vẫn "lệch người" | model bám prompt chưa đủ chặt | thêm `--set generate.options.omnivoice.guidance_scale=3.0` |
+| phát âm chuẩn, danh tính sai hẳn | fine-tune một-ngôn-ngữ clone kém hơn bản gốc | đổi checkpoint sang `k2-fsa/OmniVoice` (đọc tiếng Việt kém hơn — đánh đổi) |
 
 ```python
 run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE,
-    "--set", "generate.options.omnivoice.checkpoint=k2-fsa/OmniVoice", optional=True)
+    "--set", "generate.options.omnivoice.checkpoint=k2-fsa/OmniVoice",
+    "--set", "generate.options.omnivoice.guidance_scale=3.0",
+    "--overwrite", optional=True)
 ```
+
+`--overwrite` là bắt buộc khi sinh lại: `generate` bỏ qua utt_id đã có, nên không có
+cờ đó thì lượt chạy sau chỉ in `đã có N` và giữ nguyên audio cũ. Chỉ cần khi corpus
+được nạp lại từ Kaggle Dataset của phiên trước — corpus mới trong `/kaggle/working`
+thì không.
+
+Reference được ghép từ nhiều utterance của cùng speaker cho tới ~12 giây, vì mỗi
+utterance trong corpus chỉ 3–10 giây và 3 giây là quá ngắn để lấy ra danh tính một
+người. Chi tiết: `TARGET_REF_SECONDS` trong `aidetector/generate/__init__.py`.
 """),
 code("""
 !pip install -q omnivoice "transformers>=5.3"
@@ -387,7 +405,29 @@ run("info")     # xác nhận omnivoice đã ✔ trước khi tốn thời gian 
 code("""
 # optional=True: OmniVoice cần GPU và cần tải checkpoint vài GB. Hỏng thì bỏ qua,
 # 30 audio giả của Piper/Kokoro ở trên vẫn đủ để đi tiếp phần B.
-run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE, optional=True)
+# --overwrite ở chế độ thử: đang vòng lặp sửa-nghe-sửa nên cần audio MỚI mỗi lần. Không
+# có cờ này thì `generate` bỏ qua utt_id đã có, và vì cách xử lý text không nằm trong
+# utt_id nên audio sinh bằng code cũ sẽ sống sót — nghe lại vẫn thấy đúng lỗi vừa sửa.
+# Lượt chạy thật thì ngược lại: corpus cộng dồn, không đụng vào cái đã sinh.
+run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE,
+    *(["--overwrite"] if SMOKE else []), optional=True)
+"""),
+code("""
+# A/B CHECKPOINT — sinh thêm một lượt bằng bản đa ngữ gốc, trên ĐÚNG những câu vừa rồi.
+#
+# Fine-tune tiếng Việt đọc chuẩn hơn nhưng có dấu hiệu clone danh tính kém hơn; bản gốc
+# thì ngược lại. Không có cách nào đoán được cái nào hợp dataset của anh — phải sinh cả
+# hai rồi đo. Hai lượt mang tag khác nhau (`omnivoice` và `omnivoice:k2-fsa-omnivoice`)
+# nên cùng tồn tại trong corpus, và ô đo ở A4 sẽ xếp chúng cạnh nhau.
+#
+# Chỉ chạy khi SMOKE: câu hỏi "checkpoint nào giống hơn" trả lời một lần trên 15 mẫu là
+# đủ, không cần trả lời lại trên 800 mẫu của lượt chạy thật.
+if SMOKE:
+    run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE, "--overwrite",
+        "--set", "generate.options.omnivoice.checkpoint=k2-fsa/OmniVoice", optional=True)
+else:
+    print("Bỏ qua A/B checkpoint — chỉ chạy ở chế độ thử (SMOKE = True).")
+    print("Chốt được checkpoint rồi thì đặt nó vào configs/kaggle.yaml cho lượt chạy thật.")
 """),
 
 md("""
@@ -441,8 +481,14 @@ code("""
 # hơi thở của bản real này không".
 from IPython.display import Audio, display
 
+# Engine cloning lên trước: đó là engine duy nhất mà "có giống người gốc không" là
+# câu hỏi có nghĩa. Piper/Kokoro giọng cố định, nghe chúng không nói lên điều gì về
+# chất lượng clone — mà chúng lại đông hơn nên dễ chiếm hết ba chỗ.
+from aidetector.generate.base import KIND_CLONE, available_generators
+
+_clone_engines = {i for i, c in available_generators().items() if c.kind == KIND_CLONE}
 pairs = []
-for fake in manifest.fakes:
+for fake in sorted(manifest.fakes, key=lambda f: (f.engine not in _clone_engines, f.utt_id)):
     real = manifest.get(fake.ref_utt_id)
     if real is not None:
         pairs.append((real, fake))
@@ -459,6 +505,208 @@ for real, fake in pairs:
     display(Audio(str(manifest.abs_path(real))))
     print(f"FAKE ({fake.duration:.1f}s)")
     display(Audio(str(manifest.abs_path(fake))))
+"""),
+code("""
+# ĐO ĐỘ GIỐNG GIỌNG của engine cloning — nghe vài mẫu bằng tai không kết luận được.
+#
+# Cosine giữa hai speaker embedding chỉ có nghĩa khi đặt cạnh MỐC: hai bản ghi khác
+# nhau của cùng một người cũng không bao giờ đạt 1.0, còn hai người khác nhau vẫn được
+# 0.5-0.6. Nên ô này đo cả ba: cùng-người (trần), khác-người (sàn), và clone-vs-người-gốc.
+import importlib.util
+import subprocess
+import sys
+
+# `!pip` không dùng được ở đây: nó là magic của IPython nên không lồng vào `if` được.
+if importlib.util.find_spec("resemblyzer") is None:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "resemblyzer"], check=True)
+
+from itertools import combinations
+
+import numpy as np
+from resemblyzer import VoiceEncoder, preprocess_wav
+
+encoder = VoiceEncoder(verbose=False)
+_cache = {}
+
+def embed(rec):
+    if rec.utt_id not in _cache:
+        try:
+            _cache[rec.utt_id] = encoder.embed_utterance(
+                preprocess_wav(str(manifest.abs_path(rec)))
+            )
+        except Exception:      # file quá ngắn sau VAD ⇒ bỏ qua, đừng làm hỏng cả ô
+            _cache[rec.utt_id] = None
+    return _cache[rec.utt_id]
+
+def cosines(pairs, limit=80):
+    out = []
+    for a, b in pairs[:limit]:
+        ea, eb = embed(a), embed(b)
+        if ea is not None and eb is not None:
+            out.append(float(ea @ eb))
+    return np.array(out)
+
+rng = np.random.default_rng(0)
+reals = [r for r in manifest.reals if not r.augment]
+by_spk = {}
+for r in reals:
+    by_spk.setdefault(r.speaker, []).append(r)
+
+# TRẦN: cùng người, khác bản ghi. Đây là mức cao nhất một bản clone có thể với tới.
+same = [p for recs in by_spk.values() for p in combinations(sorted(recs, key=lambda r: r.utt_id)[:4], 2)]
+# SÀN: hai người khác nhau — điểm quanh đây nghĩa là clone ra một người khác hẳn.
+spk = sorted(by_spk)
+diff = [(by_spk[spk[i]][0], by_spk[spk[j]][0]) for i, j in combinations(range(len(spk)), 2)]
+rng.shuffle(same); rng.shuffle(diff)
+
+ceiling, floor = cosines(same), cosines(diff)
+print(f"TRẦN  cùng người, khác câu : {np.median(ceiling):.3f}  (n={len(ceiling)})")
+print(f"SÀN   hai người khác nhau  : {np.median(floor):.3f}  (n={len(floor)})")
+print()
+
+from aidetector.generate.base import KIND_CLONE, available_generators
+
+_clone_engines = {i for i, c in available_generators().items() if c.kind == KIND_CLONE}
+
+# Engine cloning tách theo từng checkpoint — đó chính là thứ đang so. Engine TTS thì
+# gộp theo engine: chín giọng Kokoro tách thành chín dòng hai-ba mẫu là không đọc được gì.
+def group_of(rec):
+    return rec.generator if rec.engine in _clone_engines else rec.engine
+
+for engine in sorted({group_of(f) for f in manifest.fakes if not f.augment}):
+    pairs = []
+    for fake in manifest.fakes:
+        if fake.augment or group_of(fake) != engine:
+            continue
+        target = manifest.get(fake.ref_utt_id)
+        if target is not None:
+            pairs.append((fake, target))
+    rng.shuffle(pairs)
+    score = cosines(pairs)
+    if not len(score):
+        continue
+    med = float(np.median(score))
+    if med >= np.median(ceiling) - 0.05:
+        verdict = "✔ giữ được danh tính người nói"
+    elif med <= np.median(floor) + 0.05:
+        verdict = "✖ ra giọng người khác hẳn"
+    else:
+        verdict = "~ ở giữa trần và sàn"
+    print(f"{engine:<32} {med:.3f}  (n={len(score)})  {verdict}")
+
+print()
+print("Engine TTS giọng cố định (piper, kokoro) ĐÁNG LẼ phải nằm sát sàn — chúng đâu có")
+print("clone ai. Nếu chúng không sát sàn thì phép đo hỏng chứ không phải engine giỏi.")
+"""),
+code("""
+# ĐO PHÁT ÂM — engine có đọc đúng câu tiếng Việt được giao không?
+#
+# Ô trên đo GIỌNG CỦA AI, ô này đo ĐỌC CÁI GÌ. Hai trục khác nhau và một engine có thể
+# tốt trục này hỏng trục kia: clone đúng giọng nhưng nhả ra âm vô nghĩa thì audio đó vẫn
+# là rác đối với dataset.
+#
+# Cách đo: cho ASR nghe lại audio sinh ra rồi so với câu đã giao (WER). WER thô không đọc
+# được vì ASR cũng sai trên chính giọng thật — nên đo cả REAL làm SÀN LỖI.
+#
+# ASR chạy ở TIẾN TRÌNH RIÊNG, có lý do: ô A3b nâng transformers lên 5.x giữa phiên trong
+# khi kernel còn giữ bản cũ trong bộ nhớ. Import transformers thẳng ở đây là dính
+# ImportError do trộn hai phiên bản. Tiến trình con luôn nạp đúng thứ đang có trên đĩa.
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+_ASR_SCRIPT = "\\n".join([
+    "import json, sys, torch",
+    "from transformers import pipeline",
+    "paths = json.load(open(sys.argv[1]))",
+    'asr = pipeline("automatic-speech-recognition", model="vinai/PhoWhisper-small",',
+    "               device=0 if torch.cuda.is_available() else -1)",
+    'out = asr(paths, batch_size=8, generate_kwargs={"language": "vi", "task": "transcribe"})',
+    'json.dump([o["text"] for o in out], open(sys.argv[2], "w"))',
+])
+
+def transcribe(paths):
+    if not paths:
+        return []
+    work = Path(tempfile.mkdtemp())
+    (work / "asr.py").write_text(_ASR_SCRIPT)
+    (work / "in.json").write_text(json.dumps([str(p) for p in paths]))
+    done = subprocess.run([sys.executable, str(work / "asr.py"),
+                           str(work / "in.json"), str(work / "out.json")],
+                          capture_output=True, text=True)
+    if done.returncode != 0:
+        print("ASR hỏng — bỏ qua phép đo phát âm. Cuối log lỗi:")
+        print(done.stderr.strip()[-800:])
+        return None
+    return json.loads((work / "out.json").read_text())
+
+def _words(text):
+    return re.sub(r"[^\\w\\s]", " ", text.lower()).split()
+
+def wer(reference, hypothesis):
+    # Levenshtein mức TỪ, viết tay 8 dòng — đỡ thêm một phụ thuộc chỉ dùng một lần.
+    ref, hyp = _words(reference), _words(hypothesis)
+    if not ref:
+        return None
+    prev = list(range(len(hyp) + 1))
+    for i, r in enumerate(ref, 1):
+        cur = [i]
+        for j, h in enumerate(hyp, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (r != h)))
+        prev = cur
+    return prev[-1] / len(ref)
+
+# Gom hết bản ghi cần đo rồi phiên âm MỘT LƯỢT: model chỉ phải nạp một lần cho cả bảng.
+rng = np.random.default_rng(0)
+
+def sample(recs, limit):
+    recs = [r for r in recs if r.text.strip()]
+    rng.shuffle(recs)
+    return recs[:limit]
+
+groups = {"(real)": sample([r for r in manifest.reals if not r.augment], 20)}
+for engine in sorted({group_of(f) for f in manifest.fakes if not f.augment}):
+    groups[engine] = sample([f for f in manifest.fakes
+                             if not f.augment and group_of(f) == engine], 15)
+
+flat = [r for recs in groups.values() for r in recs]
+hyps = transcribe([manifest.abs_path(r) for r in flat])
+
+if hyps is not None:
+    scored, at = {}, 0
+    for name, recs in groups.items():
+        rows = [(w, r, h) for r, h in ((r, hyps[at + k]) for k, r in enumerate(recs))
+                if (w := wer(r.text, h)) is not None]
+        at += len(recs)
+        scored[name] = rows
+
+    floor = float(np.median([w for w, _, _ in scored["(real)"]])) if scored["(real)"] else 0.0
+    print(f"SÀN LỖI  ASR nghe chính giọng thật : WER {floor:.1%}  (n={len(scored['(real)'])})")
+    print()
+    for name, rows in scored.items():
+        if name == "(real)" or not rows:
+            continue
+        med = float(np.median([w for w, _, _ in rows]))
+        if med <= floor + 0.10:
+            verdict = "✔ đọc đúng"
+        elif med <= floor + 0.30:
+            verdict = "~ sai lác đác"
+        else:
+            verdict = "✖ ĐỌC HỎNG — audio này là rác cho dataset"
+        print(f"{name:<32} WER {med:6.1%}  (n={len(rows)})  {verdict}")
+
+    worst = max((row for name, rows in scored.items() if name != "(real)" for row in rows),
+                key=lambda row: row[0], default=None)
+    if worst:
+        score, rec, hyp = worst
+        print()
+        print(f"Mẫu tệ nhất — {rec.generator} · WER {score:.0%}")
+        print(f"  giao   : {rec.text.lower()}")
+        print(f"  đọc ra : {hyp.strip()}")
+        display(Audio(str(manifest.abs_path(rec))))
 """),
 code("""
 # Dạng sóng + phổ của một cặp — fake thường mượt và đều hơn ở vùng tần số cao.

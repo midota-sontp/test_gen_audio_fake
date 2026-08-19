@@ -19,7 +19,7 @@ from typing import Sequence
 
 import numpy as np
 
-from ..utils import get_logger
+from ..utils import get_logger, slugify
 from .base import (
     KIND_CLONE,
     Availability,
@@ -95,6 +95,13 @@ class OmniVoiceGenerator(Generator):
     def voices(self) -> Sequence[str]:
         return []  # giọng do reference quyết định
 
+    @property
+    def variant(self) -> str:
+        """Checkpoint khác mặc định thì phải lộ ra trong manifest, để A/B được."""
+        if self.checkpoint == DEFAULT_CHECKPOINT:
+            return ""
+        return slugify(self.checkpoint, 32)
+
     def load(self) -> None:
         import torch
         from omnivoice import OmniVoice
@@ -127,26 +134,48 @@ class OmniVoiceGenerator(Generator):
             )
         self._loaded = True
 
-    def _clean_ref_text(self, ref_text: str | None) -> str | None:
-        """Chuẩn hoá transcript của REFERENCE — thư viện không làm việc này.
+    @staticmethod
+    def _lower_if_shouting(text: str) -> str:
+        """Hạ TOÀN CHỮ HOA về chữ thường. Không đổi nội dung, chỉ đổi dạng.
 
-        `normalize_text` của OmniVoice chỉ áp lên text đích, có chú thích rõ trong
-        mã nguồn: *"not ref_text, which must stay aligned with the reference audio"*.
-        Nhưng VIVOS lưu transcript TOÀN CHỮ HOA, và chuỗi chữ hoa là dạng model gần
-        như không thấy khi huấn luyện ⇒ cặp (audio, text) của reference gióng hàng
-        kém ⇒ danh tính giọng lấy ra được cũng nhoè theo. Hạ về chữ thường không đổi
-        nội dung, chỉ đưa nó về dạng quen thuộc.
+        `normalize_text` của OmniVoice KHÔNG làm việc này. Đọc mã thư viện: với ngôn
+        ngữ không phải zh/en, nó chỉ chạy `num2words` trên số nguyên rồi trả text về
+        nguyên vẹn — chữ hoa đi thẳng vào model. Mà VIVOS lưu transcript TOÀN CHỮ HOA,
+        và chuỗi chữ hoa là dạng text tokenizer gần như không thấy khi huấn luyện.
+        """
+        text = text.strip()
+        if any(c.isalpha() for c in text) and not any(c.islower() for c in text):
+            return text.lower()
+        return text
+
+    def _clean_text(self, text: str) -> str:
+        """Text ĐÍCH: hạ chữ hoa và đảm bảo có dấu kết câu.
+
+        Thư viện tự thêm dấu kết cho ref_text (`add_punctuation`) nhưng KHÔNG làm thế
+        với text đích. Transcript VIVOS không có dấu chấm nào, nên model phải tự đoán
+        chỗ kết thúc — cộng thêm chữ hoa nữa thì nó đọc đúng vài từ đầu rồi vỡ.
+        """
+        text = self._lower_if_shouting(text)
+        if text and text[-1] not in ".!?…":
+            text += "."
+        return text
+
+    def _clean_ref_text(self, ref_text: str | None) -> str | None:
+        """Transcript của REFERENCE — thư viện cũng không chuẩn hoá cái này.
+
+        `normalize_text` chỉ áp lên text đích, có chú thích rõ trong mã nguồn:
+        *"not ref_text, which must stay aligned with the reference audio"*. Chữ hoa ở
+        đây làm cặp (audio, text) của reference gióng hàng kém ⇒ danh tính giọng lấy
+        ra được cũng nhoè theo.
 
         Trả `None` thay vì `""` khi không có transcript: `None` là tín hiệu để thư
         viện tự nhận dạng bằng ASR, còn `""` bị hiểu là "reference không nói gì" —
         đúng cách nhanh nhất để phá gióng hàng và mất luôn giọng cần clone.
+        Dấu kết câu để thư viện tự thêm, nó đã có `add_punctuation` cho ref_text.
         """
         if not ref_text or not ref_text.strip():
             return None
-        text = ref_text.strip()
-        if any(c.isalpha() for c in text) and not any(c.islower() for c in text):
-            text = text.lower()
-        return text
+        return self._lower_if_shouting(ref_text)
 
     def _explain_load_failure(self, exc: Exception) -> str:
         """Biến lỗi tải checkpoint thành việc người dùng có thể làm ngay."""
@@ -183,7 +212,7 @@ class OmniVoiceGenerator(Generator):
         self.ensure_loaded()
         assert self._model is not None
         output = self._model.generate(
-            text=text,
+            text=self._clean_text(text),
             language=language or self.language,
             ref_audio=str(ref_audio),
             ref_text=self._clean_ref_text(ref_text),

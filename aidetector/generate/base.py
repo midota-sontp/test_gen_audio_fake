@@ -86,9 +86,24 @@ class Generator:
         raise NotImplementedError
 
     # ------------------------------------------------------------------ tiện ích
+    @property
+    def variant(self) -> str:
+        """Nhánh của engine, phân biệt hai lần chạy cùng engine khác cấu hình.
+
+        Engine TTS phân biệt nhau bằng `voices()`, nhưng engine cloning không có
+        danh sách giọng nên MỌI bản sinh đều mang đúng một tag và một utt_id. Chạy
+        A/B hai checkpoint là hỏng: lượt sau bị bỏ qua vì "đã có", mà manifest cũng
+        không cho biết audio nào ra từ checkpoint nào.
+
+        Trả `""` nghĩa là cấu hình mặc định — tag và utt_id giữ nguyên như cũ, nên
+        corpus đã sinh trước đó không bị coi là thiếu và sinh lại từ đầu.
+        """
+        return ""
+
     def tag(self, voice: str | None) -> str:
         """Chuỗi ghi vào cột `generator` của manifest: `piper:vi_VN-vais1000-medium`."""
-        return f"{self.id}:{voice}" if voice else self.id
+        parts = [p for p in (voice, self.variant) if p]
+        return ":".join([self.id, *parts]) if parts else self.id
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<{type(self).__name__} id={self.id} kind={self.kind} device={self.device}>"
