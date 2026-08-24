@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import zipfile
 from pathlib import Path
 
@@ -174,6 +175,17 @@ def notebook_code(notebook) -> str:
                    for c in notebook["cells"] if c["cell_type"] == "code")
 
 
+def _cells_with(notebook, needle) -> list[int]:
+    return [i for i, c in enumerate(notebook["cells"])
+            if c["cell_type"] == "code" and needle in "".join(c["source"])]
+
+
+def _cell_src(notebook, needle) -> str:
+    found = _cells_with(notebook, needle)
+    assert found, f"không ô code nào chứa {needle!r}"
+    return "".join(notebook["cells"][found[0]]["source"])
+
+
 def test_there_is_exactly_one_notebook():
     """Một file duy nhất để import — hai bản song song chỉ gây nhầm."""
     assert sorted(p.name for p in Path("notebooks").glob("*.ipynb")) == [NOTEBOOK.name]
@@ -253,14 +265,28 @@ def test_stages_run_through_the_fail_fast_helper(notebook_code):
         )
 
 
-def test_optional_engine_cell_does_not_halt_the_notebook(notebook_code):
-    """OmniVoice cần GPU + quyền tải checkpoint — hỏng thì bỏ qua, không dừng cả phiên."""
-    assert 'optional=True' in notebook_code
-    omnivoice_call = next(
-        line for line in notebook_code.splitlines()
-        if 'run("generate"' in line and "omnivoice" in line
-    )
-    assert "optional=True" in omnivoice_call
+def test_engine_is_optional_only_when_something_else_makes_fakes(notebook_code):
+    """`optional` phải phụ thuộc việc còn engine khác gánh lớp fake hay không.
+
+    OmniVoice cần GPU và tải checkpoint vài GB, nên khi Piper/Kokoro còn bật thì bỏ qua
+    lỗi của nó là đúng. Nhưng tắt TTS rồi thì nó là nguồn fake DUY NHẤT: bỏ qua lúc đó
+    là đưa cả phần huấn luyện vào một corpus không có lớp fake nào.
+    """
+    start = notebook_code.index('_hook = ["--after-speaker"')
+    call = notebook_code[start:notebook_code.index("\n\n", start)]
+    assert "optional=bool(TTS_ENGINES)" in call, call
+
+
+def test_generate_syncs_at_speaker_boundaries(notebook_code):
+    """Mốc đẩy dữ liệu là ranh giới speaker, và chỉ gắn khi đồng bộ đã sẵn sàng."""
+    assert '"--after-speaker"' in notebook_code
+    assert "if SYNC_READY else []" in notebook_code
+
+
+def test_progress_is_checked_before_the_long_generation(notebook_code):
+    """Bước sinh dài nhiều giờ — phải biết còn thiếu bao nhiêu TRƯỚC khi bắt đầu."""
+    assert '"--dry-run"' in notebook_code
+    assert notebook_code.index('"--dry-run"') < notebook_code.index('"--after-speaker"')
 
 
 def test_dataset_phase_comes_before_training_phase(notebook_text):
@@ -323,11 +349,19 @@ def test_bootstrap_drops_stale_modules_from_the_kernel(notebook, tmp_path, monke
         sys.modules.update(saved)
 
 
-def test_dataset_picker_scores_every_mount(notebook_code, tmp_path, monkeypatch):
-    """Lấy bừa thư mục đầu tiên sẽ chết khi dataset rỗng đứng trước dataset thật."""
-    source = next(s for s in (notebook_code,) if "Dataset đang mount" in s)
-    cell = source[source.index("import logging"):source.index('print(f"\\nNguồn REAL')]
+def _run_picker(notebook, tmp_path, namespace):
+    """Chạy ô A1 với /kaggle/input trỏ vào tmp_path.
 
+    MAKE_DATASET phải do người gọi đặt: chính nó quyết định ô có dò dataset hay không.
+    """
+    cell = _cell_src(notebook, "detect_adapter(")
+    exec(compile(cell.replace('Path("/kaggle/input")', f'Path({str(tmp_path)!r})'),
+                 "picker", "exec"), namespace)
+    return namespace
+
+
+def test_dataset_picker_scores_every_mount(notebook, tmp_path):
+    """Lấy bừa thư mục đầu tiên sẽ chết khi dataset rỗng đứng trước dataset thật."""
     (tmp_path / "aaa-rong").mkdir()                     # rỗng, đứng trước theo abc
     good = tmp_path / "zzz-vivos" / "vivos"
     good.mkdir(parents=True)
@@ -335,23 +369,26 @@ def test_dataset_picker_scores_every_mount(notebook_code, tmp_path, monkeypatch)
         (good / split / "waves" / "SPK1").mkdir(parents=True)
         (good / split / "prompts.txt").write_text("SPK1_R001 xin chào", encoding="utf-8")
 
-    namespace: dict = {}
-    exec(compile(cell.replace('Path("/kaggle/input")', f'Path({str(tmp_path)!r})'),
-                 "picker", "exec"), namespace)
+    namespace = _run_picker(notebook, tmp_path, {"MAKE_DATASET": True})
     assert namespace["RAW"] == str(tmp_path / "zzz-vivos")
 
 
-def test_dataset_picker_stops_with_details_when_nothing_usable(notebook_code, tmp_path):
-    source = notebook_code
-    cell = source[source.index("import logging"):source.index('print(f"\\nNguồn REAL')]
+def test_dataset_picker_stops_with_details_when_nothing_usable(notebook, tmp_path):
     (tmp_path / "chi-co-parquet").mkdir()
     (tmp_path / "chi-co-parquet" / "train.parquet").write_bytes(b"PAR1")
 
     with pytest.raises(SystemExit) as err:
-        exec(compile(cell.replace('Path("/kaggle/input")', f'Path({str(tmp_path)!r})'),
-                     "picker", "exec"), {})
+        _run_picker(notebook, tmp_path, {"MAKE_DATASET": True})
     assert "Không dataset nào chứa audio" in str(err.value)
     assert ".parquet" in str(err.value)
+
+
+def test_picker_leaves_the_real_dataset_alone_when_only_training(notebook, tmp_path):
+    """MODE='train' không mount VIVOS — đòi cho được dataset real ở đây là dừng oan."""
+    said = []
+    namespace = _run_picker(notebook, tmp_path,
+                            {"MAKE_DATASET": False, "skipped": said.append})
+    assert namespace["RAW"] is None and said, "phải bỏ qua và nói rõ lý do"
 
 
 def test_dataset_phase_has_a_smoke_switch_and_inspection(notebook_text):
@@ -361,3 +398,183 @@ def test_dataset_phase_has_a_smoke_switch_and_inspection(notebook_text):
     assert "Audio(" in notebook_text and "specgram" in notebook_text
     # kiểm tra fake có real đối chứng
     assert "ref_utt_id" in notebook_text
+
+
+def test_generated_sync_script_is_valid_python(notebook):
+    """Script đồng bộ được sinh ra bằng f-string lồng trong ô notebook.
+
+    Nó chỉ chạy trên Kaggle, giữa lượt sinh kéo dài nhiều giờ — hỏng cú pháp ở đó thì
+    chỉ biết sau khi đã mất công. Sai một lớp `{{}}` là đủ vỡ, nên dựng ra và kiểm ở đây.
+    """
+    import ast
+    import textwrap
+
+    source = next("".join(c["source"]) for c in notebook["cells"]
+                  if "SYNC_SCRIPT" in "".join(c["source"]))
+    start = source.index("textwrap.dedent(")
+    end = source.index("'''))", start) + len("'''")
+    script = eval(source[start:end] + ")",  # noqa: S307 — chuỗi do chính repo sinh ra
+                  {"textwrap": textwrap, "DATASET_ID": "owner/slug",
+                   "SYNC_EVERY_MINUTES": 20})
+
+    ast.parse(script)
+    assert "kaggle" in script and "--force" in script
+    # Đẩy toàn bộ: real + fake + manifest, không lọc nhãn.
+    assert "--label" not in script
+    assert "manifest.csv" in script and "corpus.zip" in script
+
+
+def test_sync_script_is_written_before_the_generate_cell_uses_it(notebook):
+    """Hook gọi sync_corpus.py, nên ô ghi file đó phải chạy trước.
+
+    So theo chỉ số Ô, không theo vị trí chuỗi: ô A2b có nhắc tên cờ trong comment nên
+    so bằng `.index()` trên toàn văn sẽ ra kết quả ngược mà vẫn trông có lý.
+    """
+    def first_cell(needle):
+        return next(i for i, c in enumerate(notebook["cells"])
+                    if c["cell_type"] == "code" and needle in "".join(c["source"]))
+
+    assert first_cell("SYNC_SCRIPT.write_text") < first_cell('"--after-speaker"')
+
+
+def test_dataset_is_checked_before_ingest(notebook):
+    """Phải đọc dataset xem đã làm tới đâu TRƯỚC khi bắt đầu, không thì làm lại từ đầu."""
+    def first_cell(needle):
+        return next(i for i, c in enumerate(notebook["cells"])
+                    if c["cell_type"] == "code" and needle in "".join(c["source"]))
+
+    assert first_cell("vivos-fake-v2") < first_cell('run("ingest"')
+
+
+def test_tts_is_off_but_still_one_switch_away(notebook_code):
+    assert "TTS_ENGINES = []" in notebook_code
+    assert "if TTS_ENGINES:" in notebook_code, "phải còn đường bật lại"
+
+
+# ------------------------------------------------------------ MODE: A hay B hay cả hai
+#
+# Sinh fake bằng cloning mất nhiều giờ nên phần tạo dataset và phần huấn luyện thường
+# không nằm cùng một phiên. `MODE` chọn phiên này làm gì, và mọi ô phải tôn trọng nó —
+# Save & Run All là cách dùng thật, nên "bỏ qua bằng tay" không phải một lựa chọn.
+def _mode_block(notebook_code: str) -> str:
+    """Đoạn suy ra MAKE_DATASET/DO_TRAIN — lấy ra để CHẠY, chứ không chỉ khớp chuỗi."""
+    start = notebook_code.index("if MODE not in")
+    return notebook_code[start:notebook_code.index("\n", notebook_code.index("DO_TRAIN = ", start))]
+
+
+@pytest.mark.parametrize("mode,phases", [
+    ("dataset", (True, False)),
+    ("train", (False, True)),
+    ("both", (True, True)),
+])
+def test_mode_decides_which_phases_run(notebook_code, mode, phases):
+    namespace = {"MODE": mode}
+    exec(_mode_block(notebook_code), namespace)  # noqa: S102 — mã do chính repo sinh
+    assert (namespace["MAKE_DATASET"], namespace["DO_TRAIN"]) == phases
+
+
+def test_a_misspelled_mode_stops_the_notebook(notebook_code):
+    """Gõ sai MODE mà chạy tiếp im lặng là bỏ cả phiên GPU — sai thì phải kêu ngay."""
+    with pytest.raises(SystemExit):
+        exec(_mode_block(notebook_code), {"MODE": "trian"})  # noqa: S102
+
+
+def test_mode_is_set_before_anything_reads_it(notebook):
+    """MODE và `skipped()` phải nằm ở ô cài thư viện: nó quyết định cài gói nào."""
+    setup = _cells_with(notebook, 'MODE = "both"')
+    assert len(setup) == 1, "MODE phải khai báo đúng một chỗ"
+    assert "def skipped(" in "".join(notebook["cells"][setup[0]]["source"])
+
+    readers = [i for i, c in enumerate(notebook["cells"])
+               if c["cell_type"] == "code" and i != setup[0]
+               and ("MAKE_DATASET" in "".join(c["source"])
+                    or "DO_TRAIN" in "".join(c["source"]))]
+    assert readers and min(readers) > setup[0]
+
+
+@pytest.mark.parametrize("stage", ['run("ingest"', 'run("generate"', 'SYNC_READY ='])
+def test_data_making_stages_only_run_when_making_a_dataset(notebook, stage):
+    for i in _cells_with(notebook, stage):
+        assert "MAKE_DATASET" in "".join(notebook["cells"][i]["source"]), \
+            f"ô {i} chạy {stage} mà không hỏi MODE"
+
+
+@pytest.mark.parametrize("stage", ['run("split")', 'run("augment"', 'run("features")',
+                                   'run("train")', 'run("evaluate")', 'run("detect"',
+                                   "make_archive"])
+def test_training_stages_only_run_when_training(notebook, stage):
+    for i in _cells_with(notebook, stage):
+        assert "DO_TRAIN" in "".join(notebook["cells"][i]["source"]), \
+            f"ô {i} chạy {stage} mà không hỏi MODE"
+
+
+def test_corpus_restore_runs_in_every_mode(notebook):
+    """Ô A1b là đường DUY NHẤT mang corpus vào phiên — gate nó thì MODE='train' chết."""
+    src = _cell_src(notebook, 'run("unpack"')
+    # Không cổng MODE nào được mở TRƯỚC lệnh bung — sau đó thì có (kiểm tra riêng cho
+    # chế độ chỉ-huấn-luyện), nên so theo vị trí chứ không phải cả ô.
+    before = src[:src.index('run("unpack"')]
+    assert "MAKE_DATASET" not in before and "DO_TRAIN" not in before, before
+
+
+def test_train_only_refuses_an_empty_or_one_sided_corpus(notebook):
+    """Không corpus, hoặc corpus thiếu một lớp, thì phần B chỉ là mấy giờ GPU đổ đi."""
+    src = _cell_src(notebook, 'run("unpack"')
+    assert "if not MAKE_DATASET:" in src
+    assert src.count("raise SystemExit") >= 2, src
+    assert "chỉ có một lớp" in src
+
+
+def test_train_only_installs_no_generation_engine(notebook):
+    """Chỉ huấn luyện thì khỏi cài engine nào: đỡ vài phút và tránh xung đột transformers."""
+    src = _cell_src(notebook, 'pip("-r", "requirements.txt")')
+    gate = src.index("if not MAKE_DATASET:")
+    assert gate < src.index('pip("omnivoice"')
+    assert gate < src.index('pip("piper-tts"')
+
+
+def test_real_dataset_detection_is_skipped_when_only_training(notebook):
+    """MODE='train' mount corpus đã sinh, không mount VIVOS — đòi dataset real là dừng oan."""
+    src = _cell_src(notebook, "detect_adapter(")
+    assert src.index("if not MAKE_DATASET:") < src.index("Chưa add dataset nào")
+
+
+# Khớp chuỗi chỉ chứng minh cái cổng CÓ MẶT. Ở đây chạy thật những ô stage với `run()`
+# giả để xem MODE cho stage nào đi qua — đó mới là điều notebook hứa.
+_STAGE_CELLS = ('run("ingest"', "*TTS_ENGINES", "xác nhận omnivoice đã ✔", '"--dry-run"',
+                '"--after-speaker"', "k2-fsa/OmniVoice", 'run("split")',
+                'run("features")', 'run("detect"')
+
+
+def _stages_that_run(notebook, notebook_code, mode) -> set[str]:
+    called: list[str] = []
+    namespace = {
+        "MODE": mode, "sys": sys, "SMOKE": False, "SYNC_READY": False,
+        "TTS_ENGINES": ["piper"], "RAW": "/tmp/khong-dung", "N_REAL": 1,
+        "PER_SPEAKER": 1, "N_FAKE_TTS": 1, "N_FAKE_CLONE": 1,
+        "run": lambda *args, **kw: called.append(str(args[0])),
+        "pip": lambda *args, **kw: None,
+        "skipped": lambda what: None,
+    }
+    exec(_mode_block(notebook_code), namespace)  # noqa: S102 — dựng MAKE_DATASET/DO_TRAIN
+    for needle in _STAGE_CELLS:
+        exec(_cell_src(notebook, needle), namespace)  # noqa: S102
+    return set(called)
+
+
+@pytest.mark.parametrize("mode,phai_chay,khong_duoc_chay", [
+    ("dataset", {"ingest", "generate"},
+     {"split", "augment", "features", "train", "evaluate", "detect"}),
+    ("train", {"split", "augment", "features", "train", "evaluate", "detect"},
+     {"ingest", "generate"}),
+])
+def test_mode_gates_the_stages_that_actually_run(notebook, notebook_code, mode,
+                                                phai_chay, khong_duoc_chay):
+    called = _stages_that_run(notebook, notebook_code, mode)
+    assert phai_chay <= called, f"MODE={mode} thiếu: {phai_chay - called}"
+    assert not (khong_duoc_chay & called), f"MODE={mode} chạy thừa: {khong_duoc_chay & called}"
+
+
+def test_both_still_runs_the_whole_pipeline(notebook, notebook_code):
+    assert {"ingest", "generate", "split", "augment", "features", "train", "evaluate",
+            "detect"} <= _stages_that_run(notebook, notebook_code, "both")

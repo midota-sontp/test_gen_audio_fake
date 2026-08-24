@@ -94,6 +94,40 @@ def cmd_ingest(args) -> int:
     return 0 if result.get("kept") else 1
 
 
+def _speaker_hook(command: str | None, manifest):
+    """Chạy một lệnh shell mỗi khi xong phần của một speaker.
+
+    Đây là mốc an toàn để đẩy corpus ra ngoài: manifest đã lưu, và phần đã xong luôn là
+    những GIỌNG hoàn chỉnh chứ không phải một nhúm mẫu lẻ giữa chừng. Lệnh nhận thông
+    tin qua biến môi trường, khỏi phải chèn chuỗi vào dòng lệnh.
+
+    Hook hỏng KHÔNG được làm hỏng lượt sinh: mất kết nối lúc đẩy dataset thì corpus vẫn
+    còn trên đĩa, còn bỏ dở nhiều giờ GPU thì không lấy lại được.
+    """
+    if not command:
+        return None
+
+    import os
+    import subprocess
+
+    def hook(speaker: str, stats: dict) -> None:
+        env = {
+            **os.environ,
+            "AIDETECTOR_SPEAKER": speaker,
+            "AIDETECTOR_KEPT": str(stats.get("kept", 0)),
+            "AIDETECTOR_CORPUS": str(manifest.root),
+        }
+        log.info("Hook sau speaker %s: %s", speaker, command)
+        done = subprocess.run(command, shell=True, env=env, capture_output=True, text=True)
+        out = (done.stdout + done.stderr).strip()
+        if out:
+            log.info("  %s", out.replace("\n", "\n  ")[-1500:])
+        if done.returncode:
+            log.warning("Hook trả mã %d — bỏ qua, lượt sinh vẫn chạy tiếp.", done.returncode)
+
+    return hook
+
+
 def cmd_generate(args) -> int:
     from .generate import available_generators, generate_fakes
 
@@ -142,6 +176,8 @@ def cmd_generate(args) -> int:
                     min_words=int(cfg.get("generate.min_words", 6)),
                     max_words=int(cfg.get("generate.max_words", 40)),
                     overwrite=args.overwrite,
+                    dry_run=args.dry_run,
+                    on_speaker_done=_speaker_hook(args.after_speaker, manifest),
                 ))
         except Exception as exc:  # noqa: BLE001 — engine bên thứ ba, hỏng đủ kiểu
             # Một engine hỏng KHÔNG được xoá công của các engine khác: dữ liệu đã
@@ -471,6 +507,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--engines", nargs="*", help="vd: piper kokoro omnivoice")
     p.add_argument("--count", type=int, help="số mẫu mỗi engine")
     p.add_argument("--device", help="cpu | mps | cuda | auto")
+    p.add_argument("--dry-run", action="store_true",
+                   help="chỉ đếm còn thiếu bao nhiêu mẫu, không nạp model, không sinh")
+    p.add_argument("--after-speaker", metavar="CMD",
+                   help="lệnh chạy mỗi khi xong một speaker (mốc để đồng bộ corpus ra ngoài)")
     p.set_defaults(func=cmd_generate)
 
     p = sub.add_parser("augment", parents=[common], help="sinh thêm bản nhiễu/nén")

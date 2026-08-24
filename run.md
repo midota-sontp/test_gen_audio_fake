@@ -120,6 +120,34 @@ qua vì trùng id. Knob (`guidance_scale`, `num_step`) thì không vào id — �
 Corpus 16 kHz cũng là một trần cứng: OmniVoice sinh ở 24 kHz nên phần trên 8 kHz của
 reference không tồn tại và model phải tự bịa — đó là phần "chất giọng" nghe khác nhất.
 
+#### Chạy dở rồi tiếp tục ở phiên sau
+
+`generate` idempotent theo `utt_id`: chạy lại cùng `--count` thì nó bỏ qua phần đã có và
+chỉ làm phần còn thiếu. Bốn thứ đỡ mất công:
+
+```bash
+# Còn thiếu bao nhiêu? Không nạp model, xong trong vài giây, kèm tiến độ theo speaker.
+python -m aidetector generate --engines omnivoice --count 4000 --dry-run
+
+# Chốt tiến độ ở ranh giới mỗi speaker rồi gọi lệnh đẩy dữ liệu ra ngoài
+python -m aidetector generate --engines omnivoice --count 4000 \
+    --after-speaker "python sync_corpus.py"
+
+# Mang corpus giữa hai phiên
+python -m aidetector pack --out corpus.zip
+python -m aidetector unpack corpus.zip
+```
+
+Engine cloning chạy **gom theo speaker** (phần chọn câu vẫn round-robin nên phân bổ
+không đổi), nhờ đó có ranh giới rõ ràng để chốt: xong một giọng ⇒ lưu manifest ⇒ gọi
+hook. Hook nhận `AIDETECTOR_SPEAKER`, `AIDETECTOR_KEPT`, `AIDETECTOR_CORPUS` qua biến môi
+trường, và hook hỏng **không** làm dừng lượt sinh — mất kết nối lúc đẩy thì corpus vẫn
+còn trên đĩa, còn bỏ dở nhiều giờ GPU thì không lấy lại được.
+
+Manifest còn được lưu sau mỗi `SAVE_EVERY = 50` mẫu, nên bị ngắt giữa hai speaker vẫn
+giữ được phần đã sinh. Nếu chỉ lưu lúc engine chạy xong thì mất vài giờ GPU là chuyện
+thường.
+
 Fake được ghi vào `corpus/audio/fake/<engine>/<voice>/`, mỗi bản ghi mang:
 `generator` (vd `piper:vi_VN-vais1000-medium`), `ref_utt_id` (utterance real gốc)
 và **cùng `speaker` + cùng `text` với real** — nhờ vậy mô hình không thể phân loại
@@ -282,12 +310,36 @@ Notebook chia hai phần, **chạy phần A trước**:
 
 | | Làm gì | Ghi chú |
 |---|---|---|
-| **PHẦN A** | ingest → generate → validate → **nghe thử + xem phổ** → `pack` | có công tắc `SMOKE = True` chạy thử ~40 mẫu vài phút |
+| **PHẦN A** | ingest → generate → validate → **nghe thử + xem phổ** → đẩy lên Dataset | có công tắc `SMOKE = True` chạy thử ~40 mẫu vài phút |
 | **PHẦN B** | split → augment → features → train → evaluate | chỉ chạy khi dataset đã ưng |
 
 Phần A dừng lại ở một dataset đóng gói sẵn, nên bạn kiểm tra được dữ liệu **trước
 khi** tốn giờ GPU huấn luyện: thống kê cân bằng real/fake, số lượng theo từng engine,
 tỉ lệ fake có real đối chứng, và nghe trực tiếp từng cặp real/fake cùng câu cùng giọng.
+
+#### `MODE` — phiên này chạy phần nào
+
+Sinh fake bằng voice cloning mất nhiều giờ (~4 giây/mẫu trên T4), nên hai phần thường
+không nằm cùng một phiên. Công tắc `MODE` ở ô cài thư viện quyết định:
+
+| `MODE` | Chạy | Dùng khi |
+|---|---|---|
+| `"dataset"` | chỉ phần A | dành cả phiên để sinh fake; corpus tự đẩy lên Dataset tại ranh giới mỗi speaker |
+| `"train"` | chỉ phần B | corpus đã có trong Dataset, chỉ muốn huấn luyện |
+| `"both"` (mặc định) | A rồi B | chạy thử, hoặc quy mô nhỏ đủ gọn trong một phiên |
+
+Ô nào không thuộc phần đang chạy thì tự bỏ qua và in lý do, nên **Save & Run All** ở chế
+độ nào cũng đúng — không phải chọn tay từng ô. Ba điểm `MODE` đổi hành vi chứ không chỉ
+bỏ qua:
+
+* **`"train"` không cài engine sinh audio nào** — đỡ vài phút và tránh hẳn màn `transformers`
+  4.x/5.x giằng nhau, vì WavLM chạy được trên cả hai nhánh.
+* **`"train"` không dò dataset REAL** — phiên đó mount corpus đã sinh sẵn chứ không mount
+  VIVOS, nên đòi cho được một bộ giọng thật ở ô A1 là dừng oan.
+* **`"train"` bắt buộc phải có corpus** — không bung được gì, hoặc bung ra corpus thiếu hẳn
+  một lớp, thì ô A1b dừng ngay thay vì để phần B đốt mấy giờ GPU vào tay không.
+
+Ô nạp corpus (A1b) chạy ở **mọi** chế độ — nó là đường duy nhất mang dữ liệu vào phiên.
 
 Sau khi sửa code trong repo, build lại notebook cho khớp:
 
@@ -314,6 +366,11 @@ hàng chục nghìn file wav rời rạc thì rất chậm, nên gói vào một
 !python -m aidetector unpack /kaggle/input/<tên-dataset>/corpus.zip -c {CFG}
 !python -m aidetector run split augment features train evaluate -c {CFG}
 ```
+
+Trong notebook thì hai bước này đã tự động: phần A đẩy corpus lên Kaggle Dataset ngay
+trong lúc sinh (ô A2b), và ô A1b của phiên sau bung nó ra trước khi làm bất cứ việc gì.
+Chuỗi thường dùng là `MODE = "dataset"` vài phiên cho tới khi đủ mẫu, rồi một phiên
+`MODE = "train"`.
 
 `unpack` chỉ ghi những file chưa có nên chạy lại được, và tự loại khỏi manifest các
 bản ghi thiếu audio.

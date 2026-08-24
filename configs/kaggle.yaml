@@ -21,7 +21,7 @@ generate:
   device: auto
   # OmniVoice là engine cloning: cùng speaker, cùng câu nói với real ⇒ dữ liệu khó
   # nhất và giá trị nhất. Trên CPU gần như không chạy nổi, nên chỉ bật ở đây.
-  engines: [piper, kokoro, omnivoice]
+  engines: [omnivoice]
   options:
     piper:
       data_dir: /kaggle/working/models/piper

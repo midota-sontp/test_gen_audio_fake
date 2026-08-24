@@ -6,6 +6,7 @@ import shutil
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -49,6 +50,13 @@ REF_GAP_SECONDS = 0.3
 #: phải ghi ra đĩa, nên cho mỗi mẫu một tổ hợp riêng là trả giá đĩa mà không được thêm
 #: gì: vài tổ hợp/speaker đã đủ đa dạng.
 REF_VARIANTS = 4
+#: Lưu manifest sau mỗi bao nhiêu mẫu.
+#:
+#: CLI chỉ gọi `manifest.save()` khi engine chạy XONG, mà sinh vài nghìn mẫu cloning
+#: mất nhiều giờ trong phiên Kaggle 9 tiếng. Bị ngắt giữa chừng thì file wav vẫn nằm
+#: trên đĩa nhưng manifest không có dòng nào — lần sau chạy lại sẽ làm lại từ đầu. Ghi
+#: một CSV vài nghìn dòng là chuyện vài chục milli-giây, rẻ hơn hàng giờ GPU rất nhiều.
+SAVE_EVERY = 50
 
 
 def _resample(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
@@ -211,6 +219,50 @@ def build_generator(engine_id: str, device: str, options: dict | None = None) ->
     return cls(device=device, **(options or {}))
 
 
+def _report_progress(
+    manifest: Manifest,
+    targets: list[Record],
+    voice_list: list[str | None],
+    engine_id: str,
+    gen: Generator,
+) -> dict:
+    """Đếm còn thiếu bao nhiêu, không nạp model.
+
+    Dùng ĐÚNG công thức utt_id của vòng sinh thật, nên con số này là chính xác chứ
+    không phải ước lượng — nó là thứ để quyết định còn phải chạy bao lâu nữa.
+    """
+    by_speaker: dict[str, Counter[str]] = defaultdict(Counter)
+    done = todo = 0
+    for i, target in enumerate(targets):
+        voice = voice_list[i % len(voice_list)]
+        marker = f"{voice}|{gen.variant}" if gen.variant else str(voice)
+        key = (f"{target.utt_id}|{marker}" if target.utt_id
+               else f"fallback:{stable_id(target.text)}|{marker}")
+        by_speaker[target.speaker]["all"] += 1
+        if make_utt_id(engine_id, target.speaker, key) in manifest:
+            done += 1
+            by_speaker[target.speaker]["done"] += 1
+        else:
+            todo += 1
+
+    # Tiến độ theo SPEAKER, vì đó là đơn vị chốt: biết còn bao nhiêu giọng chưa động
+    # tới thì ước được còn mấy lần đồng bộ nữa.
+    finished = sorted(s for s, c in by_speaker.items() if c["done"] == c["all"])
+    partial = sorted(s for s, c in by_speaker.items() if 0 < c["done"] < c["all"])
+    untouched = sorted(s for s, c in by_speaker.items() if c["done"] == 0)
+
+    log.info("Engine %s: %d/%d mẫu đã có · còn %d phải sinh",
+             engine_id, done, len(targets), todo)
+    log.info("Speaker: %d xong · %d dở dang · %d chưa động tới%s",
+             len(finished), len(partial), len(untouched),
+             f" ({', '.join(untouched[:5])}…)" if len(untouched) > 5
+             else (f" ({', '.join(untouched)})" if untouched else ""))
+    return {"engine": engine_id, "kept": 0, "error": 0, "drop_invalid": 0,
+            "skip_exists": done, "skip_no_reference": 0, "todo": todo,
+            "targets": len(targets), "speakers_done": len(finished),
+            "speakers_partial": len(partial), "speakers_todo": len(untouched)}
+
+
 def generate_fakes(
     manifest: Manifest,
     engine_id: str,
@@ -223,8 +275,20 @@ def generate_fakes(
     min_words: int = 6,
     max_words: int = 40,
     overwrite: bool = False,
+    dry_run: bool = False,
+    on_speaker_done: "Callable[[str, dict], None] | None" = None,
 ) -> dict:
-    """Sinh `count` audio giả bằng một engine, ghi thẳng vào corpus."""
+    """Sinh `count` audio giả bằng một engine, ghi thẳng vào corpus.
+
+    `dry_run=True` chỉ đếm còn thiếu bao nhiêu rồi thoát — không nạp model, không tốn
+    GPU. Câu "đã tới đâu rồi, còn phải chạy bao lâu nữa" phải trả lời được trong vài
+    giây, không phải bằng cách chạy thử.
+
+    `on_speaker_done(speaker, stats)` được gọi mỗi khi xong hết phần của một speaker,
+    SAU khi manifest đã lưu — đây là mốc an toàn để đẩy dữ liệu ra ngoài. Mốc theo
+    speaker chứ không theo số mẫu vì nó là ranh giới có nghĩa: mất kết nối thì phần đã
+    đẩy luôn là những giọng hoàn chỉnh, không phải một nhúm mẫu lẻ giữa chừng.
+    """
     # Danh sách giọng do config quyết định phải tới được cả generator, để engine
     # không nạp sẵn những giọng sẽ không dùng.
     options = dict(options or {})
@@ -253,9 +317,18 @@ def generate_fakes(
             for text in (fallback * (count // max(len(fallback), 1) + 1))
         ][:count]
 
+    # Thứ tự CHỌN vẫn là round-robin (phân bổ đều cho mọi speaker), chỉ đổi thứ tự
+    # CHẠY sang gom theo speaker — `sort` ổn định nên trong mỗi speaker giữ nguyên.
+    # Chạy xen kẽ thì không bao giờ có thời điểm nào "xong một giọng" để chốt tiến độ.
+    targets.sort(key=lambda t: t.speaker)
+
+    if dry_run:
+        return _report_progress(manifest, targets, voice_list, engine_id, gen)
+
     log.info(
-        "Engine %s (%s) · %d mẫu · %d giọng · device=%s",
-        engine_id, gen.kind, len(targets), len(voice_list), device,
+        "Engine %s (%s) · %d mẫu · %d giọng · %d speaker · device=%s",
+        engine_id, gen.kind, len(targets), len(voice_list),
+        len({t.speaker for t in targets}), device,
     )
     gen.ensure_loaded()
 
@@ -268,7 +341,7 @@ def generate_fakes(
     try:
         _run_batch(
             gen, manifest, targets, voice_list, spec, engine_id, overwrite,
-            stats, ref_dir, ref_cache, ref_seconds,
+            stats, ref_dir, ref_cache, ref_seconds, on_speaker_done,
         )
     finally:
         if ref_dir is not None:
@@ -330,9 +403,26 @@ def _run_batch(
     ref_dir: Path | None,
     ref_cache: dict[str, tuple[str, str]],
     ref_seconds: list[float],
+    on_speaker_done: "Callable[[str, dict], None] | None" = None,
 ) -> None:
     """Vòng lặp sinh — tách khỏi `generate_fakes` để thư mục reference tạm luôn được dọn."""
+    since_save = 0
+    speaker: str | None = None
+
+    def close_speaker() -> None:
+        """Chốt một giọng: lưu manifest TRƯỚC rồi mới báo, để hook thấy trạng thái thật."""
+        if speaker is None:
+            return
+        manifest.save()
+        log.info("Xong speaker %s · tổng đã tạo %d", speaker, stats["kept"])
+        if on_speaker_done is not None:
+            on_speaker_done(speaker, dict(stats))
+
     for i, target in enumerate(progress(targets, total=len(targets), label=f"generate:{engine_id}")):
+        if target.speaker != speaker:
+            close_speaker()
+            speaker = target.speaker
+            since_save = 0
         voice = voice_list[i % len(voice_list)]
         # Câu dự phòng không có utt gốc ⇒ lấy chính nội dung câu làm khoá, nếu không
         # mọi bản sinh ra sẽ trùng utt_id và đè lên nhau. Biến thể engine (vd checkpoint
@@ -389,3 +479,10 @@ def _run_batch(
             )
             manifest.write_audio(rec, chunk, spec)
             stats["kept"] += 1
+
+        since_save += 1
+        if since_save >= SAVE_EVERY:
+            manifest.save()
+            since_save = 0
+
+    close_speaker()

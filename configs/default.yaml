@@ -35,7 +35,10 @@ audio:
 # -----------------------------------------------------------------------------
 generate:
   device: auto             # cpu | mps | cuda | auto
-  engines: [piper, kokoro] # thêm `omnivoice` khi máy có GPU/MPS
+  # CHỈ engine cloning. Piper/Kokoro là giọng CỐ ĐỊNH — mô hình bắt chúng ở EER 0.00%
+  # nên chúng gần như không dạy được gì, chỉ làm loãng dataset và lệch cân bằng lớp.
+  # Bật lại: engines: [omnivoice, piper, kokoro]
+  engines: [omnivoice]
   fake_to_real_ratio: 1.0  # tổng fake ≈ tổng real, chia đều cho các engine
   min_words: 6             # lọc câu để audio ra rơi vào khoảng 3–10 giây
   max_words: 40
