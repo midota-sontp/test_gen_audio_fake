@@ -265,15 +265,14 @@ def test_stages_run_through_the_fail_fast_helper(notebook_code):
         )
 
 
-def test_engine_is_optional_only_when_something_else_makes_fakes(notebook_code):
+def test_engine_is_optional_only_when_something_else_makes_fakes(notebook):
     """`optional` phải phụ thuộc việc còn engine khác gánh lớp fake hay không.
 
     OmniVoice cần GPU và tải checkpoint vài GB, nên khi Piper/Kokoro còn bật thì bỏ qua
     lỗi của nó là đúng. Nhưng tắt TTS rồi thì nó là nguồn fake DUY NHẤT: bỏ qua lúc đó
     là đưa cả phần huấn luyện vào một corpus không có lớp fake nào.
     """
-    start = notebook_code.index('_hook = ["--after-speaker"')
-    call = notebook_code[start:notebook_code.index("\n\n", start)]
+    call = _cell_src(notebook, "optional=bool(TTS_ENGINES)")
     assert "optional=bool(TTS_ENGINES)" in call, call
 
 
@@ -281,12 +280,16 @@ def test_generate_syncs_at_speaker_boundaries(notebook_code):
     """Mốc đẩy dữ liệu là ranh giới speaker, và chỉ gắn khi đồng bộ đã sẵn sàng."""
     assert '"--after-speaker"' in notebook_code
     assert "if SYNC_READY else []" in notebook_code
+    assert "*SYNC_HOOK" in notebook_code, "cờ dựng ra mà không lệnh nào dùng"
 
 
-def test_progress_is_checked_before_the_long_generation(notebook_code):
+def test_progress_is_checked_before_the_long_generation(notebook):
     """Bước sinh dài nhiều giờ — phải biết còn thiếu bao nhiêu TRƯỚC khi bắt đầu."""
-    assert '"--dry-run"' in notebook_code
-    assert notebook_code.index('"--dry-run"') < notebook_code.index('"--after-speaker"')
+    def cell(needle):
+        return _cells_with(notebook, needle)[0]
+
+    # So với ô sinh cloning — ô đó mới là ô dài nhiều giờ.
+    assert cell('"--dry-run"') < cell("optional=bool(TTS_ENGINES)")
 
 
 def test_dataset_phase_comes_before_training_phase(notebook_text):
@@ -400,6 +403,18 @@ def test_dataset_phase_has_a_smoke_switch_and_inspection(notebook_text):
     assert "ref_utt_id" in notebook_text
 
 
+def _sync_script(notebook) -> str:
+    """Dựng lại sync_corpus.py từ f-string lồng trong ô A2b."""
+    import textwrap
+
+    source = _cell_src(notebook, "SYNC_SCRIPT")
+    start = source.index("textwrap.dedent(")
+    end = source.index("'''))", start) + len("'''")
+    return eval(source[start:end] + ")",  # noqa: S307 — chuỗi do chính repo sinh ra
+                {"textwrap": textwrap, "DATASET_ID": "owner/slug",
+                 "SYNC_EVERY_MINUTES": 20, "KEEP_OLD_VERSIONS": True})
+
+
 def test_generated_sync_script_is_valid_python(notebook):
     """Script đồng bộ được sinh ra bằng f-string lồng trong ô notebook.
 
@@ -407,16 +422,8 @@ def test_generated_sync_script_is_valid_python(notebook):
     chỉ biết sau khi đã mất công. Sai một lớp `{{}}` là đủ vỡ, nên dựng ra và kiểm ở đây.
     """
     import ast
-    import textwrap
 
-    source = next("".join(c["source"]) for c in notebook["cells"]
-                  if "SYNC_SCRIPT" in "".join(c["source"]))
-    start = source.index("textwrap.dedent(")
-    end = source.index("'''))", start) + len("'''")
-    script = eval(source[start:end] + ")",  # noqa: S307 — chuỗi do chính repo sinh ra
-                  {"textwrap": textwrap, "DATASET_ID": "owner/slug",
-                   "SYNC_EVERY_MINUTES": 20})
-
+    script = _sync_script(notebook)
     ast.parse(script)
     assert "kaggle" in script and "--force" in script
     # Đẩy toàn bộ: real + fake + manifest, không lọc nhãn.
@@ -427,14 +434,11 @@ def test_generated_sync_script_is_valid_python(notebook):
 def test_sync_script_is_written_before_the_generate_cell_uses_it(notebook):
     """Hook gọi sync_corpus.py, nên ô ghi file đó phải chạy trước.
 
-    So theo chỉ số Ô, không theo vị trí chuỗi: ô A2b có nhắc tên cờ trong comment nên
-    so bằng `.index()` trên toàn văn sẽ ra kết quả ngược mà vẫn trông có lý.
+    So theo chỉ số Ô, không theo vị trí chuỗi: cùng một ô vừa ghi file vừa dựng cờ.
     """
-    def first_cell(needle):
-        return next(i for i, c in enumerate(notebook["cells"])
-                    if c["cell_type"] == "code" and needle in "".join(c["source"]))
-
-    assert first_cell("SYNC_SCRIPT.write_text") < first_cell('"--after-speaker"')
+    assert _cells_with(notebook, "SYNC_SCRIPT.write_text")[0] \
+        <= _cells_with(notebook, '"--after-speaker"')[0] \
+        < _cells_with(notebook, "*SYNC_HOOK")[0]
 
 
 def test_dataset_is_checked_before_ingest(notebook):
@@ -542,7 +546,7 @@ def test_real_dataset_detection_is_skipped_when_only_training(notebook):
 # Khớp chuỗi chỉ chứng minh cái cổng CÓ MẶT. Ở đây chạy thật những ô stage với `run()`
 # giả để xem MODE cho stage nào đi qua — đó mới là điều notebook hứa.
 _STAGE_CELLS = ('run("ingest"', "*TTS_ENGINES", "xác nhận omnivoice đã ✔", '"--dry-run"',
-                '"--after-speaker"', "k2-fsa/OmniVoice", 'run("split")',
+                "optional=bool(TTS_ENGINES)", "k2-fsa/OmniVoice", 'run("split")',
                 'run("features")', 'run("detect"')
 
 
@@ -552,6 +556,7 @@ def _stages_that_run(notebook, notebook_code, mode) -> set[str]:
         "MODE": mode, "sys": sys, "SMOKE": False, "SYNC_READY": False,
         "TTS_ENGINES": ["piper"], "RAW": "/tmp/khong-dung", "N_REAL": 1,
         "PER_SPEAKER": 1, "N_FAKE_TTS": 1, "N_FAKE_CLONE": 1,
+        "CORPUS": Path("/tmp/corpus-khong-ton-tai"), "SYNC_HOOK": [],
         "run": lambda *args, **kw: called.append(str(args[0])),
         "pip": lambda *args, **kw: None,
         "skipped": lambda what: None,
@@ -578,3 +583,198 @@ def test_mode_gates_the_stages_that_actually_run(notebook, notebook_code, mode,
 def test_both_still_runs_the_whole_pipeline(notebook, notebook_code):
     assert {"ingest", "generate", "split", "augment", "features", "train", "evaluate",
             "detect"} <= _stages_that_run(notebook, notebook_code, "both")
+
+
+# ---------------------------------------- đồng bộ Kaggle Dataset: một nguồn, ba mốc
+def test_dataset_id_is_declared_once_and_shared(notebook, notebook_code):
+    """Đẩy lên một dataset rồi phiên sau nạp từ dataset khác là mất trắng mà không báo."""
+    # Slug thật chỉ được xuất hiện MỘT lần; mọi chỗ khác đọc lại biến.
+    assert notebook_code.count("sonpham12/vivos-fake-v2") == 1
+    setup = _cells_with(notebook, "DATASET_ID = ")[0]
+    users = _cells_with(notebook, "DATASET_ID")
+    assert users[0] == setup and len(users) >= 3, users   # setup + A1b (nạp) + A2b (đẩy)
+    # Script con nhận qua nội suy chứ không gõ lại slug.
+    assert "DATASET_ID = {DATASET_ID!r}" in notebook_code
+
+
+def test_restore_prefers_the_dataset_it_pushes_to(notebook):
+    """Mount nhiều dataset thì "lấy cái cuối theo abc" là xổ số, không phải nối tiếp."""
+    src = _cell_src(notebook, 'run("unpack"')
+    assert 'DATASET_ID.split("/")[-1]' in src
+    assert src.index('f"/kaggle/input/{slug}/**/{name}"') < src.index('f"/kaggle/input/**/{name}"')
+
+
+def test_ingest_is_checkpointed_only_when_it_added_something(notebook):
+    """Mốc sau ingest bịt lỗ "out lúc sinh giọng đầu"; nhưng không có gì mới thì đừng đẩy."""
+    ingest = _cell_src(notebook, 'run("ingest"')
+    assert "INGEST_ADDED = " in ingest, "phải biết ingest có thêm gì hay không"
+
+    sync = _cell_src(notebook, "SYNC_SCRIPT.write_text")
+    assert "if SYNC_READY and INGEST_ADDED:" in sync
+    assert sync.index("def sync_now(") < sync.index("if SYNC_READY and INGEST_ADDED:")
+
+
+@pytest.mark.parametrize("cell", ["*TTS_ENGINES", "optional=bool(TTS_ENGINES)"])
+def test_every_long_generate_checkpoints_at_speaker_boundaries(notebook, cell):
+    """Lệnh sinh nào cũng phải chốt được tiến độ — không chỉ lệnh cloning."""
+    assert "*SYNC_HOOK" in _cell_src(notebook, cell)
+
+
+def test_sync_script_holds_its_cadence_even_when_a_push_fails(notebook):
+    """Kaggle từ chối vì version trước còn xử lý là chuyện thường.
+
+    Nếu chỉ chốt nhịp khi thành công thì mỗi ranh giới speaker lại gói và tải lại cả GB
+    — hỏng liên tục thì đó là hammer, không phải retry.
+    """
+    script = _sync_script(notebook)
+    assert script.index("STAMP.touch()") < script.index('"kaggle"')
+    assert "STAMP.write_text" not in script, "chốt nhịp phải xảy ra trước khi thử đẩy"
+
+
+def test_the_last_push_of_a_session_ignores_the_rate_limit(notebook):
+    """Nhịp chặn giữ cho phiên khỏi đứng chờ upload; bản chốt cuối thì phải đi."""
+    sync = _cell_src(notebook, "SYNC_SCRIPT.write_text")
+    assert '"--force"' in sync
+    script = _sync_script(notebook)
+    assert 'FORCE = "--force" in sys.argv' in script
+    assert "if not FORCE and MIN_GAP" in script
+
+
+def test_training_never_pushes_derived_audio_back(notebook):
+    """`augment` ghi bản nhiễu/nén vào corpus. Đẩy lên là bơm dữ liệu phái sinh vào
+    dataset, buộc mọi phiên sau tải thêm phần mà một lệnh augment sinh lại trong vài phút."""
+    assert "SYNC_READY = MAKE_DATASET and kaggle_ready()" in _cell_src(notebook, "SYNC_READY = ")
+    for i in _cells_with(notebook, 'run("augment"'):
+        assert "sync" not in "".join(notebook["cells"][i]["source"]).lower()
+
+
+# ------------------------------------- đẩy sau MỖI speaker: chạy nền, không chồng lượt
+def test_the_default_cadence_is_every_speaker(notebook):
+    """Mốc dày nhất mà corpus có: xong một giọng. Đẩy chặn dòng thì mới phải thưa ra."""
+    assert "SYNC_EVERY_MINUTES = 0" in _cell_src(notebook, "SYNC_EVERY_MINUTES")
+
+
+def test_the_push_runs_in_the_background(notebook):
+    """Gói + upload là việc của CPU và mạng — để nó chen giữa hai speaker là trả bằng GPU.
+
+    Cả ba thành phần đều bắt buộc: `nohup` để lượt đẩy sống qua lúc tiến trình generate
+    kết thúc, `>>` + `2>&1` để cắt ống stdout (hook gọi bằng capture_output nên còn ống
+    là còn đứng chờ, dù đã có `&`), và `&` để trả về ngay.
+    """
+    hook = next(l for l in _cell_src(notebook, "SYNC_HOOK = ").splitlines()
+                if l.lstrip().startswith('f"nohup'))
+    for part in ("nohup", ">>", "2>&1", "&"):
+        assert part in hook, f"thiếu {part!r} trong: {hook}"
+
+
+def test_two_pushes_never_overlap(notebook):
+    """Hai lượt cùng lúc là cùng gói vào MỘT file zip mà lượt trước đang tải lên."""
+    script = _sync_script(notebook)
+    assert "LOCK.write_text(str(os.getpid()))" in script
+    assert "while running():" in script
+    assert script.index("while running():") < script.index("LOCK.write_text")
+    # Khoá phải được nhả cả khi đẩy thất bại, bằng không cả phiên không đẩy được nữa.
+    assert "finally:" in script and "LOCK.unlink(missing_ok=True)" in script
+
+
+def test_a_forced_push_waits_for_the_background_one(notebook):
+    """Lượt chốt cuối phải đợi lượt nền, không được bỏ qua — nó là bản chốt của cả phiên."""
+    script = _sync_script(notebook)
+    wait_block = script[script.index("while running():"):script.index("if not FORCE and MIN_GAP")]
+    assert "if not FORCE:" in wait_block and "raise SystemExit(0)" in wait_block
+    assert "time.sleep(" in wait_block
+
+
+def test_the_background_log_is_readable_from_the_notebook(notebook):
+    """Lượt đẩy nền không in vào ô nào; không có log thì nó là hộp đen."""
+    setup = _cell_src(notebook, "SYNC_HOOK = ")
+    assert "def sync_log(" in setup and "SYNC_LOG" in setup
+    assert "sync_log()" in _cell_src(notebook, "sync_now()")
+
+
+def test_old_versions_are_kept_unless_asked_otherwise(notebook):
+    """Xoá version cũ là không lấy lại được, nên nó phải là lựa chọn, không phải mặc định.
+
+    Mỗi lượt đẩy là ảnh chụp toàn bộ corpus nên bản mới nhất luôn là superset — bật cờ
+    chỉ mất đường lùi, không mất dữ liệu. Nhưng đó vẫn là quyết định của người dùng.
+    """
+    assert "KEEP_OLD_VERSIONS = True" in _cell_src(notebook, "KEEP_OLD_VERSIONS")
+
+    script = _sync_script(notebook)
+    assert "if not KEEP_OLD:" in script
+    assert '"--delete-old-versions"' in script
+    # Cờ chỉ được dán vào `version`, không dán vào `create` (lần đầu chưa có gì để xoá).
+    create = script[script.index('"datasets", "create"'):]
+    assert "delete-old-versions" not in create
+
+
+# ------------------------------------- chạy full: None = không áp trần, config tự cân
+def test_full_run_passes_no_quota_flags(notebook):
+    """`None` phải thành "không truyền cờ", không thành `--limit None`.
+
+    Bỏ `--count` là để `fake_to_real_ratio: 1.0` trong config tự tính đúng một fake cho
+    mỗi real — đó là định nghĩa "full" mà không phải gõ con số nào, và không lệch lớp.
+    """
+    a1 = _cell_src(notebook, "N_FAKE_CLONE")
+    assert "= None, None, None, None" in a1, "lượt chạy thật phải mặc định không áp trần"
+
+    ingest = _cell_src(notebook, 'run("ingest"')
+    assert '["--limit", N_REAL] if N_REAL else []' in ingest
+    assert '["--per-speaker", PER_SPEAKER] if PER_SPEAKER else []' in ingest
+
+    gen = _cell_src(notebook, "optional=bool(TTS_ENGINES)")
+    assert "*_soluong" in gen and '"--count"' not in gen
+    assert '["--count", N_FAKE_CLONE] if N_FAKE_CLONE else []' in _cell_src(notebook, "_soluong =")
+
+
+def test_the_notebook_reads_how_far_generation_got_before_starting(notebook):
+    """Trước khi vào phiên nối tiếp, câu duy nhất đáng hỏi: còn bao nhiêu phải sinh."""
+    a1b = _cell_src(notebook, 'run("unpack"')
+    assert "is_usable" in a1b, "đích phải là real ĐỦ ĐIỀU KIỆN, không phải mọi real"
+    assert "ref_utt_id for f in _m.fakes" in a1b
+    assert "Tiến độ gen" in a1b
+    # Đọc từ manifest, không nạp engine — phải chạy được trước cả khi cài omnivoice.
+    assert "build_generator" not in a1b and "available_generators" not in a1b
+
+
+def test_completion_is_confirmed_after_the_long_generation(notebook):
+    """Hết phiên giữa đường là chuyện thường — phải biết còn nợ bao nhiêu."""
+    dry = _cells_with(notebook, '"--dry-run"')
+    gen = _cells_with(notebook, "optional=bool(TTS_ENGINES)")[0]
+    assert len(dry) >= 2, "phải đếm cả trước và sau lượt sinh"
+    assert dry[0] < gen < dry[1]
+
+
+def test_sync_probes_the_tool_it_will_actually_use(notebook):
+    """Cổng đồng bộ phải thử `kaggle` CLI, không suy diễn từ biến môi trường.
+
+    Log phiên thật: `kaggle datasets files` chạy được ở A1b trong khi
+    `UserSecretsClient` ném BackendError — cổng cũ kiểm Secrets nên tắt đồng bộ suốt 4
+    giờ sinh, dù công cụ đẩy vốn xác thực được. Kiểm sai chỗ thì càng "an toàn" càng mất.
+    """
+    src = _cell_src(notebook, "def kaggle_ready(")
+    assert "def kaggle_cli_ok(" in src
+    assert '"datasets", "list", "-m"' in src, "phép thử phải cần xác thực mới qua được"
+    # Trong thân kaggle_ready: thử CLI TRƯỚC, chỉ nạp secret khi nó không qua.
+    body = src[src.index("def kaggle_ready("):]
+    assert body.index("if kaggle_cli_ok():") < body.index("nap_credential()")
+
+
+def test_both_kaggle_credential_styles_are_accepted(notebook):
+    """Kaggle có token `KGAT_` (mới) và cặp username+key (legacy) — không thay nhau được.
+
+    Đặt sai kiểu thì đồng bộ tắt im lặng, và đó là cách mất cả một phiên sinh.
+    """
+    src = _cell_src(notebook, "def kaggle_ready(")
+    for ten in ("KAGGLE_API_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY"):
+        assert ten in src, f"không đọc secret {ten}"
+    # Thiếu một kiểu không được làm hỏng kiểu kia.
+    assert "except Exception:" in src and "pass" in src
+    # Client cài sẵn có thể chưa biết biến KAGGLE_API_TOKEN — ghi ra file cho chắc.
+    assert '".kaggle" / "access_token"' in src
+    assert "chmod(0o600)" in src
+
+
+def test_the_kaggle_client_is_upgraded_before_use(notebook):
+    """Image Kaggle đang có kaggle 2.0.2 — bản đó có thể chưa biết token `KGAT_`."""
+    assert 'pip("-U", "kaggle"' in _cell_src(notebook, 'pip("-r", "requirements.txt")')

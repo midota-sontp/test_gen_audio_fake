@@ -91,7 +91,9 @@ def cmd_ingest(args) -> int:
         )
     manifest.save()
     print(manifest.summary())
-    return 0 if result.get("kept") else 1
+    # Nguồn đã đủ theo `--limit` thì không nạp gì là ĐÚNG, không phải lỗi: phiên sau
+    # chạy lại cùng lệnh phải đi tiếp được, chứ không dừng cả notebook ở đây.
+    return 0 if (result.get("kept") or result.get("already")) else 1
 
 
 def _speaker_hook(command: str | None, manifest):
@@ -199,6 +201,16 @@ def cmd_generate(args) -> int:
     if failures:
         log.error("Mọi engine được thử đều lỗi — không sinh được audio giả nào.")
         return 1
+    if results:
+        # Engine ĐÃ chạy mà không sinh gì là chuyện bình thường: `--dry-run` chỉ đếm, và
+        # phiên nối tiếp thì phần cần sinh có thể đã đủ. Báo "chưa cài engine" ở đây là
+        # chẩn đoán sai, đẩy người dùng đi tìm một lỗi không tồn tại.
+        existing = sum(r.get("skip_exists", 0) for r in results)
+        if args.dry_run:
+            log.info("Chỉ đếm (--dry-run) — chưa sinh gì.")
+        else:
+            log.info("Không có mẫu nào cần sinh thêm · %d mẫu đã có sẵn.", existing)
+        return 0
     # Chưa cài engine nào thì đây là bỏ qua, không phải hỏng: các engine tuỳ chọn
     # (vd OmniVoice cần GPU) vắng mặt không được làm dừng cả pipeline.
     log.warning(

@@ -115,3 +115,167 @@ def test_vivos_split_hint_is_carried_through(vivos_like):
     hints = {r.split for r in manifest}
     assert hints == {"train", "test"}
     assert all(r.speaker.startswith("vivosdev") for r in manifest.by_split("test"))
+
+
+# ------------------------------------------------- `--limit` phải cắt đều mọi speaker
+#
+# Adapter duyệt theo thư mục nên nó trả hết giọng này mới sang giọng khác. Cắt theo thứ
+# tự đó là những speaker cuối bảng không có lấy một utterance — mà chia tập là
+# speaker-disjoint và fake chỉ sinh được cho speaker đã có real, nên mất speaker ở đây
+# là mất luôn ở mọi bước sau.
+def test_limit_covers_every_speaker_instead_of_the_first_few(tmp_path, vivos_like):
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    manifest = Manifest(tmp_path / "corpus")
+    # 8 speaker × 4 utt = 32; xin 8 ⇒ mỗi giọng đúng một utterance.
+    result = ingest_source(manifest, VivosAdapter(), vivos_like, "vivos",
+                           AudioSpec(), limit=8)
+
+    speakers = {r.speaker for r in manifest.reals}
+    assert len(speakers) == 8, f"chỉ phủ {len(speakers)}/8 speaker: {sorted(speakers)}"
+    assert result["kept"] == 8
+
+
+def test_limit_is_a_corpus_total_not_a_per_run_quota(tmp_path, vivos_like):
+    """Corpus sống qua nhiều phiên Kaggle — chạy lại cùng lệnh phải ra cùng corpus.
+
+    Nếu `limit` là "thêm bao nhiêu lần này" thì mỗi phiên lại cộng thêm 4000 real, tỉ lệ
+    real/fake trượt dần và không ai thấy cho tới lúc đọc bảng cân bằng ở A4.
+    """
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    manifest = Manifest(tmp_path / "corpus")
+    first = ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", AudioSpec(), limit=8)
+    n_after_first = len(manifest.reals)
+
+    second = ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", AudioSpec(), limit=8)
+
+    assert n_after_first == first["kept"] == 8
+    assert len(manifest.reals) == 8, "lượt hai nạp thêm ⇒ limit đang là quota mỗi lượt"
+    assert second["kept"] == 0 and second["already"] == 8
+
+
+def test_a_source_already_complete_is_not_a_failure(tmp_path, vivos_like, capsys):
+    """`run("ingest")` ở notebook dừng cả phiên khi lệnh trả mã khác 0."""
+    from aidetector.cli import main
+
+    corpus = tmp_path / "corpus"
+    args = ["ingest", str(vivos_like), "--limit", "8",
+            "--set", f"paths.corpus={corpus}"]
+    assert main(args) == 0
+    assert main(args) == 0, "nguồn đã đủ ⇒ không nạp gì, nhưng đó không phải lỗi"
+
+
+def test_in_memory_sources_keep_streaming(tmp_path):
+    """Gom cả nguồn vào RAM để rải theo speaker chỉ được khi item mang đường dẫn."""
+    import numpy as np
+
+    from aidetector.ingest import _spread_by_speaker
+    from aidetector.ingest.base import SourceItem
+
+    items = [SourceItem(key=f"k{i}", audio=np.zeros(16_000, dtype=np.float32),
+                        sample_rate=16_000, speaker=f"spk{i % 3}") for i in range(6)]
+    assert [i.key for i in _spread_by_speaker(iter(items))] == [i.key for i in items]
+
+
+def test_a_source_that_drops_most_of_itself_says_so_loudly(tmp_path, caplog):
+    """VIVOS thật bị loại 3437/7437 utterance vì ngắn hơn min_seconds=3s.
+
+    Đó là trần cứng cho `N_REAL` — nguồn 11.660 câu chỉ cấp được ~6.300. Ở dạng INFO nó
+    nằm lẫn giữa hàng chục dòng log và người ta chỉ phát hiện khi thấy corpus hụt.
+    """
+    import logging
+
+    import soundfile as sf
+
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.folder import FolderAdapter
+
+    root = tmp_path / "ngan"
+    root.mkdir()
+    # 2 file đạt chuẩn · 5 file 2,5s (dưới 3s nhưng lấy lại được nếu hạ ngưỡng)
+    # · 3 file 1s (hạ ngưỡng cũng không lấy lại được).
+    for i, seconds in enumerate([4.0, 4.0] + [2.5] * 5 + [1.0] * 3):
+        sf.write(str(root / f"spk{i % 3}_{i}.wav"),
+                 speech_like(seconds, seed=i), SR, subtype="PCM_16")
+
+    manifest = Manifest(tmp_path / "corpus")
+    with caplog.at_level(logging.WARNING):
+        result = ingest_source(manifest, FolderAdapter(), root, "ngan", AudioSpec())
+
+    assert result["kept"] == 2 and result["drop_invalid"] == 8
+    # Lý do, không chỉ số lượng — và con số dùng để quyết định hạ ngưỡng hay không.
+    assert result["drops"]["too_short"] == 8
+    assert result["drops"]["too_short_but_over_ref"] == 5
+    assert "too_short=8" in caplog.text
+    assert "min_seconds" in caplog.text and "lấy lại được 5" in caplog.text
+
+
+def test_the_per_speaker_cap_says_when_it_is_the_binding_limit(tmp_path, vivos_like, caplog):
+    """"Vì sao chỉ có N?" phải trả lời được từ log.
+
+    Log phiên thật: giữ 5395 · bỏ 3700 — cộng lại 9095 trong khi adapter trả ra 12420.
+    Phần chênh 3325 là utterance chưa hề được xét vì speaker đã đủ `--per-speaker`, mà
+    dòng tổng kết lại không in bộ đếm đó, nên con số 5395 trông như từ trên trời.
+    """
+    import logging
+
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    manifest = Manifest(tmp_path / "corpus")
+    with caplog.at_level(logging.WARNING):
+        result = ingest_source(manifest, VivosAdapter(), vivos_like, "vivos",
+                               AudioSpec(), per_speaker=2)   # 8 giọng × 4 câu
+
+    assert result["kept"] == 16 and result["skip_speaker_full"] == 16
+    assert "chạm trần speaker" in caplog.text or "đủ trần --per-speaker" in caplog.text
+    assert "--per-speaker=2" in caplog.text
+    assert "chứ không phải nguồn đã cạn" in caplog.text
+
+
+def test_the_summary_line_accounts_for_every_item_the_adapter_yielded(tmp_path, vivos_like):
+    """kept + drop + skip_speaker_full + skip_exists phải cộng lại đúng số item."""
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    manifest = Manifest(tmp_path / "corpus")
+    r = ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", AudioSpec(),
+                      per_speaker=3)
+    tong = r["kept"] + r["drop_invalid"] + r["skip_speaker_full"] + r["skip_exists"]
+    assert tong == 32, f"thiếu {32 - tong} item không bộ đếm nào nhận"
+
+
+def test_no_phantom_ceiling_when_the_whole_source_was_examined(tmp_path, vivos_like, caplog):
+    """Xét hết nguồn rồi thì `kept` CHÍNH LÀ trần.
+
+    Log phiên thật: giữ 8246 rồi báo "cả nguồn chỉ cấp được khoảng 8,245" — con số ngoại
+    suy xấp xỉ chính nó, đọc lên như thể còn thiếu một utterance ở đâu đó.
+    """
+    import logging
+
+    import soundfile as sf
+
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.folder import FolderAdapter
+
+    root = tmp_path / "ngan"
+    root.mkdir()
+    for i, seconds in enumerate([4.0, 4.0] + [1.0] * 6):
+        sf.write(str(root / f"spk{i % 2}_{i}.wav"), speech_like(seconds, seed=i),
+                 SR, subtype="PCM_16")
+
+    manifest = Manifest(tmp_path / "corpus")
+    with caplog.at_level(logging.WARNING):
+        ingest_source(manifest, FolderAdapter(), root, "ngan", AudioSpec())
+
+    assert "Đã xét hết nguồn" in caplog.text
+    assert "chỉ cấp được" not in caplog.text

@@ -238,6 +238,11 @@ code("""
 # Phiên này làm gì: "dataset" (chỉ phần A) · "train" (chỉ phần B) · "both" (cả hai).
 MODE = "both"
 
+# Kho dữ liệu dùng chung cho MỌI chế độ: phần A đẩy corpus lên đây, mọi phiên sau nạp
+# lại từ đây. Khai báo một chỗ duy nhất — A1b (nạp) và A2b (đẩy) đều đọc biến này, để
+# không bao giờ có chuyện đẩy lên một dataset mà nạp về từ một dataset khác.
+DATASET_ID = "sonpham12/vivos-fake-v2"
+
 # Piper/Kokoro đang TẮT: giọng cố định, mô hình bắt ở EER 0.00% nên không dạy được gì,
 # chỉ làm loãng dataset. Bật lại bằng: TTS_ENGINES = ["piper", "kokoro"]
 TTS_ENGINES = []
@@ -264,6 +269,9 @@ def pip(*args, ok_to_fail=False):
         print(f"⚠ bỏ qua: pip install {' '.join(args)}")
 
 pip("-r", "requirements.txt")
+# Image Kaggle đang có kaggle 2.0.2 (log phiên trước tự cảnh báo). Bản đó có thể chưa
+# biết token kiểu mới `KGAT_`, mà đó lại là đường xác thực để đẩy dataset.
+pip("-U", "kaggle", ok_to_fail=True)
 if not MAKE_DATASET:
     # Không sinh audio thì không cần engine nào. WavLM chạy được trên cả hai nhánh
     # transformers nên cứ để bản Kaggle cài sẵn — đây là chế độ cài nhẹ nhất.
@@ -314,13 +322,24 @@ from aidetector.ingest.base import describe_directory
 
 SMOKE = True        # ← True: chạy thử nhanh · False: chạy thật
 RAW = None          # ← đặt tay nếu tự dò không đúng, vd "/kaggle/input/vivos"
-
 # MODE và TTS_ENGINES đặt ở ô cài thư viện phía trên (chúng quyết định cài gói nào).
+#
+# `None` = KHÔNG áp trần nào. Ingest lấy mọi utterance đạt chuẩn của nguồn, và
+# `generate` để `fake_to_real_ratio: 1.0` trong config tự tính ⇒ đúng một fake cho mỗi
+# real. Không phải đoán con số nào, và không bao giờ lệch lớp.
+#
+# VIVOS đo thật: 12.420 file → 7.367 utterance đạt chuẩn (59,3%; phần bỏ là clip ngắn
+# hơn min_seconds=3s), 65 speaker, ⇒ ~7,6 giờ sinh trên T4.
+#
+# PER_SPEAKER = None là quyết định có ý thức, không phải bỏ sót: trần 120 cho 5.395
+# utterance và giữ mọi giọng ở mức xấp xỉ nhau, bỏ trần cho thêm 1.972 utterance nhưng
+# chúng dồn vào những giọng nói nhiều (có giọng 250+, giọng khác ~20). Split là
+# speaker-disjoint và test đo khả năng tổng quát sang GIỌNG MỚI, nên train lệch về vài
+# giọng làm phép đo đó xấu đi. Đặt lại 120–200 nếu thấy EER trên test kém hơn val.
 if SMOKE:
     N_REAL, PER_SPEAKER, N_FAKE_TTS, N_FAKE_CLONE = 60, 8, 30, 15
 else:
-    # Tắt TTS thì cloning gánh toàn bộ lớp fake, nếu không hai lớp lệch nặng.
-    N_REAL, PER_SPEAKER, N_FAKE_TTS, N_FAKE_CLONE = 4000, 120, 1200, 4000
+    N_REAL, PER_SPEAKER, N_FAKE_TTS, N_FAKE_CLONE = None, None, None, None
 
 # Dò dataset REAL chỉ khi phiên này thật sự sinh dữ liệu: MODE="train" mount corpus đã
 # sinh sẵn chứ không mount VIVOS, nên đòi cho được một bộ giọng thật ở đây là dừng oan.
@@ -357,23 +376,25 @@ else:
         usable.sort(key=lambda pair: -pair[0])
         RAW = str(usable[0][1])
 
+    _muc = lambda n: "toàn bộ nguồn" if n is None else f"{n:,}"
     print(f"\\nNguồn REAL : {RAW}")
     print(f"Chế độ     : {'CHẠY THỬ' if SMOKE else 'CHẠY THẬT'}")
-    print(f"Quy mô     : {N_REAL} real · {N_FAKE_CLONE} fake cloning"
-          f" · {N_FAKE_TTS} fake TTS (chỉ khi bật TTS_ENGINES)")
-    print(f"Ước thời gian sinh cloning: ~{N_FAKE_CLONE * 4 / 3600:.1f} giờ trên GPU T4")
+    print(f"Quy mô     : {_muc(N_REAL)} real · {_muc(N_FAKE_CLONE)} fake cloning"
+          f" · {_muc(N_FAKE_TTS)} fake TTS (chỉ khi bật TTS_ENGINES)")
+    print("Ước thời gian sinh: in ở ô A2 sau khi biết corpus có bao nhiêu real.")
 """),
 
 md("""
-### A1b. Kiểm tra dataset trước khi bắt đầu
+### A1b. Nạp corpus của phiên trước
 
-Đọc [sonpham12/vivos-fake-v2](https://www.kaggle.com/datasets/sonpham12/vivos-fake-v2)
-xem phiên trước đã làm tới đâu, rồi bung corpus ra để chạy tiếp. `ingest` và `generate`
-đều idempotent theo `utt_id` nên chúng chỉ làm phần còn thiếu.
+Bung `DATASET_ID` (khai báo ở ô setup) ra `/kaggle/working` để chạy tiếp. `ingest` và
+`generate` đều idempotent theo `utt_id` nên chúng chỉ làm phần còn thiếu — không có bước
+nào làm lại từ đầu.
 
-Muốn nối lại thì phải **Add Input → Datasets → `sonpham12/vivos-fake-v2`**. Chưa add
-thì ô này vẫn hỏi Kaggle xem dataset có gì (nếu đã cài token) rồi nhắc — chứ không im
-lặng bắt đầu lại từ đầu và làm mất công phiên trước.
+Muốn nối lại thì phải **Add Input → Datasets → dataset đó**. Chưa add thì ô này vẫn hỏi
+Kaggle xem dataset đang có gì (nếu đã cài token) rồi nhắc — chứ không im lặng bắt đầu lại
+từ đầu và làm mất công phiên trước. Mount nhiều dataset thì ô này lấy **đúng** cái khớp
+`DATASET_ID`, không phải cái đầu bảng chữ cái.
 
 Ô này chạy ở **mọi** `MODE` — nó là đường duy nhất mang corpus vào phiên. Riêng
 `MODE = "train"` thì corpus là điều kiện bắt buộc: không bung được gì, hoặc bung ra một
@@ -385,8 +406,17 @@ import subprocess
 from pathlib import Path
 
 CORPUS = Path("/kaggle/working/corpus")
-_mounted = sorted(glob.glob("/kaggle/input/**/corpus.zip", recursive=True))
-_loose = sorted(glob.glob("/kaggle/input/**/manifest.csv", recursive=True))
+
+# Kaggle mount dataset ở /kaggle/input/<slug>. Tìm ĐÚNG dataset đã cấu hình trước rồi
+# mới chấp nhận corpus.zip bất kỳ: mount nhiều dataset mà "lấy cái cuối theo abc" thì
+# phiên này nối tiếp công của dataset nào là chuyện xổ số.
+def _find(name):
+    slug = DATASET_ID.split("/")[-1]
+    return (sorted(glob.glob(f"/kaggle/input/{slug}/**/{name}", recursive=True))
+            or sorted(glob.glob(f"/kaggle/input/**/{name}", recursive=True)))
+
+_mounted = _find("corpus.zip")
+_loose = _find("manifest.csv")
 
 if CORPUS.joinpath("manifest.csv").exists():
     print("Corpus đã có sẵn trong /kaggle/working — không bung đè lên.")
@@ -407,32 +437,52 @@ else:
         print("Nhưng KHÔNG thấy corpus.zip — add đúng dataset vào Input rồi chạy lại ô này.")
     else:
         # Chưa mount thì vẫn hỏi API cho biết dataset đang có gì.
-        r = subprocess.run(["kaggle", "datasets", "files", "sonpham12/vivos-fake-v2"],
+        r = subprocess.run(["kaggle", "datasets", "files", DATASET_ID],
                            capture_output=True, text=True)
         if r.returncode == 0:
             print("Dataset trên Kaggle đang có:")
             print(r.stdout.strip()[:800])
-            print("\\n→ Add Input → Datasets → sonpham12/vivos-fake-v2 rồi chạy lại ô này"
+            print(f"\\n→ Add Input → Datasets → {DATASET_ID} rồi chạy lại ô này"
                   " để nối tiếp thay vì làm lại từ đầu.")
         else:
             print("Chưa nối được tới dataset (chưa add Input, chưa có token, hoặc dataset trống).")
             if MAKE_DATASET:
                 print("Phiên này sẽ bắt đầu từ đầu.")
 
-# Chỉ-huấn-luyện thì corpus không phải tiện lợi mà là điều kiện sống: thiếu nó, hoặc
-# thiếu hẳn một lớp, thì cả phần B chỉ là mấy giờ GPU đổ đi.
-if not MAKE_DATASET:
-    if not CORPUS.joinpath("manifest.csv").exists():
-        raise SystemExit(
-            f"MODE={MODE!r} nhưng không bung được corpus nào — không có gì để huấn luyện.\\n"
-            "Add Input → Datasets một dataset chứa corpus.zip rồi chạy lại ô này."
-        )
+# Đã tới đâu rồi — con số này là mốc của cả phiên: phần A biết còn phải sinh bao nhiêu,
+# phần B biết mình sắp huấn luyện trên cái gì.
+if CORPUS.joinpath("manifest.csv").exists():
     from aidetector.corpus.manifest import Manifest
 
     _m = Manifest.load(CORPUS, required=True)
-    print(f"Corpus để huấn luyện: {len(_m.reals)} real · {len(_m.fakes)} fake")
-    if not _m.reals or not _m.fakes:
-        raise SystemExit("Corpus chỉ có một lớp — phân loại real/fake cần cả hai.")
+    _done = len({f.speaker for f in _m.fakes})
+    print(f"\\nCorpus đang có: {len(_m.reals)} real · {len(_m.fakes)} fake"
+          f" · {_done}/{len(_m.speakers('real'))} speaker đã có fake")
+
+    # ĐÃ GEN ĐẾN ĐÂU so với đích "mỗi real đủ điều kiện có một fake". Đây là câu duy
+    # nhất đáng hỏi trước khi bắt đầu một phiên nối tiếp, và nó đọc được từ chính
+    # manifest — không cần nạp engine, không cần GPU.
+    from aidetector.config import Config
+    from aidetector.generate.texts import is_usable
+
+    _c = Config.load(CFG)
+    _pool = [r for r in _m.reals if not r.augment and r.text and is_usable(
+        r.text, int(_c.get("generate.min_words", 6)), int(_c.get("generate.max_words", 40)))]
+    _co_fake = {f.ref_utt_id for f in _m.fakes}
+    _xong = sum(1 for r in _pool if r.utt_id in _co_fake)
+    _con = len(_pool) - _xong
+    print(f"Tiến độ gen   : {_xong}/{len(_pool)} real đủ điều kiện đã có fake"
+          f" ({100 * _xong / max(len(_pool), 1):.0f}%) · còn {_con} mẫu"
+          f" ≈ {_con * 3.7 / 3600:.1f} giờ trên T4")
+    # Chỉ-huấn-luyện thì corpus không phải tiện lợi mà là điều kiện sống.
+    if not MAKE_DATASET and not (_m.reals and _m.fakes):
+        raise SystemExit(f"Corpus chỉ có một lớp (real={len(_m.reals)}, fake={len(_m.fakes)})"
+                         " — phân loại real/fake cần cả hai.")
+elif not MAKE_DATASET:
+    raise SystemExit(
+        f"MODE={MODE!r} nhưng không bung được corpus nào — không có gì để huấn luyện.\\n"
+        f"Add Input → Datasets → {DATASET_ID} rồi chạy lại ô này."
+    )
 """),
 
 md("""
@@ -451,12 +501,36 @@ chia sẵn) rồi ép mọi file về đúng một chuẩn:
 
 Real và fake dùng **chung** chuỗi chuẩn hoá này, nên mô hình không thể phân biệt hai
 lớp bằng định dạng hay độ to.
+
+**`--limit` rải đều cho mọi speaker.** Adapter duyệt theo thư mục nên nó trả hết giọng
+này mới sang giọng khác; cắt theo thứ tự đó là những giọng cuối bảng không có lấy một
+utterance — trong khi chia tập là speaker-disjoint và **fake chỉ sinh được cho speaker đã
+có real**. Nên `ingest` xếp lại nguồn theo vòng tròn qua speaker trước khi cắt: VIVOS 65
+giọng với `N_REAL = 4000` ra ~61 utterance mỗi giọng, và fake phủ đủ 65 giọng đó.
+
+`--limit` cũng là **tổng trong corpus**, không phải "thêm bao nhiêu lần này": phiên sau
+chạy lại đúng lệnh đó thì ingest không làm gì (và đó không phải lỗi). Muốn thêm giọng
+hoặc thêm câu thì nâng `N_REAL` — vòng tròn tự dồn phần thêm vào những giọng còn ít.
 """),
 code("""
+def _n_records():
+    csv_path = CORPUS / "manifest.csv"
+    return sum(1 for _ in csv_path.open(encoding="utf-8")) - 1 if csv_path.exists() else 0
+
+# Cờ nào có trần thì truyền, không thì để trống — `--limit` vắng mặt nghĩa là lấy hết.
+_tran = [*(["--limit", N_REAL] if N_REAL else []),
+         *(["--per-speaker", PER_SPEAKER] if PER_SPEAKER else [])]
+
+_before = _n_records()
 if MAKE_DATASET:
-    run("ingest", RAW, "--limit", N_REAL, "--per-speaker", PER_SPEAKER)
+    run("ingest", RAW, *_tran)
 else:
     skipped("ingest — corpus đã bung ở A1b")
+
+# Có thêm bản ghi thì mới có cái để đẩy. Không có thì bỏ lượt đẩy ở A2b: gói và tải cả
+# GB dữ liệu y nguyên như trên dataset là đốt hàng chục phút của phiên vào việc vô ích.
+INGEST_ADDED = _n_records() - _before
+print(f"ingest thêm {INGEST_ADDED} bản ghi · corpus {_n_records()} bản ghi")
 """),
 code("""
 if MAKE_DATASET:
@@ -483,7 +557,10 @@ if MAKE_DATASET:
             "được với real. Hãy dùng bộ dữ liệu có transcript (VIVOS, Common Voice).")
     if problems:
         raise SystemExit("DỪNG LẠI:\\n" + "\\n".join(f"  • {p}" for p in problems))
-    print("✔ dataset thật đủ điều kiện để sinh fake")
+        # 3,7 giây/mẫu là số đo thật trên T4 (log phiên trước), không phải ước lượng suông.
+    print(f"✔ dataset thật đủ điều kiện để sinh fake")
+    print(f"  Sinh đủ 1 fake cho mỗi real ⇒ {n_real} mẫu ⇒ ~{n_real * 3.7 / 3600:.1f} giờ"
+          f" trên T4 nếu bắt đầu từ 0. Phần đã có ở phiên trước không phải làm lại.")
 else:
     skipped("kiểm tra dataset REAL — chỉ có nghĩa trước khi sinh fake")
 """),
@@ -491,26 +568,84 @@ else:
 md("""
 ## A2b. Đồng bộ lên Kaggle Dataset
 
-Đích: **[sonpham12/vivos-fake-v2](https://www.kaggle.com/datasets/sonpham12/vivos-fake-v2)**.
-Mỗi lần đẩy gồm **toàn bộ**: `corpus.zip` (real + fake + manifest) cộng một bản
-`manifest.csv` để rời bên ngoài — nhờ đó ô A1b đọc được tiến độ mà không phải tải cả GB.
+Đích là `DATASET_ID` ở ô setup — **cùng một biến** mà ô A1b nạp về, nên không bao giờ có
+chuyện đẩy lên một chỗ rồi phiên sau nạp từ chỗ khác. Mỗi lần đẩy gồm **toàn bộ**:
+`corpus.zip` (real + fake + manifest) cộng một bản `manifest.csv` để rời bên ngoài — nhờ
+đó A1b đọc được tiến độ mà không phải tải cả GB.
 
 Mục này đặt **trước** bước sinh vì bước sinh gọi `sync_corpus.py`, file đó phải có sẵn.
-Ở `MODE = "train"` việc đẩy bị tắt hẳn — phiên đó không sinh thêm gì thì không có gì mới
-để đẩy, mà ghi đè lên dataset bằng đúng thứ vừa tải về là việc vô ích.
 
-**Nhịp đẩy bị chặn theo thời gian, và đó là điều bắt buộc.** Hook chạy chặn: mỗi speaker
-một lần × ~1,2 GB là hàng chục GB upload, và thời gian đứng chờ cộng dồn còn lâu hơn cả
-thời gian sinh. `SYNC_EVERY_MINUTES` giữ nhịp tối đa một lần mỗi 20 phút — vẫn đẩy đúng
-tại ranh giới speaker, chỉ bỏ qua những mốc đến quá sớm. Mất kết nối thì cùng lắm mất 20
-phút GPU. Hạ xuống nếu mạng nhanh và muốn an toàn hơn.
+#### Chu kỳ đẩy — ba mốc
+
+| Mốc | Ở đâu | Bịt lỗ nào |
+|---|---|---|
+| **sau `ingest`** | ngay ô này, chỉ khi ingest thêm bản ghi | out lúc sinh giọng đầu — đúng lúc chưa có mốc nào được chốt |
+| **xong MỖI speaker** | `generate --after-speaker`, chạy nền | out giữa lượt sinh nhiều giờ |
+| **cuối phiên** | ô A5, `--force` — chặn, đợi lượt nền xong | phần lẻ sau mốc cuối |
+
+Speaker là mốc dày nhất mà corpus có: trước ranh giới đó, phần đã xong chỉ là một nhúm
+mẫu lẻ giữa chừng. 4000 mẫu trên ~46 speaker ⇒ mỗi giọng ~6 phút, nên out bất ngờ thì
+mất tối đa cỡ **6 phút GPU**.
+
+**Lượt đẩy chạy NỀN — đó là điều làm nhịp dày này khả thi.** Gói ~1 GB rồi upload mất cỡ
+1–3 phút. Đẩy mà chặn dòng sinh thì 46 lượt cộng lại là hơn một giờ GPU đứng chờ, tức trả
+hơn một giờ để rút cửa sổ mất mát từ 20 phút xuống 6 phút — lỗ. Chạy nền thì gói và upload
+là việc của CPU với mạng, GPU sinh speaker tiếp, giá gần như bằng không.
+
+Đổi lại phải giữ hai bất biến:
+
+* **Không chồng lượt** — khoá theo PID. Speaker xong sớm hơn thời gian đẩy thì bỏ lượt đó,
+  và không mất gì: mỗi lần đẩy là ảnh chụp **toàn bộ** corpus nên mốc sau gói cả phần vừa
+  bỏ. Hai lượt cùng lúc thì lượt sau gói đè lên đúng file zip lượt trước đang tải.
+* **Ảnh chụp nhất quán** — `pack` đọc manifest rồi zip đúng những file trong đó. Manifest
+  ghi bằng `tmp` + `os.replace` nên bản đọc được luôn nguyên vẹn; audio sinh ra sau thời
+  điểm đó chỉ đơn giản là chưa có trong ảnh này, lượt sau lấy.
+
+`SYNC_EVERY_MINUTES = 0` là không chặn nhịp. Đặt > 0 nếu mạng chậm. `kaggle datasets
+version` bị từ chối khi version trước còn đang xử lý — chuyện thường ở nhịp dày, và vô hại
+vì lượt sau là ảnh chụp đầy đủ. Script chốt nhịp ngay khi bắt đầu chứ không đợi thành công,
+nên hỏng thì chờ lượt sau thay vì gói-và-tải-lại liên tục.
+
+**Số version là thứ duy nhất tăng theo nhịp mà không tự dọn.** Mỗi lượt đẩy là một version
+~1 GB, nhịp theo speaker ⇒ vài chục version mỗi phiên. `KEEP_OLD_VERSIONS = False` thêm
+`--delete-old-versions` để dataset chỉ giữ bản mới nhất — mất mát duy nhất là đường lùi,
+vì bản mới nhất luôn là superset của mọi bản cũ. Mặc định vẫn `True` vì xoá version là
+không lấy lại được; đổi khi dung lượng thành vấn đề.
+
+Lượt đẩy nền không in được vào ô nào — xem bằng `sync_log()`; ô A5 tự in toàn bộ.
+
+#### Cả ba chế độ dùng chung dataset này
+
+| `MODE` | Nạp về | Đẩy lên |
+|---|---|---|
+| `"dataset"` | A1b bung corpus phiên trước | ba mốc ở trên |
+| `"both"` | như trên | như trên |
+| `"train"` | A1b bung corpus — **bắt buộc**, không có thì dừng ngay | không đẩy |
+
+`"train"` không đẩy là có chủ ý, không phải bỏ sót: phần B chạy `augment`, nó ghi thêm
+bản nhiễu/nén vào corpus. Đẩy sau đó là bơm dữ liệu phái sinh vào dataset, buộc mọi phiên
+sau tải thêm phần mà một lệnh `augment` sinh lại được trong vài phút. Mô hình và báo cáo
+đi đường Output — ô B4 gói `model.zip` và `reports_bundle.zip`.
 
 Cài token một lần: [kaggle.com/settings](https://www.kaggle.com/settings) → Create New
 Token → mở `kaggle.json`, rồi Add-ons → Secrets thêm `KAGGLE_USERNAME` và `KAGGLE_KEY`.
 """),
 code("""
-DATASET_ID = "sonpham12/vivos-fake-v2"
-SYNC_EVERY_MINUTES = 20
+# DATASET_ID khai báo ở ô setup — cùng một biến với ô A1b nạp về.
+#
+# 0 = đẩy sau MỌI speaker. Làm được vì lượt đẩy chạy NỀN: gói + upload là việc của CPU và
+# mạng, GPU vẫn sinh tiếp trong lúc đó. Đặt số > 0 nếu muốn thưa hơn — mạng chậm, hoặc
+# muốn ít version trên dataset hơn.
+SYNC_EVERY_MINUTES = 0
+
+# Mỗi lượt đẩy tạo một version mới, và mỗi version là ảnh chụp TOÀN BỘ corpus. Nhịp theo
+# speaker ⇒ vài chục version ~1 GB mỗi phiên. True = giữ hết (còn đường lùi nếu một bản
+# đẩy ra rác); False = thêm `--delete-old-versions`, dataset chỉ giữ bản mới nhất.
+#
+# Giữ mặc định True: xoá version là không lấy lại được. Đổi sang False khi dung lượng
+# dataset thành vấn đề — bản mới nhất luôn là superset của mọi bản cũ nên mất mát duy
+# nhất là đường lùi.
+KEEP_OLD_VERSIONS = True
 
 import os
 import subprocess
@@ -518,21 +653,64 @@ import sys
 import textwrap
 from pathlib import Path
 
-def kaggle_ready():
-    # Secrets của Kaggle không tự thành biến môi trường, phải hỏi UserSecretsClient.
-    if os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"):
-        return True
+# Lượt đẩy chạy nền nên không in được vào output của ô. Log ra file, xem bằng sync_log().
+SYNC_LOG = Path("/kaggle/working/sync.log")
+
+# Thử ĐÚNG công cụ sẽ dùng để đẩy, thay vì đoán qua biến môi trường.
+#
+# Bài học từ log phiên trước: `kaggle datasets files` ở ô A1b chạy được (liệt kê ra
+# dataset thật), trong khi `UserSecretsClient` ném BackendError. Cổng cũ kiểm Secrets nên
+# nó tắt đồng bộ suốt 4 giờ sinh — dù công cụ đẩy vốn xác thực được. Kiểm sai chỗ thì
+# càng "an toàn" càng mất dữ liệu.
+def kaggle_cli_ok():
+    return subprocess.run(["kaggle", "datasets", "list", "-m", "--page-size", "1"],
+                          capture_output=True).returncode == 0
+
+# Kaggle có HAI kiểu credential và chúng không thay thế nhau được:
+#
+#   KAGGLE_API_TOKEN   token `KGAT_…` (Settings → API Tokens, kiểu mới, khuyến nghị)
+#   KAGGLE_USERNAME + KAGGLE_KEY   cặp legacy trong kaggle.json
+#
+# Đặt secret nào cũng được — hàm dưới thử lần lượt. Token mới còn được ghi ra
+# ~/.kaggle/access_token vì bản `kaggle` cài sẵn trên Kaggle có thể cũ hơn biến
+# KAGGLE_API_TOKEN; đọc file thì client nào cũng biết đường.
+def nap_credential():
     try:
         from kaggle_secrets import UserSecretsClient
 
         s = UserSecretsClient()
-        os.environ["KAGGLE_USERNAME"] = s.get_secret("KAGGLE_USERNAME")
-        os.environ["KAGGLE_KEY"] = s.get_secret("KAGGLE_KEY")
-        return True
     except Exception as exc:
-        print(f"Chưa có Kaggle token ({type(exc).__name__}) — sẽ không đẩy lên được.")
-        print("Dùng đường Output: Save Version → Save & Run All, rồi phiên sau Add Input.")
-        return False
+        print(f"Không mở được Kaggle Secrets ({type(exc).__name__}).")
+        return []
+
+    lay = []
+    for ten in ("KAGGLE_API_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY"):
+        try:
+            os.environ[ten] = s.get_secret(ten)
+            lay.append(ten)
+        except Exception:
+            pass          # secret không có là chuyện thường: chỉ cần MỘT kiểu là đủ
+
+    if "KAGGLE_API_TOKEN" in lay:
+        f = Path.home() / ".kaggle" / "access_token"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(os.environ["KAGGLE_API_TOKEN"])
+        f.chmod(0o600)
+        lay.append("~/.kaggle/access_token")
+    print(f"Secrets đọc được: {lay or 'không có secret nào'}")
+    return lay
+
+def kaggle_ready():
+    if kaggle_cli_ok():
+        return True
+    if nap_credential() and kaggle_cli_ok():
+        return True
+    print("`kaggle` CLI chưa xác thực được — sẽ không đẩy lên được. Cần MỘT trong hai:")
+    print("  · Settings → API Tokens → Generate New Token, rồi Add-ons → Secrets thêm")
+    print("    KAGGLE_API_TOKEN = KGAT_… (và tick attach cho notebook này)")
+    print("  · hoặc Legacy API Key, thêm KAGGLE_USERNAME + KAGGLE_KEY")
+    print("Không có thì dùng đường Output: Save Version, rồi phiên sau Add Input.")
+    return False
 
 # Script độc lập, để `generate --after-speaker` gọi được từ tiến trình con.
 SYNC_SCRIPT = Path("/kaggle/working/sync_corpus.py")
@@ -542,57 +720,125 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
 
     DATASET_ID = {DATASET_ID!r}
     MIN_GAP = {SYNC_EVERY_MINUTES} * 60
+    KEEP_OLD = {KEEP_OLD_VERSIONS!r}
     CORPUS = Path("/kaggle/working/corpus")
     STAGE = Path("/kaggle/working/dataset_upload")
     STAMP = Path("/kaggle/working/.last_sync")
+    LOCK = Path("/kaggle/working/.sync_lock")
+    FORCE = "--force" in sys.argv
+
+    # PID của lượt đẩy đang chạy, hoặc None.
+    def running():
+        try:
+            pid = int(LOCK.read_text())
+            os.kill(pid, 0)          # chỉ hỏi còn sống không, không gửi tín hiệu thật
+        except (OSError, ValueError):
+            return None
+        return pid
+
+    # Hai lượt đẩy chồng nhau là cùng gói vào MỘT file zip mà lượt trước đang tải lên.
+    # Speaker tới sớm hơn thời gian đẩy thì bỏ lượt — mốc sau gói cả phần vừa bỏ, vì
+    # mỗi lần đẩy là một ảnh chụp TOÀN BỘ corpus chứ không phải phần tăng thêm.
+    while running():
+        if not FORCE:
+            print(f"[{{time.strftime('%H:%M:%S')}}] bỏ lượt — pid {{running()}} còn đang đẩy")
+            raise SystemExit(0)
+        print(f"[{{time.strftime('%H:%M:%S')}}] đợi lượt đẩy nền (pid {{running()}}) xong…")
+        time.sleep(15)
 
     # --force bỏ qua nhịp chặn: dùng khi vừa dừng tay và muốn lưu ngay.
-    if "--force" not in sys.argv and STAMP.exists():
+    if not FORCE and MIN_GAP and STAMP.exists():
         waited = time.time() - STAMP.stat().st_mtime
         if waited < MIN_GAP:
-            print(f"bỏ qua đồng bộ — còn {{(MIN_GAP - waited) / 60:.0f}} phút tới nhịp sau")
+            print(f"bỏ lượt — còn {{(MIN_GAP - waited) / 60:.0f}} phút tới nhịp sau")
             raise SystemExit(0)
 
-    STAGE.mkdir(exist_ok=True)
-    subprocess.run([sys.executable, "-m", "aidetector", "pack",
-                    "--out", str(STAGE / "corpus.zip"), "-c", "configs/kaggle.yaml"],
-                   check=True, cwd="/kaggle/working/ai-detector")
-    # manifest để rời ngoài zip: A1b đọc tiến độ khỏi phải tải và giải nén cả GB.
-    shutil.copy(CORPUS / "manifest.csv", STAGE / "manifest.csv")
+    # Chốt nhịp NGAY khi bắt đầu, không đợi thành công. Kaggle từ chối vì version
+    # trước còn đang xử lý là chuyện thường; nếu chỉ chốt khi thành công thì mỗi ranh
+    # giới speaker lại gói và tải lại cả GB — hỏng liên tục thì đó là hammer, không
+    # phải retry. Bản chốt cuối không mất: ô A5 đẩy bằng --force.
+    STAMP.touch()
+    LOCK.write_text(str(os.getpid()))
+    started = time.time()
 
-    (STAGE / "dataset-metadata.json").write_text(json.dumps({{
-        "title": "vivos fake v2",
-        "id": DATASET_ID,
-        "licenses": [{{"name": "CC0-1.0"}}],
-    }}, ensure_ascii=False))
+    try:
+        STAGE.mkdir(exist_ok=True)
+        # `pack` đọc manifest rồi zip đúng những file trong đó. Manifest được ghi bằng
+        # tmp + os.replace nên bản đọc được luôn nguyên vẹn, và audio sinh ra SAU thời
+        # điểm đó chỉ đơn giản là chưa có trong ảnh chụp này — lượt sau lấy.
+        subprocess.run([sys.executable, "-m", "aidetector", "pack",
+                        "--out", str(STAGE / "corpus.zip"), "-c", "configs/kaggle.yaml"],
+                       check=True, cwd="/kaggle/working/ai-detector")
+        # manifest để rời ngoài zip: A1b đọc tiến độ khỏi phải tải và giải nén cả GB.
+        shutil.copy(CORPUS / "manifest.csv", STAGE / "manifest.csv")
 
-    note = (f"sau speaker {{os.environ.get('AIDETECTOR_SPEAKER', 'thủ công')}}"
-            f" · {{os.environ.get('AIDETECTOR_KEPT', '?')}} mẫu")
-    print(f"đẩy {{(STAGE / 'corpus.zip').stat().st_size / 1024**3:.2f}} GB — {{note}}")
+        (STAGE / "dataset-metadata.json").write_text(json.dumps({{
+            "title": "vivos fake v2",
+            "id": DATASET_ID,
+            "licenses": [{{"name": "CC0-1.0"}}],
+        }}, ensure_ascii=False))
 
-    # `version` cho dataset đã có, `create` cho lần đầu — thử lần lượt, đừng đoán.
-    for argv, what in (
-        (["datasets", "version", "-p", str(STAGE), "-m", note], "thêm version"),
-        (["datasets", "create", "-p", str(STAGE)], "tạo mới"),
-    ):
-        r = subprocess.run(["kaggle", *argv], capture_output=True, text=True)
-        if r.returncode == 0:
-            STAMP.write_text(note)
-            print(f"✔ {{what}} — https://www.kaggle.com/datasets/{{DATASET_ID}}")
-            break
-        print(f"— {{what}} không xong: {{(r.stdout + r.stderr).strip()[-300:]}}")
-    else:
-        raise SystemExit(1)
+        note = (f"sau speaker {{os.environ.get('AIDETECTOR_SPEAKER', 'thủ công')}}"
+                f" · {{os.environ.get('AIDETECTOR_KEPT', '?')}} mẫu")
+        size = (STAGE / "corpus.zip").stat().st_size / 1024**3
+        print(f"[{{time.strftime('%H:%M:%S')}}] gói xong {{size:.2f}} GB"
+              f" trong {{time.time() - started:.0f}}s — {{note}}")
+
+        add_version = ["datasets", "version", "-p", str(STAGE), "-m", note]
+        if not KEEP_OLD:
+            add_version.append("--delete-old-versions")
+
+        # `version` cho dataset đã có, `create` cho lần đầu — thử lần lượt, đừng đoán.
+        for argv, what in (
+            (add_version, "thêm version"),
+            (["datasets", "create", "-p", str(STAGE)], "tạo mới"),
+        ):
+            r = subprocess.run(["kaggle", *argv], capture_output=True, text=True)
+            if r.returncode == 0:
+                print(f"✔ {{what}} · cả lượt {{time.time() - started:.0f}}s"
+                      f" — https://www.kaggle.com/datasets/{{DATASET_ID}}")
+                break
+            print(f"— {{what}} không xong: {{(r.stdout + r.stderr).strip()[-300:]}}")
+        else:
+            raise SystemExit(1)
+    finally:
+        LOCK.unlink(missing_ok=True)
 '''))
 
 def sync_now():
     # subprocess chứ không `!python`: magic của IPython không lồng vào `if` được.
+    # Chạy CHẶN: --force đợi lượt nền đang dở rồi mới đẩy bản mới nhất.
     subprocess.run([sys.executable, str(SYNC_SCRIPT), "--force"])
+
+def sync_log(n=40):
+    # Lượt đẩy nền không in được vào ô nào, nên đây là cách duy nhất để xem nó đã làm gì.
+    if SYNC_LOG.exists():
+        print("\\n".join(SYNC_LOG.read_text().splitlines()[-n:]) or "(log rỗng)")
+    else:
+        print("Chưa có lượt đẩy nền nào.")
 
 # Không sinh thêm gì thì không đẩy: dataset đã là bản mới nhất.
 SYNC_READY = MAKE_DATASET and kaggle_ready()
-print(f"Đồng bộ: {'BẬT' if SYNC_READY else 'TẮT'} · {DATASET_ID}"
-      f" · nhịp tối đa {SYNC_EVERY_MINUTES} phút/lần")
+
+# Hook dán vào MỌI lệnh generate, để lệnh nào cũng chốt tiến độ ở ranh giới speaker.
+# Nó chạy NỀN, và cả ba thành phần của chuỗi đều bắt buộc:
+#   nohup   — lượt đẩy sống tiếp khi tiến trình `generate` gọi nó đã kết thúc
+#   >> log  — hook gọi bằng capture_output; con cháu còn giữ ống stdout thì nó VẪN đứng
+#             chờ dù đã có `&`. Cắt ống mới thật sự không chặn.
+#   &       — trả về ngay, GPU sinh speaker tiếp trong lúc gói + upload
+SYNC_HOOK = ["--after-speaker",
+             f"nohup {sys.executable} {SYNC_SCRIPT} >> {SYNC_LOG} 2>&1 &"] if SYNC_READY else []
+
+_nhip = "sau MỖI speaker" if not SYNC_EVERY_MINUTES else f"tối đa {SYNC_EVERY_MINUTES} phút/lần"
+_ver = "giữ mọi version" if KEEP_OLD_VERSIONS else "chỉ giữ version mới nhất"
+print(f"Đồng bộ: {'BẬT' if SYNC_READY else 'TẮT'} · {DATASET_ID} · {_nhip} · chạy nền · {_ver}")
+print(f"Xem lượt đẩy nền: sync_log()   ·   log ở {SYNC_LOG}")
+
+# MỐC ĐẦU TIÊN: phần REAL vừa nạp. Không có nó thì bị out trong lúc sinh speaker đầu là
+# mất luôn công ingest — mà đó lại đúng là lúc chưa có mốc nào được chốt.
+if SYNC_READY and INGEST_ADDED:
+    print(f"\\nChốt mốc sau ingest ({INGEST_ADDED} bản ghi mới)")
+    sync_now()
 """),
 
 md("""
@@ -609,7 +855,8 @@ code("""
 if not MAKE_DATASET:
     skipped("sinh fake bằng TTS")
 elif TTS_ENGINES:
-    run("generate", "--engines", *TTS_ENGINES, "--count", N_FAKE_TTS)
+    run("generate", "--engines", *TTS_ENGINES,
+        *(["--count", N_FAKE_TTS] if N_FAKE_TTS else []), *SYNC_HOOK)
 else:
     print("TTS đang tắt — chỉ sinh fake bằng voice cloning (xem TTS_ENGINES ở ô cài thư viện).")
 """),
@@ -681,8 +928,12 @@ else:
 code("""
 # CÒN BAO NHIÊU? `--dry-run` chạy đúng phép chọn của lượt sinh thật rồi đếm theo utt_id,
 # không nạp model nên xong trong vài giây. Tiến độ theo speaker cũng in ra đây.
+# `--count` vắng mặt ⇒ `fake_to_real_ratio: 1.0` trong config tự tính: đúng một fake
+# cho mỗi real đủ điều kiện. Đây là định nghĩa "full" mà không phải gõ con số nào.
+_soluong = ["--count", N_FAKE_CLONE] if N_FAKE_CLONE else []
+
 if MAKE_DATASET:
-    run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE, "--dry-run")
+    run("generate", "--engines", "omnivoice", *_soluong, "--dry-run")
 else:
     skipped("đếm phần còn thiếu")
 """),
@@ -697,12 +948,25 @@ if MAKE_DATASET:
     #
     # optional CHỈ khi còn engine khác gánh lớp fake. Tắt TTS rồi thì cloning là nguồn fake
     # DUY NHẤT: hỏng mà vẫn đi tiếp là kéo cả phần B vào corpus không có lớp fake nào.
-    _hook = ["--after-speaker", f"{sys.executable} /kaggle/working/sync_corpus.py"] if SYNC_READY else []
-    run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE,
-        *(["--overwrite"] if SMOKE else []), *_hook, optional=bool(TTS_ENGINES))
+    run("generate", "--engines", "omnivoice", *_soluong,
+        *(["--overwrite"] if SMOKE else []), *SYNC_HOOK, optional=bool(TTS_ENGINES))
 else:
     skipped("sinh fake bằng voice cloning")
 """),
+md("""
+### A3c. Xong chưa?
+
+Đếm lại bằng đúng phép đếm ở đầu A3b. `còn 0 phải sinh` ⇒ corpus đã đủ, phiên sau đặt
+`MODE = "train"`. Còn số dương ⇒ phiên hết giờ giữa đường: corpus đã được đẩy lên dataset
+tại ranh giới mỗi speaker, nên phiên sau vào lại là tiếp đúng chỗ, không làm lại gì.
+"""),
+code("""
+if MAKE_DATASET:
+    run("generate", "--engines", "omnivoice", *_soluong, "--dry-run")
+else:
+    skipped("đếm lại phần còn thiếu")
+"""),
+
 code("""
 # A/B CHECKPOINT — sinh thêm một lượt bằng bản đa ngữ gốc, trên ĐÚNG những câu vừa rồi.
 #
@@ -716,7 +980,7 @@ code("""
 if not MAKE_DATASET:
     skipped("A/B checkpoint")
 elif SMOKE:
-    run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE, "--overwrite",
+    run("generate", "--engines", "omnivoice", *_soluong, "--overwrite",
         "--set", "generate.options.omnivoice.checkpoint=k2-fsa/OmniVoice", optional=True)
 else:
     print("Bỏ qua A/B checkpoint — chỉ chạy ở chế độ thử (SMOKE = True).")
@@ -1042,7 +1306,9 @@ code("""
 if not MAKE_DATASET:
     skipped("đẩy corpus — phiên này không sinh thêm gì")
 elif SYNC_READY:
-    sync_now()          # ép đẩy, bỏ qua nhịp chặn
+    sync_now()          # chặn: đợi lượt nền đang dở, rồi đẩy bản mới nhất
+    print()
+    sync_log()          # toàn bộ các lượt đẩy nền trong phiên
 else:
     run("pack", "--out", "/kaggle/working/corpus.zip")
     print("Chưa có token — dùng Save Version → Save & Run All để giữ /kaggle/working.")

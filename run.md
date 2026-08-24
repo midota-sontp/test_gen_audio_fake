@@ -341,6 +341,39 @@ bỏ qua:
 
 Ô nạp corpus (A1b) chạy ở **mọi** chế độ — nó là đường duy nhất mang dữ liệu vào phiên.
 
+#### Chạy full nguồn, nhiều phiên
+
+Lượt chạy thật mặc định **không áp trần**:
+
+```python
+N_REAL, PER_SPEAKER, N_FAKE_TTS, N_FAKE_CLONE = None, None, None, None
+```
+
+`None` ⇒ không truyền `--limit`/`--count`, nên `ingest` lấy mọi utterance đạt chuẩn và
+`generate` để `fake_to_real_ratio: 1.0` tự tính đúng một fake cho mỗi real. Không phải
+đoán nguồn cấp được bao nhiêu — đoán sai là lệch lớp (ingest 6.300 real mà chỉ sinh 4.000
+fake là 1,6× nghiêng về real).
+
+Vòng một phiên:
+
+1. **A1b** bung corpus phiên trước rồi in `Tiến độ gen: 4200/6300 (67%) · còn 2100 mẫu
+   ≈ 2,2 giờ trên T4`. Đọc từ manifest, không nạp engine, xong trong vài giây.
+2. **A3b** `--dry-run` xác nhận lại bằng đúng phép đếm của lượt sinh (theo `utt_id`), kèm
+   tiến độ theo speaker.
+3. **A3b** sinh phần còn thiếu, đẩy lên dataset ở ranh giới mỗi speaker.
+4. **A3c** đếm lại: `còn 0` ⇒ xong, phiên sau đặt `MODE = "train"`. Còn dương ⇒ hết giờ
+   giữa đường, vào lại là tiếp đúng chỗ.
+
+Số đo thật trên VIVOS: 12.420 file → **7.367** utterance đạt chuẩn (59,3%; phần bỏ là
+clip ngắn hơn `min_seconds = 3s`), 65 speaker. Với 3,7 giây/mẫu trên T4 thì sinh đủ 1:1 là
+**~7,6 giờ** — vừa trong một phiên `MODE = "dataset"` 9 giờ, nhưng sát; hết giờ giữa đường
+thì phiên sau tiếp, không mất gì.
+
+`PER_SPEAKER = None` là chọn "mọi utterance" thay vì "phần công bằng của mỗi giọng". Trần
+120 cho 5.395 utterance rải đều; bỏ trần cho 7.367 nhưng phần thêm dồn vào các giọng nói
+nhiều. Vì split là speaker-disjoint và test đo tổng quát hoá sang giọng mới, nếu thấy EER
+trên test tệ hơn val rõ rệt thì đặt lại `PER_SPEAKER = 120–200`.
+
 Sau khi sửa code trong repo, build lại notebook cho khớp:
 
 ```bash
@@ -367,13 +400,66 @@ hàng chục nghìn file wav rời rạc thì rất chậm, nên gói vào một
 !python -m aidetector run split augment features train evaluate -c {CFG}
 ```
 
-Trong notebook thì hai bước này đã tự động: phần A đẩy corpus lên Kaggle Dataset ngay
-trong lúc sinh (ô A2b), và ô A1b của phiên sau bung nó ra trước khi làm bất cứ việc gì.
-Chuỗi thường dùng là `MODE = "dataset"` vài phiên cho tới khi đủ mẫu, rồi một phiên
-`MODE = "train"`.
-
 `unpack` chỉ ghi những file chưa có nên chạy lại được, và tự loại khỏi manifest các
 bản ghi thiếu audio.
+
+#### Notebook làm việc đó tự động
+
+`DATASET_ID` ở ô setup là **một biến duy nhất** cho cả hai chiều: ô A1b nạp về từ đó, ô
+A2b đẩy lên đó. Không có đường nào để đẩy lên một chỗ rồi phiên sau nạp từ chỗ khác.
+
+Chu kỳ đẩy có ba mốc:
+
+| Mốc | Ở đâu | Bịt lỗ nào |
+|---|---|---|
+| sau `ingest` | ô A2b, chỉ khi ingest thêm bản ghi | out lúc sinh giọng đầu — đúng lúc chưa có mốc nào được chốt |
+| **xong mỗi speaker** | `generate --after-speaker`, **chạy nền** | out giữa lượt sinh nhiều giờ |
+| cuối phiên | ô A5, `--force` (chặn, đợi lượt nền) | phần lẻ sau mốc cuối |
+
+Speaker là mốc dày nhất corpus có: trước ranh giới đó, phần đã xong chỉ là một nhúm mẫu
+lẻ giữa chừng. 4000 mẫu trên ~46 speaker ⇒ mỗi giọng ~6 phút, nên out bất ngờ mất tối đa
+cỡ 6 phút GPU.
+
+Nhịp dày đó chỉ khả thi vì **lượt đẩy chạy nền**. Gói ~1 GB rồi upload mất 1–3 phút; đẩy
+chặn dòng sinh thì 46 lượt cộng lại là hơn một giờ GPU đứng chờ — trả hơn một giờ để rút
+cửa sổ mất mát từ 20 phút xuống 6 phút là lỗ. Chạy nền thì việc đó là của CPU với mạng,
+GPU sinh tiếp. Hook dùng `nohup … >> sync.log 2>&1 &`: cả ba thành phần đều bắt buộc, vì
+hook gọi bằng `capture_output` nên chỉ `&` thôi là nó vẫn đứng chờ ống stdout của con cháu.
+
+Hai bất biến đi kèm: **khoá PID** (speaker xong sớm hơn thời gian đẩy thì bỏ lượt — mỗi
+lần đẩy là ảnh chụp toàn bộ corpus nên mốc sau gói cả phần vừa bỏ), và **ảnh chụp nhất
+quán** (`pack` đọc manifest — ghi bằng `tmp` + `os.replace` — rồi zip đúng những file
+trong đó).
+
+`SYNC_EVERY_MINUTES = 0` là không chặn nhịp; đặt > 0 nếu mạng chậm. `kaggle datasets
+version` bị từ chối khi version trước còn đang xử lý — vô hại vì lượt sau là ảnh chụp đầy
+đủ. Xem các lượt đẩy nền bằng `sync_log()`.
+
+Thứ duy nhất tăng theo nhịp mà không tự dọn là **số version**: mỗi lượt đẩy là một version
+~1 GB, nhịp theo speaker ⇒ vài chục version mỗi phiên. `KEEP_OLD_VERSIONS = False` thêm
+`--delete-old-versions` để dataset chỉ giữ bản mới nhất; mất mát duy nhất là đường lùi, vì
+bản mới nhất luôn là superset của mọi bản cũ. Mặc định `True` — xoá version là không lấy
+lại được.
+
+Ba chế độ dùng chung dataset đó:
+
+| `MODE` | Nạp về | Đẩy lên |
+|---|---|---|
+| `"dataset"` | A1b bung corpus phiên trước | ba mốc ở trên |
+| `"both"` | như trên | như trên |
+| `"train"` | A1b bung corpus — **bắt buộc**, không có thì dừng ngay | không đẩy |
+
+`"train"` không đẩy là có chủ ý: phần B chạy `augment`, nó ghi thêm bản nhiễu/nén vào
+corpus. Đẩy sau đó là bơm dữ liệu phái sinh vào dataset, buộc mọi phiên sau tải thêm phần
+mà một lệnh `augment` sinh lại được trong vài phút. Mô hình và báo cáo đi đường Output
+(ô B4 gói `model.zip`, `reports_bundle.zip`).
+
+Chuỗi thường dùng: `MODE = "dataset"` vài phiên cho tới khi đủ mẫu (mỗi phiên chỉ sinh
+phần còn thiếu — xem `--dry-run` để biết còn bao nhiêu), rồi một phiên `MODE = "train"`.
+
+Cần Kaggle token: [kaggle.com/settings](https://www.kaggle.com/settings) → Create New
+Token, rồi Add-ons → Secrets thêm `KAGGLE_USERNAME` và `KAGGLE_KEY`. Không có token thì
+phần đẩy tự tắt và bạn dùng đường Output → New Dataset như đoạn trên.
 
 ## Docker (CPU-only)
 

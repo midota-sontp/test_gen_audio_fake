@@ -22,6 +22,7 @@ hình học "mẹo" theo định dạng thay vì theo dấu vết giả mạo).
 from __future__ import annotations
 
 import os
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -141,17 +142,36 @@ def normalize_level(audio: np.ndarray, spec: AudioSpec) -> np.ndarray:
     return np.clip(audio, -1.0, 1.0).astype(np.float32)
 
 
-def fit_duration(audio: np.ndarray, spec: AudioSpec) -> list[np.ndarray]:
-    """Ép độ dài về khoảng [min_seconds, max_seconds]; có thể trả nhiều đoạn."""
+#: Mốc tham chiếu khi báo cáo clip bị loại vì quá ngắn.
+#:
+#: Không phải con số thần thánh: nó là bậc hạ tiếp theo hợp lý của `min_seconds`, đủ dài
+#: cho WavLM và cho phép nói "hạ xuống 2.0 thì lấy lại được bao nhiêu" thay vì để người
+#: đọc tự đoán. Đổi `min_seconds` mới là quyết định thật, mốc này chỉ để đo.
+RECOVERABLE_SECONDS = 2.0
+
+
+def fit_duration(audio: np.ndarray, spec: AudioSpec,
+                 reasons: Counter | None = None) -> list[np.ndarray]:
+    """Ép độ dài về khoảng [min_seconds, max_seconds]; có thể trả nhiều đoạn.
+
+    `reasons` (nếu truyền) được cộng thêm lý do loại — để phía gọi báo cáo được vì sao
+    nguồn hụt, thay vì chỉ đưa ra một con số `drop_invalid` không giải thích gì.
+    """
     n = audio.size
     if n < spec.min_samples:
         if spec.short_policy == "pad":
             return [np.pad(audio, (0, spec.min_samples - n))]
+        if reasons is not None:
+            reasons["too_short"] += 1
+            if n >= RECOVERABLE_SECONDS * spec.sample_rate:
+                reasons["too_short_but_over_ref"] += 1
         return []
     if n <= spec.max_samples:
         return [audio]
 
     if spec.long_policy == "drop":
+        if reasons is not None:
+            reasons["too_long"] += 1
         return []
     if spec.long_policy == "crop":
         start = (n - spec.max_samples) // 2
@@ -162,28 +182,34 @@ def fit_duration(audio: np.ndarray, spec: AudioSpec) -> list[np.ndarray]:
     return [c for c in chunks if c.size >= spec.min_samples]
 
 
-def normalize(audio: np.ndarray, spec: AudioSpec = DEFAULT_SPEC) -> list[np.ndarray]:
+def normalize(audio: np.ndarray, spec: AudioSpec = DEFAULT_SPEC,
+              reasons: Counter | None = None) -> list[np.ndarray]:
     """Toàn bộ chuỗi chuẩn hoá: sanitize → trim → cắt độ dài → chuẩn mức.
 
-    Trả về DANH SÁCH đoạn audio hợp lệ (rỗng nếu file không dùng được).
+    Trả về DANH SÁCH đoạn audio hợp lệ (rỗng nếu file không dùng được). `reasons` nhận
+    thống kê lý do loại — xem `fit_duration`.
     """
     audio = sanitize(audio)
     if audio.size == 0:
+        if reasons is not None:
+            reasons["empty"] += 1
         return []
     audio = trim_edges(audio, spec)
-    return [normalize_level(chunk, spec) for chunk in fit_duration(audio, spec)]
+    return [normalize_level(chunk, spec) for chunk in fit_duration(audio, spec, reasons)]
 
 
 def normalize_file(
-    src: str | Path, spec: AudioSpec = DEFAULT_SPEC
+    src: str | Path, spec: AudioSpec = DEFAULT_SPEC, reasons: Counter | None = None
 ) -> list[np.ndarray]:
     """Đọc file nguồn rồi chuẩn hoá. Lỗi đọc ⇒ trả danh sách rỗng (không ném)."""
     try:
         audio = load_audio(src, spec.sample_rate)
     except Exception as exc:  # noqa: BLE001 — nguồn ngoài, đủ kiểu hỏng
         log.warning("Không đọc được %s: %s", src, exc)
+        if reasons is not None:
+            reasons["unreadable"] += 1
         return []
-    return normalize(audio, spec)
+    return normalize(audio, spec, reasons)
 
 
 # ------------------------------------------------------------------ kiểm định

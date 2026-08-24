@@ -222,3 +222,99 @@ def test_periodic_save_never_leaves_a_half_written_manifest(tmp_path, vivos_like
     from_disk = Manifest.load(manifest.root, required=True)
     assert len(from_disk) == len(manifest)
     assert not any(r.validate() for r in from_disk)
+
+
+def test_a_backgrounded_hook_does_not_hold_up_generation(corpus, tmp_path):
+    """Hook chạy với `capture_output`: `&` mà không cắt ống thì nó VẪN đứng chờ con cháu.
+
+    Notebook đẩy dataset bằng đúng dạng chuỗi này — đẩy chặn dòng sau mỗi speaker là trả
+    hàng giờ GPU cho việc upload. Cái bẫy đó phải chặn được ở đây.
+    """
+    import time
+
+    from aidetector.cli import _speaker_hook
+
+    marker = tmp_path / "xong.txt"
+    hook = _speaker_hook(f"(sleep 5; touch {marker}) > /dev/null 2>&1 &", corpus)
+
+    started = time.time()
+    generate_fakes(corpus, CountingClone.id, SPEC, count=4, on_speaker_done=hook)
+    elapsed = time.time() - started
+
+    assert elapsed < 3, f"hook đứng chờ tiến trình nền ({elapsed:.1f}s)"
+    assert not marker.exists(), "tiến trình nền đã xong ⇒ phép đo không nói lên gì"
+
+
+# --------------------------------------------------- thông điệp không được nói sai
+def test_a_dry_run_is_not_reported_as_a_missing_engine(corpus, caplog, capsys):
+    """`--dry-run` không sinh gì, và một phiên nối tiếp đã đủ mẫu cũng vậy.
+
+    Trước đây cả hai đều rơi vào nhánh cuối của `cmd_generate` và in "Không engine nào
+    được cài" — chẩn đoán sai đúng vào lúc người dùng đang đọc log để biết còn phải chạy
+    bao lâu, đẩy họ đi tìm một lỗi không tồn tại.
+    """
+    import logging
+
+    from aidetector.cli import main
+
+    args = ["generate", "--engines", CountingClone.id, "--count", "4",
+            "--set", f"paths.corpus={corpus.root}"]
+    corpus.save()
+
+    with caplog.at_level(logging.INFO):
+        assert main([*args, "--dry-run"]) == 0
+    assert "được cài" not in caplog.text
+    assert "--dry-run" in caplog.text
+
+    assert main(args) == 0                      # sinh thật
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert main(args) == 0                  # chạy lại: không còn gì phải sinh
+    assert "được cài" not in caplog.text
+    assert "đã có sẵn" in caplog.text
+
+
+# ------------------------------------------------- chạy full: không trần, tự cân 1:1
+def test_no_count_generates_one_fake_per_usable_real(tmp_path, vivos_like, monkeypatch):
+    """Bỏ `--count` là để `fake_to_real_ratio: 1.0` tự tính — đó là định nghĩa "full".
+
+    Gõ tay một con số thì phải đoán nguồn cấp được bao nhiêu, và đoán sai là lệch lớp:
+    ingest hết 6.300 real mà chỉ sinh 4.000 fake là 1,6× nghiêng về real.
+    """
+    from aidetector.cli import main
+
+    monkeypatch.setitem(gen_base._REGISTRY, CountingClone.id, CountingClone)
+    CountingClone.calls = 0
+    corpus = tmp_path / "corpus"
+
+    # Không `--limit`: lấy mọi utterance đạt chuẩn của nguồn.
+    assert main(["ingest", str(vivos_like), "--set", f"paths.corpus={corpus}"]) == 0
+    # Không `--count`: config tự tính một fake cho mỗi real.
+    assert main(["generate", "--engines", CountingClone.id,
+                 "--set", f"paths.corpus={corpus}"]) == 0
+
+    manifest = Manifest.load(corpus, required=True)
+    reals, fakes = manifest.reals, manifest.fakes
+    assert len(reals) == 32, "8 giọng × 4 câu — phải lấy hết"
+    assert len(fakes) == len(reals), f"lệch lớp: {len(reals)} real vs {len(fakes)} fake"
+    assert {f.speaker for f in fakes} == {r.speaker for r in reals}, "thiếu giọng"
+
+
+def test_a_resumed_full_run_only_makes_the_remainder(tmp_path, vivos_like, monkeypatch):
+    """Phiên hết giờ giữa đường: vào lại phải tiếp đúng chỗ, không sinh lại gì."""
+    from aidetector.cli import main
+
+    monkeypatch.setitem(gen_base._REGISTRY, CountingClone.id, CountingClone)
+    CountingClone.calls = 0
+    corpus = tmp_path / "corpus"
+    common = ["--set", f"paths.corpus={corpus}"]
+
+    assert main(["ingest", str(vivos_like), *common]) == 0
+    # Phiên 1 bị cắt ngắn: chỉ kịp 10 mẫu.
+    assert main(["generate", "--engines", CountingClone.id, "--count", "10", *common]) == 0
+    assert CountingClone.calls == 10
+
+    # Phiên 2 chạy "full": chỉ làm phần còn nợ.
+    assert main(["generate", "--engines", CountingClone.id, *common]) == 0
+    assert CountingClone.calls == 32, "phải sinh đúng 22 mẫu còn thiếu"
+    assert len(Manifest.load(corpus, required=True).fakes) == 32
