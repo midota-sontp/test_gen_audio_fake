@@ -403,6 +403,58 @@ hàng chục nghìn file wav rời rạc thì rất chậm, nên gói vào một
 `unpack` chỉ ghi những file chưa có nên chạy lại được, và tự loại khỏi manifest các
 bản ghi thiếu audio.
 
+### Cấu trúc corpus
+
+```
+corpus/
+├── metadata.csv                    ← nguồn sự thật; `manifest.csv` (tên cũ) vẫn đọc được
+├── real/<nguồn>/<speaker>/0001.wav
+├── fake/<engine>/<speaker>/0001.wav
+└── augment/<engine|nguồn>/<speaker>/0001.wav
+```
+
+Ba tầng, giống nhau cho mọi nhãn. Tầng giữa là **nguồn** của audio (bộ dữ liệu với real,
+engine với fake); tầng ba luôn là **speaker** — kể cả fake, vì fake mang đúng speaker của
+real gốc, nên đứng ở một giọng là thấy cả hai lớp cạnh nhau.
+
+Tên file là số thứ tự trong thư mục, **cấp một lần rồi nằm trong cột `path`**. Suy lại số
+từ thứ tự duyệt sẽ phá idempotency: ingest lần sau có thể gán `0003` cho một utterance
+khác. `utt_id` vẫn là khoá chính và vẫn sinh từ `stable_id`, nên resume không đổi gì.
+
+Corpus cũ (cây `audio/<label>/…/<utt_id>.wav`) vẫn **đọc được** vì cột `path` là nguồn sự
+thật. Dọn về cây hiện hành:
+
+```bash
+python -m aidetector migrate          # idempotent; --dry-run để chỉ đếm
+```
+
+Notebook tự gọi `migrate` ngay sau `unpack`.
+
+### Nhập một bộ dữ liệu mới
+
+Cây trên cũng là định dạng trao đổi: convert một bộ dữ liệu về đó **một lần**, rồi mọi
+thứ phía sau không cần biết nó vốn có cấu trúc gì.
+
+```bash
+python -m aidetector ingest /đường/dẫn/cây-chuẩn          # tự nhận adapter `canonical`
+```
+
+Adapter `canonical` chỉ nhập phần **real**. Fake luôn do `generate` của chính pipeline
+sinh — fake nhập từ ngoài không có `ref_utt_id` nên không ghép cặp được với real nào,
+đúng thứ mà cả thiết kế corpus tránh. Muốn mang nguyên corpus (cả fake, giữ nguyên
+`utt_id`) thì dùng `pack`/`unpack`.
+
+### `MIN_SECONDS`
+
+Ngưỡng độ dài tối thiểu, áp cho **cả real và fake ở mọi stage** — ô `run` của notebook tự
+dán `--set audio.min_seconds` vào từng lệnh. Chỉ hạ cho `ingest` mà không hạ cho
+`generate` là real giữ tới 2s trong khi fake dưới 3s bị bỏ: chính độ dài thành dấu hiệu
+phân biệt hai lớp.
+
+Số đo thật trên VIVOS ở `3.0`: giữ 8.246/12.421 clip (66%), bỏ 4.175 vì quá ngắn — trong
+đó 2.865 clip vẫn dài ≥2s. Hạ xuống `2.0` lấy lại chừng đó (corpus ~11.100) và thêm khoảng
+3 giờ sinh, đổi lại mỗi clip mang ít bằng chứng hơn.
+
 #### Notebook làm việc đó tự động
 
 `DATASET_ID` ở ô setup là **một biến duy nhất** cho cả hai chiều: ô A1b nạp về từ đó, ô
@@ -460,6 +512,92 @@ phần còn thiếu — xem `--dry-run` để biết còn bao nhiêu), rồi m�
 Cần Kaggle token: [kaggle.com/settings](https://www.kaggle.com/settings) → Create New
 Token, rồi Add-ons → Secrets thêm `KAGGLE_USERNAME` và `KAGGLE_KEY`. Không có token thì
 phần đẩy tự tắt và bạn dùng đường Output → New Dataset như đoạn trên.
+
+### Flow làm việc nhiều phiên
+
+Corpus đầy đủ mất nhiều giờ GPU hơn một phiên Kaggle, nên mọi thứ dưới đây được thiết kế
+quanh một câu: **phiên sau phải tiếp được đúng chỗ phiên trước dừng, và không được đè mất
+công của nó.**
+
+#### Chuẩn bị một lần cho cả tài khoản
+
+1. [kaggle.com/settings](https://www.kaggle.com/settings) → **API Tokens** → Generate New
+   Token → chuỗi `KGAT_…`
+2. Trong notebook: **Add-ons → Secrets** → thêm `KAGGLE_API_TOKEN`, **tick attach**
+   (secret là của tài khoản nhưng attach theo từng notebook). `HF_TOKEN` là tuỳ chọn —
+   không có thì tải checkpoint bị throttle chứ không hỏng.
+3. Đặt `DATASET_ID` ở ô setup thành kho của bạn.
+
+#### Mỗi phiên — thứ tự không đổi
+
+| | Ô | Làm gì | Dừng phiên khi |
+|---|---|---|---|
+| 1 | — | **Add Input**: kho lưu trữ + bộ dữ liệu nguồn | — |
+| 2 | setup | `MODE` · `TTS_ENGINES` · `DATASET_ID` · `MIN_SECONDS` | `MODE` gõ sai |
+| 3 | A1 | quy mô (`None` = toàn bộ nguồn) | không dataset nào đọc được |
+| 4 | **A1b** | nạp kho → `migrate` → in trạng thái, cả tổng lẫn **theo từng nguồn** | kho có dữ liệu mà **không mount được**; `MODE="train"` mà không có corpus; corpus chỉ một lớp |
+| 5 | A2 | `ingest` — bỏ qua phần đã có **trước khi giải mã** | <10 real · <3 speaker · 0 transcript |
+| 6 | **A2c** | `validate --fix` — **chỉ soi phần chưa đóng dấu** | >20% corpus hỏng (lỗi hệ thống, không tự xoá) |
+| 7 | A2b | kiểm `Đồng bộ: BẬT` → chốt mốc sau ingest | — |
+| 8 | A3b | `--dry-run` → `generate` (đẩy nền mỗi speaker) | cloning hỏng khi nó là nguồn fake duy nhất |
+| 9 | A3c | đếm lại: `còn 0` ⇒ xong | — |
+| 10 | A4 | `validate` + thống kê + nghe thử + đo giống giọng/phát âm | corpus không đạt chuẩn |
+| 11 | A5 | `sync_now()` (chặn, đợi lượt nền) + `sync_log()` | — |
+| 12 | B | split → augment → features → train → evaluate | chỉ khi `DO_TRAIN` |
+
+Chuỗi điển hình: `MODE = "dataset"` vài phiên cho tới khi **A3c** báo `còn 0 phải sinh`,
+rồi một phiên `MODE = "train"`.
+
+**Trước khi thả lượt sinh nhiều giờ đầu tiên**, gọi tay `sync_now()` ngay ở A2b khi corpus
+mới chỉ có real: thấy `✔ thêm version` là đường ống thông. Đường đẩy có thể hỏng vì token,
+vì quyền, vì tên dataset — biết điều đó sau 8 giờ thì quá muộn.
+
+#### Cái gì làm cho "tiếp đúng chỗ" thành sự thật
+
+| Bước | Không lặp lại được nhờ |
+|---|---|
+| chuẩn hoá | `utt_id = stable_id(source, speaker, key)` — `ingest` bỏ qua trước khi giải mã file |
+| đánh giá | cột `checked` giữ **vân tay chuẩn audio**; đổi `MIN_SECONDS` là vân tay đổi ⇒ soi lại toàn bộ |
+| sinh fake | đối chiếu `utt_id` trong manifest; `--dry-run` đếm bằng đúng phép đếm của lượt sinh |
+| chốt tiến độ | `--after-speaker` đẩy nền ở ranh giới mỗi speaker, khoá PID chống chồng lượt |
+
+#### Cái gì bảo vệ dữ liệu cũ
+
+`kaggle datasets version` tạo ảnh chụp **toàn bộ** thư mục staging, không cộng dồn — nên
+một phiên lỡ bắt đầu từ đầu mà đẩy lên là xoá công của mọi phiên trước. Ba tầng chặn:
+
+1. **A1b dừng hẳn** khi kho có `corpus.zip`/`metadata.csv`/`progress.json` mà phiên này
+   không mount được. Chặn ở phút đầu, trước cả ingest.
+2. **Đếm trước khi đẩy**: tải `progress.json` (vài KB) so `dataset_records`; nhỏ hơn thì
+   `TỪ CHỐI ĐẨY`. Đọc không được thì không chặn — trục trặc mạng không được làm đứng lượt
+   sinh nhiều giờ.
+3. **`KEEP_OLD_VERSIONS = True`**: version cũ vẫn nằm trên Kaggle, lấy lại được từ tab
+   Data. Đặt `False` chỉ khi dung lượng thành vấn đề.
+
+Còn giữa các **nguồn** với nhau thì cách ly sẵn: `utt_id` mang tên nguồn, đường dẫn tách
+theo nguồn (`real/dataset_a/…`), và `ingest` chỉ thêm chứ không ghi đè.
+
+#### Thêm một bộ dữ liệu mới
+
+Cây chuẩn cũng là định dạng trao đổi, nên bộ dữ liệu lạ chỉ cần convert **một lần**:
+
+```bash
+python -m aidetector ingest /đường/dẫn/dataset_B --name dataset_b
+python -m aidetector validate --fix        # chỉ soi phần mới
+python -m aidetector generate --engines omnivoice
+```
+
+Trong notebook, ô A1 tự dò và chọn **một** dataset có điểm cao nhất. Muốn nạp bộ thứ hai
+thì đặt tay `RAW = "/kaggle/input/<tên>"` rồi chạy lại A2 — notebook chưa nạp nhiều nguồn
+trong một lượt. Tên nguồn mặc định lấy theo tên thư mục, nên đặt tên thư mục cho gọn hoặc
+truyền `--name`.
+
+`progress.json` tách theo nguồn, nên phiên sau nhìn một dòng là biết bộ nào đã tới đâu:
+
+```
+nguồn dataset_a            real   8246 · fake   4200 · đã duyệt   8246
+nguồn dataset_b            real   3100 · fake      0 · đã duyệt   3100
+```
 
 ## Docker (CPU-only)
 

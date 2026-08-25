@@ -101,3 +101,159 @@ def test_resamples_and_downmixes_any_input(tmp_path):
     chunk = normalize_file(path, SPEC)[0]
     assert chunk.ndim == 1
     assert 3.0 <= len(chunk) / SR <= 10.0
+
+
+# --------------------------------------------------- cấu trúc thư mục chuẩn của corpus
+def test_layout_is_label_source_speaker_index(tmp_path, vivos_like, monkeypatch):
+    """real|fake / <nguồn|engine> / <speaker> / NNNN.wav — ba tầng, giống nhau hai lớp."""
+    import numpy as np
+
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.generate import base as gen_base, generate_fakes
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    class Clone(gen_base.Generator):
+        id = "layout_spy"
+        kind = gen_base.KIND_CLONE
+        native_sample_rate = 24_000
+
+        def voices(self):
+            return []
+
+        def synthesize(self, text, voice=None, ref_audio=None, ref_text=None, language=None):
+            return np.zeros(24_000 * 4, dtype=np.float32), self.native_sample_rate
+
+    monkeypatch.setitem(gen_base._REGISTRY, Clone.id, Clone)
+    spec = AudioSpec()
+    manifest = Manifest(tmp_path / "corpus")
+    ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", spec)
+    generate_fakes(manifest, Clone.id, spec, count=8)
+
+    for rec in manifest.reals:
+        tang = rec.path.split("/")
+        assert tang[0] == "real" and tang[1] == "vivos" and tang[2] == rec.speaker
+        assert len(tang) == 4 and tang[3].endswith(".wav") and tang[3][:-4].isdigit()
+
+    for rec in manifest.fakes:
+        tang = rec.path.split("/")
+        # Tầng giữa là ENGINE, tầng ba vẫn là speaker của real gốc — nhờ vậy đứng ở một
+        # giọng là thấy cả hai lớp của giọng đó cạnh nhau.
+        assert tang[0] == "fake" and tang[1] == Clone.id and tang[2] == rec.speaker
+
+
+def test_index_is_assigned_once_and_never_reshuffled(tmp_path, vivos_like):
+    """Số thứ tự nằm trong cột `path`. Suy lại từ thứ tự duyệt là phá idempotency."""
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    spec = AudioSpec()
+    corpus = tmp_path / "corpus"
+    manifest = Manifest(corpus)
+    ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", spec)
+    manifest.save()
+    truoc = {r.utt_id: r.path for r in manifest}
+
+    # Nạp lại từ đĩa rồi ingest tiếp: bản đã có phải giữ NGUYÊN đường dẫn.
+    lai = Manifest.load(corpus, required=True)
+    ingest_source(lai, VivosAdapter(), vivos_like, "vivos", spec)
+    sau = {r.utt_id: r.path for r in lai}
+
+    assert sau == truoc, "đường dẫn bị đánh số lại giữa hai lần chạy"
+    assert len({p for p in truoc.values()}) == len(truoc), "hai bản ghi trùng đường dẫn"
+
+
+def test_overwriting_a_record_keeps_its_place(tmp_path, vivos_like):
+    """`generate --overwrite` cấp số mới là để lại file mồ côi và làm cây phình dần."""
+    import numpy as np
+
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    spec = AudioSpec()
+    manifest = Manifest(tmp_path / "corpus")
+    ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", spec)
+
+    rec = manifest.reals[0]
+    cho_cu = rec.path
+    manifest.write_audio(rec, np.zeros(spec.sample_rate * 4, dtype=np.float32), spec)
+    assert rec.path == cho_cu
+
+
+def test_migrate_moves_an_old_layout_and_is_idempotent(tmp_path, vivos_like):
+    """Cột `path` là nguồn sự thật nên corpus cũ vẫn ĐỌC được; `migrate` để dọn cho đồng nhất."""
+    from pathlib import Path
+
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    spec = AudioSpec()
+    corpus = tmp_path / "corpus"
+    manifest = Manifest(corpus)
+    ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", spec)
+
+    # Giả lập cấu trúc cũ: audio/real/<source>/<speaker>/<utt_id>.wav
+    for rec in list(manifest):
+        cu = Path("audio") / rec.path.replace(rec.path.split("/")[-1], f"{rec.utt_id}.wav")
+        (corpus / cu).parent.mkdir(parents=True, exist_ok=True)
+        (corpus / rec.path).rename(corpus / cu)
+        rec.path = str(cu)
+    manifest.save()
+
+    ket_qua = Manifest.load(corpus, required=True)
+    r1 = ket_qua.migrate_layout()
+    assert r1["moved"] == len(ket_qua) and r1["missing"] == 0
+    for rec in ket_qua:
+        assert rec.path.startswith("real/vivos/")
+        assert ket_qua.abs_path(rec).exists()
+
+    r2 = ket_qua.migrate_layout()
+    assert r2["moved"] == 0 and r2["kept"] == len(ket_qua), "chạy lại phải không xáo gì"
+
+
+def test_migrate_survives_being_interrupted(tmp_path, vivos_like):
+    """Bị ngắt giữa lúc dời file là đường mất dữ liệu thật: file ở chỗ mới, manifest
+    trỏ chỗ cũ ⇒ `prune_missing` coi là mất và loại khỏi corpus.
+
+    Manifest chỉ lưu SAU khi dời xong và phép cấp số là tất định, nên chạy lại tính ra
+    đúng những đường dẫn cũ và nhận lại phần đã dời.
+    """
+    from pathlib import Path
+
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    spec = AudioSpec()
+    corpus = tmp_path / "corpus"
+    manifest = Manifest(corpus)
+    ingest_source(manifest, VivosAdapter(), vivos_like, "vivos", spec)
+    for rec in list(manifest):
+        cu = Path("audio") / rec.path.rsplit("/", 1)[0] / f"{rec.utt_id}.wav"
+        (corpus / cu).parent.mkdir(parents=True, exist_ok=True)
+        (corpus / rec.path).rename(corpus / cu)
+        rec.path = str(cu)
+    manifest.save()
+    tong = len(manifest)
+
+    # Lượt 1 bị ngắt: dời được một nửa, manifest KHÔNG được lưu.
+    dang_do = Manifest.load(corpus, required=True)
+    nua = len(dang_do) // 2
+    for i, rec in enumerate(sorted(dang_do, key=lambda r: r.utt_id)):
+        if i >= nua:
+            break
+        moi = dang_do.allocate_path(rec)
+        (corpus / moi).parent.mkdir(parents=True, exist_ok=True)
+        (corpus / rec.path).rename(corpus / moi)
+
+    # Lượt 2 chạy lại trên manifest chưa đổi.
+    lai = Manifest.load(corpus, required=True)
+    r = lai.migrate_layout()
+    assert r["resumed"] == nua, f"không nhận lại phần đã dời: {r}"
+    assert r["missing"] == 0, "báo mất file trong khi chúng nằm ở chỗ mới"
+    assert r["moved"] == tong - nua
+    for rec in lai:
+        assert lai.abs_path(rec).exists(), rec.utt_id

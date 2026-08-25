@@ -56,6 +56,20 @@ class AudioSpec:
     clipping_max_ratio: float = 0.001  # >0.1% mẫu chạm trần ⇒ coi là clipping
 
     @property
+    def check_fingerprint(self) -> str:
+        """Vân tay của những tham số QUYẾT ĐỊNH đạt/không đạt trong `check_quality`.
+
+        Bản ghi mang vân tay này nghĩa là nó đã được soi theo đúng chuẩn đó rồi. Đổi
+        `min_seconds` là vân tay đổi ⇒ toàn corpus phải soi lại, đúng như phải thế:
+        "đã duyệt" chỉ có nghĩa khi nói rõ duyệt theo chuẩn nào.
+
+        Mức âm lượng và trim KHÔNG vào đây: chúng đổi audio lúc ingest chứ không đổi
+        kết quả của phép soi.
+        """
+        return (f"{self.sample_rate}-{self.min_seconds:g}-{self.max_seconds:g}"
+                f"-{self.clipping_threshold:g}-{self.clipping_max_ratio:g}")
+
+    @property
     def min_samples(self) -> int:
         return int(self.min_seconds * self.sample_rate)
 

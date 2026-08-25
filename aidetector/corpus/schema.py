@@ -35,6 +35,9 @@ class Record:
     augment: str = ""            # "" = bản clean gốc; vd: "noise_snr15+mp3_64k"
     parent_utt_id: str = ""      # utt gốc nếu đây là bản augment
     split: str = ""              # train | val | test | ""
+    # Vân tay chuẩn audio mà bản ghi này đã được `validate` soi qua và đạt. Rỗng = chưa
+    # soi. Nhờ cột này, phiên sau chỉ soi phần MỚI thay vì đọc lại cả corpus.
+    checked: str = ""
     schema_version: int = CORPUS_SCHEMA_VERSION
 
     # ------------------------------------------------------------------ helpers
@@ -94,20 +97,31 @@ def make_utt_id(source: str, speaker: str, key: str, chunk: int = 0) -> str:
     return f"{slugify(source, 20)}-{stable_id(source, speaker, key)}{suffix}"
 
 
-def relative_audio_path(rec: Record) -> str:
-    """Vị trí chuẩn của file audio bên trong corpus.
+def audio_folder(rec: Record) -> str:
+    """Thư mục chuẩn của một bản ghi — ba tầng, giống nhau cho mọi nhãn.
 
-        audio/real/<source>/<speaker>/<utt_id>.wav
-        audio/fake/<engine>/<voice>/<utt_id>.wav
-        audio/aug/<label>/<utt_id>.wav
+        real/<source>/<speaker>/
+        fake/<engine>/<speaker>/
+        augment/<engine|source>/<speaker>/
+
+    Tầng giữa là NGUỒN của audio: bộ dữ liệu với real, engine với fake. Tầng ba luôn là
+    speaker — kể cả fake, vì fake mang đúng speaker của real gốc. Nhờ vậy đứng ở một
+    giọng là thấy ngay cả hai lớp của giọng đó cạnh nhau.
+
+    Tên voice KHÔNG vào path (`piper:vi_VN-vais1000` chỉ lấy `piper`): một engine nhiều
+    giọng mà tách thư mục thì cây phình ra mà không ai duyệt theo chiều đó — voice vẫn
+    nằm đủ trong cột `generator`.
     """
-    if rec.augment:
-        return str(Path("audio/aug") / rec.label / f"{rec.utt_id}.wav")
-    if rec.label == LABEL_FAKE:
-        engine, _, voice = rec.generator.partition(":")
-        return str(
-            Path("audio/fake") / slugify(engine) / slugify(voice or "default") / f"{rec.utt_id}.wav"
-        )
-    return str(
-        Path("audio/real") / slugify(rec.source) / slugify(rec.speaker or "unknown") / f"{rec.utt_id}.wav"
-    )
+    nguon = rec.generator.partition(":")[0] if rec.generator else rec.source
+    tang1 = "augment" if rec.augment else rec.label
+    return "/".join((tang1, slugify(nguon or "unknown"),
+                     slugify(rec.speaker or "unknown")))
+
+
+def audio_name(index: int) -> str:
+    """Tên file: số thứ tự trong thư mục, 4 chữ số.
+
+    Số này được cấp MỘT lần rồi nằm luôn trong cột `path`, nên chạy lại không đánh số
+    lại — đó là điều kiện để ingest/generate còn idempotent. Xem `Manifest.allocate_path`.
+    """
+    return f"{index:04d}.wav"

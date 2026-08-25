@@ -22,7 +22,7 @@ from .base import (  # noqa: F401
 )
 
 # Import để các adapter tự đăng ký vào registry.
-from . import common_voice, folder, hf, vivos  # noqa: F401,E402
+from . import canonical, common_voice, folder, hf, vivos  # noqa: F401,E402
 
 log = get_logger("aidetector.ingest")
 
@@ -73,6 +73,44 @@ def _spread_by_speaker(items: Iterator[SourceItem]) -> Iterator[SourceItem]:
                 yield nxt
 
 
+def _preview(adapter: SourceAdapter, items, source_name: str, total: int | None) -> dict:
+    """Adapter đọc ra gì — đếm mà KHÔNG giải mã một file audio nào.
+
+    Adapter đọc sai cấu trúc (gộp hết vào một speaker, không thấy transcript) là hỏng
+    toàn bộ những gì phía sau: chia tập speaker-disjoint cần nhiều giọng, và fake cần
+    transcript để sinh. Biết điều đó sau khi đã giải mã 12.000 file là trả giá vô ích.
+    """
+    dem: Counter[str] = Counter()
+    co_text = 0
+    mau: list[str] = []
+    for item in items:
+        speaker = slugify(item.speaker or "unknown", 32)
+        dem[speaker] += 1
+        if item.text.strip():
+            co_text += 1
+        if len(mau) < 3:
+            mau.append(f"real/{slugify(source_name)}/{speaker}/  ← {item.key}")
+
+    tong = sum(dem.values())
+    log.info("Xem trước %s (%s): %d utterance · %d speaker · %d có transcript",
+             source_name, adapter.name, tong, len(dem), co_text)
+    for dong in mau:
+        log.info("  %s", dong)
+    if len(dem) < 3:
+        log.warning("Chỉ %d speaker — adapter %r có thể đọc sai cấu trúc thư mục. "
+                    "Chia tập speaker-disjoint cần ít nhất 3 giọng.", len(dem), adapter.name)
+    if tong and not co_text:
+        log.warning("Không utterance nào có transcript — fake sẽ phải dùng câu dự phòng "
+                    "và không ghép cặp được với real.")
+    if total and abs(total - tong) > max(1, total * 0.02):
+        log.warning("count_hint nói %d nhưng duyệt ra %d — adapter bỏ sót hoặc đếm thừa.",
+                    total, tong)
+    return {"source": source_name, "adapter": adapter.name, "items": tong,
+            "speakers": len(dem), "with_text": co_text, "kept": 0, "already": 0,
+            "dry_run": True, "drop_invalid": 0, "skip_exists": 0, "skip_no_audio": 0,
+            "skip_speaker_full": 0, "drops": {}}
+
+
 def ingest_source(
     manifest: Manifest,
     adapter: SourceAdapter,
@@ -83,6 +121,7 @@ def ingest_source(
     per_speaker: int | None = None,
     overwrite: bool = False,
     language: str = "vi",
+    dry_run: bool = False,
 ) -> dict:
     """Duyệt adapter, chuẩn hoá từng utterance rồi ghi vào corpus.
 
@@ -109,6 +148,10 @@ def ingest_source(
 
     items = adapter.iter_items(root) if root is not None else adapter.iter_items()  # type: ignore[call-arg]
     total = adapter.count_hint(root) if root is not None else None
+
+    if dry_run:
+        return _preview(adapter, items, source_name, total)
+
     if limit is not None:
         items = _spread_by_speaker(items)
 

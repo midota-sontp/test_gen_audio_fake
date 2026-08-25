@@ -122,7 +122,8 @@ def test_pack_writes_manifest_at_archive_root(corpus, tmp_path):
         names = zf.namelist()
     assert MANIFEST_NAME in names
     assert len(names) == len(corpus) + 1
-    assert all(n == MANIFEST_NAME or n.startswith("audio/") for n in names)
+    assert all(n == MANIFEST_NAME or n.split("/")[0] in ("real", "fake", "augment")
+               for n in names)
 
 
 def test_pack_can_skip_audio_for_a_metadata_only_archive(corpus, tmp_path):
@@ -545,7 +546,7 @@ def test_real_dataset_detection_is_skipped_when_only_training(notebook):
 
 # Khớp chuỗi chỉ chứng minh cái cổng CÓ MẶT. Ở đây chạy thật những ô stage với `run()`
 # giả để xem MODE cho stage nào đi qua — đó mới là điều notebook hứa.
-_STAGE_CELLS = ('run("ingest"', "*TTS_ENGINES", "xác nhận omnivoice đã ✔", '"--dry-run"',
+_STAGE_CELLS = ("INGEST_ADDED = ", "*TTS_ENGINES", "xác nhận omnivoice đã ✔", "_soluong = ",
                 "optional=bool(TTS_ENGINES)", "k2-fsa/OmniVoice", 'run("split")',
                 'run("features")', 'run("detect"')
 
@@ -556,7 +557,11 @@ def _stages_that_run(notebook, notebook_code, mode) -> set[str]:
         "MODE": mode, "sys": sys, "SMOKE": False, "SYNC_READY": False,
         "TTS_ENGINES": ["piper"], "RAW": "/tmp/khong-dung", "N_REAL": 1,
         "PER_SPEAKER": 1, "N_FAKE_TTS": 1, "N_FAKE_CLONE": 1,
-        "CORPUS": Path("/tmp/corpus-khong-ton-tai"), "SYNC_HOOK": [],
+        "CORPUS": Path("/tmp/corpus-khong-ton-tai"), "SYNC_HOOK": [], "_nguon": [],
+        # Ô A1c công bố: nguồn đã có trong kho chưa, và tên nó là gì.
+        "_da_co": 0, "SOURCE": "nguon_test", "NGUON_DA_CO": {},
+        # Helper do ô A1b định nghĩa; ở notebook nó là biến toàn cục, ở đây phải cấp.
+        "_metadata_o": lambda thu_muc: None,
         "run": lambda *args, **kw: called.append(str(args[0])),
         "pip": lambda *args, **kw: None,
         "skipped": lambda what: None,
@@ -606,8 +611,8 @@ def test_restore_prefers_the_dataset_it_pushes_to(notebook):
 
 def test_ingest_is_checkpointed_only_when_it_added_something(notebook):
     """Mốc sau ingest bịt lỗ "out lúc sinh giọng đầu"; nhưng không có gì mới thì đừng đẩy."""
-    ingest = _cell_src(notebook, 'run("ingest"')
-    assert "INGEST_ADDED = " in ingest, "phải biết ingest có thêm gì hay không"
+    ingest = _cell_src(notebook, "INGEST_ADDED = ")
+    assert 'run("ingest"' in ingest, "ô chốt mốc phải là ô ingest thật"
 
     sync = _cell_src(notebook, "SYNC_SCRIPT.write_text")
     assert "if SYNC_READY and INGEST_ADDED:" in sync
@@ -627,7 +632,9 @@ def test_sync_script_holds_its_cadence_even_when_a_push_fails(notebook):
     — hỏng liên tục thì đó là hammer, không phải retry.
     """
     script = _sync_script(notebook)
-    assert script.index("STAMP.touch()") < script.index('"kaggle"')
+    # So với lệnh ĐẨY, không với lời gọi `kaggle` đầu tiên: trước đó còn một lượt đọc
+    # manifest trên dataset để biết có được phép đẩy hay không.
+    assert script.index("STAMP.touch()") < script.index('"datasets", "version"')
     assert "STAMP.write_text" not in script, "chốt nhịp phải xảy ra trước khi thử đẩy"
 
 
@@ -718,7 +725,7 @@ def test_full_run_passes_no_quota_flags(notebook):
     a1 = _cell_src(notebook, "N_FAKE_CLONE")
     assert "= None, None, None, None" in a1, "lượt chạy thật phải mặc định không áp trần"
 
-    ingest = _cell_src(notebook, 'run("ingest"')
+    ingest = _cell_src(notebook, "_tran = [")
     assert '["--limit", N_REAL] if N_REAL else []' in ingest
     assert '["--per-speaker", PER_SPEAKER] if PER_SPEAKER else []' in ingest
 
@@ -739,7 +746,9 @@ def test_the_notebook_reads_how_far_generation_got_before_starting(notebook):
 
 def test_completion_is_confirmed_after_the_long_generation(notebook):
     """Hết phiên giữa đường là chuyện thường — phải biết còn nợ bao nhiêu."""
-    dry = _cells_with(notebook, '"--dry-run"')
+    # Chỉ tính ô đếm của bước SINH — ô A1c cũng dùng --dry-run nhưng để xem cấu trúc.
+    dry = [i for i in _cells_with(notebook, '"--dry-run"')
+           if "_soluong" in "".join(notebook["cells"][i]["source"])]
     gen = _cells_with(notebook, "optional=bool(TTS_ENGINES)")[0]
     assert len(dry) >= 2, "phải đếm cả trước và sau lượt sinh"
     assert dry[0] < gen < dry[1]
@@ -778,3 +787,192 @@ def test_both_kaggle_credential_styles_are_accepted(notebook):
 def test_the_kaggle_client_is_upgraded_before_use(notebook):
     """Image Kaggle đang có kaggle 2.0.2 — bản đó có thể chưa biết token `KGAT_`."""
     assert 'pip("-U", "kaggle"' in _cell_src(notebook, 'pip("-r", "requirements.txt")')
+
+
+def test_real_audio_is_quality_checked_before_any_fake_is_made(notebook):
+    """Với engine cloning, mỗi real là KHUÔN sinh fake.
+
+    Clip bị clipping hay gần im lặng thì fake dựng trên nó cũng là rác — phát hiện ở A4
+    nghĩa là đã tốn hàng giờ GPU. Đọc lại ~8.000 file mất một phút.
+    """
+    kiem = _cells_with(notebook, 'run("validate"')
+    sinh = _cells_with(notebook, "optional=bool(TTS_ENGINES)")[0]
+    assert len(kiem) >= 2, "phải kiểm cả trước và sau lượt sinh"
+    assert kiem[0] < sinh < kiem[1]
+    # Trước khi sinh thì dọn luôn; sau khi sinh chỉ soi real+fake, không tự xoá.
+    assert '"--fix"' in "".join(notebook["cells"][kiem[0]]["source"])
+    assert '"--fix"' not in "".join(notebook["cells"][kiem[1]]["source"])
+
+
+# ------------------------------------------ không được đè mất công của phiên trước
+def test_a_session_that_cannot_load_the_corpus_stops(notebook):
+    """`datasets version` là ảnh chụp TOÀN BỘ thư mục, không phải cộng dồn.
+
+    Phiên quên Add Input sẽ ingest lại từ đầu rồi đẩy corpus 0 fake đè lên hàng nghìn
+    fake của các phiên trước. Đi tiếp trong tình huống đó không bao giờ là điều đúng.
+    """
+    src = _cell_src(notebook, 'run("unpack"')
+    assert "_co_du_lieu" in src
+    assert "raise SystemExit(" in src
+    # Phải chặn cả hai đường biết dataset có dữ liệu: manifest rời, và hỏi API.
+    assert '"corpus.zip", "metadata.csv",' in src
+    assert src.index("_co_du_lieu = f\"{len(rows)} bản ghi") < src.index("if _co_du_lieu:")
+
+
+def test_the_push_refuses_to_shrink_the_dataset(notebook):
+    """Rào thứ hai, độc lập với ô A1b: đếm trước khi đẩy."""
+    script = _sync_script(notebook)
+    assert "def dem_tren_dataset(" in script
+    assert '"datasets", "download"' in script and '"manifest.csv"' in script
+    assert "local < remote" in script
+    assert script.index("local < remote") < script.index('"datasets", "version"')
+    # Chặn được thì phải mở được: người dùng có thể thật sự muốn thu nhỏ.
+    assert "--allow-shrink" in script
+    # Đọc không được thì KHÔNG chặn — trục trặc mạng không được làm đứng lượt sinh.
+    assert "remote is not None and local < remote" in script
+
+
+def test_progress_state_is_uploaded_with_every_version(notebook):
+    """Trạng thái phải nằm TRONG chính version đó, không suy ra từ nơi khác.
+
+    progress.json vài KB nên đọc được trên trang dataset và tải riêng được — manifest
+    của corpus đầy đủ là vài MB, còn corpus.zip là vài GB.
+    """
+    script = _sync_script(notebook)
+    assert '"progress"' in script and '"progress.json"' in script
+    # Sinh TRƯỚC khi đẩy, để nó luôn khớp với corpus.zip cùng version.
+    assert script.index('"progress.json"') < script.index('"datasets", "version"')
+    # Rào chặn đọc nó trước, manifest.csv chỉ là đường lùi cho version cũ.
+    # progress.json thử trước; metadata/manifest chỉ là đường lùi cho version cũ.
+    assert script.index('tai_ve("progress.json")') < script.index('"metadata.csv", "manifest.csv"')
+
+
+def test_the_resume_cell_reads_the_recorded_speaker_progress(notebook):
+    src = _cell_src(notebook, 'run("unpack"')
+    assert '_find("progress.json")' in src
+    assert "speakers_done" in src and "speakers_todo" in src
+
+
+def test_min_seconds_is_one_knob_applied_to_every_stage(notebook, notebook_code):
+    """Chuẩn độ dài phải giống nhau ở mọi stage.
+
+    Hạ ngưỡng cho `ingest` mà không hạ cho `generate` là real giữ tới 2s trong khi fake
+    dưới 3s bị bỏ — chính độ dài thành dấu hiệu phân biệt hai lớp.
+    """
+    assert notebook_code.count("MIN_SECONDS = ") == 1, "khai báo trùng ⇒ hai chuẩn"
+    dat = _cells_with(notebook, "MIN_SECONDS = ")[0]
+    chay = _cells_with(notebook, "def run(")[0]
+
+    src = _cell_src(notebook, "def run(")
+    assert 'audio.min_seconds={_ms}' in src
+    # `run` đọc biến lúc GỌI nên khai báo sau cũng được; không được đọc lúc định nghĩa.
+    assert 'globals().get("MIN_SECONDS")' in src
+    assert chay < dat, "run phải sẵn sàng trước khi ô đặt hằng số chạy"
+
+    # Không stage nào được tự đặt ngưỡng riêng.
+    rieng = [i for i, c in enumerate(notebook["cells"])
+             if c["cell_type"] == "code" and "audio.min_seconds" in "".join(c["source"])]
+    assert rieng == [chay, dat] or rieng == [chay], rieng
+
+
+def test_the_upload_folder_is_wiped_before_each_push(notebook):
+    """`datasets version` đẩy MỌI file trong thư mục staging.
+
+    Một file sót lại từ lượt trước (vd manifest.csv tên cũ) sẽ lên dataset kèm theo và
+    nằm đó mãi.
+    """
+    script = _sync_script(notebook)
+    assert "shutil.rmtree(STAGE" in script
+    assert script.index("shutil.rmtree(STAGE") < script.index('"pack"')
+
+
+def test_sync_prefers_the_current_metadata_name(notebook):
+    """Có cả hai tên thì phải lấy bản MỚI, ở cả hai chiều nạp và đẩy."""
+    a1b = _cell_src(notebook, 'run("unpack"')
+    assert '_find("metadata.csv") or _find("manifest.csv")' in a1b, "nối danh sách là lấy nhầm bản cũ"
+
+    script = _sync_script(notebook)
+    assert script.index('"metadata.csv"') < script.index('"manifest.csv"')
+    assert 'STAGE / "metadata.csv"' in script
+
+
+def test_an_empty_corpus_is_skipped_not_crashed(notebook):
+    """Đẩy khi chưa có corpus phải là bỏ lượt, không phải StopIteration trần trụi."""
+    script = _sync_script(notebook)
+    assert "goc_local is None" in script
+    assert script.index("goc_local is None") < script.index('"pack"')
+
+
+def test_the_resumed_corpus_is_migrated_to_the_current_layout(notebook):
+    """Corpus phiên trước có thể còn cây cũ; `migrate` giữ nguyên utt_id nên không sinh lại gì."""
+    # `migrate` là một bước RIÊNG (ô A1d), không chôn trong ô nạp corpus — nó là tầng
+    # convert cấu trúc, phải nhìn thấy được và chạy lại được một mình.
+    assert _cells_with(notebook, 'run("unpack"')[0] < _cells_with(notebook, 'run("migrate")')[0]
+    assert _cells_with(notebook, 'run("migrate")')[0] < _cells_with(notebook, "INGEST_ADDED = ")[0]
+
+
+# ---------------------------------- convert (dataset lạ) và migrate (corpus cũ) tách đôi
+def test_structure_conversion_is_previewed_before_paying_for_it(notebook):
+    """Adapter đọc sai cấu trúc là hỏng mọi thứ phía sau — và ingest 12.000 file mới biết
+    là trả giá vô ích. Ô xem trước không giải mã file nào."""
+    idx = [i for i in _cells_with(notebook, 'run("ingest"')
+           if '"--dry-run"' in "".join(notebook["cells"][i]["source"])]
+    assert idx, "thiếu ô xem trước cấu trúc"
+    assert idx[0] < _cells_with(notebook, "INGEST_ADDED = ")[0], "phải xem trước khi nạp thật"
+
+
+def test_the_convert_cell_is_the_only_place_that_knows_the_input_layout(notebook):
+    """Mỗi bộ dữ liệu có cấu trúc riêng, và ô convert là chỗ DUY NHẤT được biết điều đó.
+
+    Ba mức: adapter tự dò · chỉ định adapter · dev viết hàm CONVERT ngay trong ô. Mọi
+    bước sau làm việc trên cây chuẩn và không cần biết dữ liệu vốn nằm thế nào.
+    """
+    src = _cell_src(notebook, "CONVERT = None")
+    for phai_co in ("SOURCE = ", "def CONVERT(raw, out)", '_nguon = ["--name", SOURCE]'):
+        assert phai_co in src, f"ô convert thiếu {phai_co!r}"
+    # Convert chỉ dựng lại CẤU TRÚC; chuẩn hoá audio là việc của ingest, làm hai lần là
+    # bào mòn tín hiệu (trim ăn dần, clip sát ngưỡng rơi khỏi cửa sổ độ dài).
+    assert "KHÔNG chuẩn hoá audio" in src
+
+    # Và nó phải chạy TRƯỚC ingest, đồng thời quyết định adapter mà ingest dùng.
+    convert = _cells_with(notebook, "CONVERT = None")[0]
+    ingest = _cells_with(notebook, "INGEST_ADDED = ")[0]
+    assert convert < ingest
+    assert "*_nguon" in "".join(notebook["cells"][ingest]["source"])
+
+
+def test_migrate_is_its_own_step(notebook):
+    """Tầng convert cấu trúc phải nhìn thấy được và chạy lại được một mình."""
+    o_migrate = _cells_with(notebook, 'run("migrate")')
+    assert len(o_migrate) == 1
+    src = "".join(notebook["cells"][o_migrate[0]]["source"]).strip()
+    assert src == 'run("migrate")', f"ô migrate phải chỉ làm một việc: {src!r}"
+
+
+def test_convert_is_skipped_when_the_store_already_has_the_source(notebook):
+    """Convert là bước tốn kém nhất (chép hàng nghìn file) và kết quả không đổi.
+
+    Kho đã có nguồn đó thì cả convert lẫn ingest đều phải bỏ qua — hỏi kho trước, làm sau.
+    """
+    a1b = _cell_src(notebook, 'run("unpack"')
+    assert "NGUON_DA_CO = {}" in a1b, "A1b phải công bố nguồn nào đã có trong kho"
+    assert "NGUON_DA_CO[_r.source]" in a1b
+
+    convert = _cell_src(notebook, "CONVERT = None")
+    assert "_da_co = NGUON_DA_CO.get(SOURCE, 0)" in convert
+    # Hỏi kho TRƯỚC khi gọi CONVERT, không phải sau.
+    assert convert.index("_da_co = ") < convert.index("CONVERT(Path(RAW)")
+    assert "BỎ QUA convert" in convert
+
+    ingest = _cell_src(notebook, "INGEST_ADDED = ")
+    assert "elif _da_co:" in ingest, "ingest cũng phải bỏ qua khi kho đã có nguồn"
+
+
+def test_a_converted_tree_is_checked_against_the_input_standard(notebook):
+    """Dev viết CONVERT ⇒ dev viết sai được. Cây sai chuẩn thì mọi bước sau vô nghĩa."""
+    src = _cell_src(notebook, "CONVERT = None")
+    assert 'raise SystemExit("CONVERT dựng ra cây sai chuẩn' in src
+    for dieu_kien in ("real/<nguồn>/<speaker>/*.wav", "ít nhất 3", "phải khớp SOURCE"):
+        assert dieu_kien in src, f"thiếu phép kiểm: {dieu_kien}"
+    # Kiểm CẤU TRÚC thôi — chất lượng audio là việc của `validate` ở A2c.
+    assert "chất lượng audio là việc của `validate`" in src

@@ -41,7 +41,7 @@ def test_ingest_normalises_everything(corpus):
         assert 3.0 <= rec.duration <= 10.0
         assert rec.text                     # prompts.txt đã được ghép vào
         assert corpus.abs_path(rec).exists()
-        assert rec.path.startswith("audio/real/vivos/")
+        assert rec.path.startswith("real/vivos/")
 
 
 def test_ingest_is_idempotent(corpus, vivos_like):

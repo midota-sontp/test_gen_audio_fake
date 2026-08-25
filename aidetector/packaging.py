@@ -14,7 +14,7 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from .corpus.manifest import MANIFEST_NAME, Manifest
+from .corpus.manifest import LEGACY_MANIFEST_NAME, MANIFEST_NAME, Manifest, find_manifest
 from .utils import ensure_dir, get_logger, progress
 
 log = get_logger("aidetector.packaging")
@@ -39,7 +39,8 @@ def pack_corpus(
     mode = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
     missing = 0
     with zipfile.ZipFile(out_path, "w", mode, allowZip64=True) as zf:
-        zf.write(corpus_root / MANIFEST_NAME, MANIFEST_NAME)
+        # Gói luôn dùng tên mới, kể cả khi corpus trên đĩa còn tên cũ.
+        zf.write(find_manifest(corpus_root), MANIFEST_NAME)
         if include_audio:
             for rec in progress(list(manifest), total=len(manifest), label="pack"):
                 src = corpus_root / rec.path
@@ -62,8 +63,12 @@ def unpack_corpus(zip_path: str | Path, corpus_root: str | Path, overwrite: bool
 
     with zipfile.ZipFile(zip_path) as zf:
         names = zf.namelist()
-        if MANIFEST_NAME not in names:
-            raise ValueError(f"{zip_path} không phải gói corpus: thiếu {MANIFEST_NAME}")
+        # Chấp cả tên cũ: mọi corpus.zip đã đẩy lên Kaggle ở các phiên trước dùng nó,
+        # và từ chối đọc chúng nghĩa là vứt bỏ hàng giờ GPU đã trả.
+        if not ({MANIFEST_NAME, LEGACY_MANIFEST_NAME} & set(names)):
+            raise ValueError(
+                f"{zip_path} không phải gói corpus: thiếu {MANIFEST_NAME}"
+            )
         todo = names if overwrite else [n for n in names if not (corpus_root / n).exists()]
         log.info("Bung %d / %d mục vào %s", len(todo), len(names), corpus_root)
         for name in progress(todo, total=len(todo), label="unpack"):

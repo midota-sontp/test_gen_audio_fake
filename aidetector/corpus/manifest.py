@@ -11,12 +11,23 @@ from typing import Iterable, Iterator
 import numpy as np
 
 from ..utils import ensure_dir, get_logger
-from .schema import COLUMNS, LABEL_FAKE, LABEL_REAL, Record, relative_audio_path
+from .schema import COLUMNS, LABEL_FAKE, LABEL_REAL, Record, audio_folder, audio_name
 from .spec import AudioSpec, DEFAULT_SPEC, save_audio
 
 log = get_logger("aidetector.corpus.manifest")
 
-MANIFEST_NAME = "manifest.csv"
+MANIFEST_NAME = "metadata.csv"
+#: Tên cũ, vẫn đọc được. Corpus đã đóng gói ở các phiên trước dùng tên này, và bỏ đọc nó
+#: nghĩa là mọi corpus.zip đang có trên Kaggle thành rác.
+LEGACY_MANIFEST_NAME = "manifest.csv"
+
+
+def find_manifest(root: Path) -> Path | None:
+    """File metadata của corpus, ưu tiên tên mới."""
+    for name in (MANIFEST_NAME, LEGACY_MANIFEST_NAME):
+        if (root / name).exists():
+            return root / name
+    return None
 
 
 class Manifest:
@@ -29,6 +40,9 @@ class Manifest:
     def __init__(self, root: str | Path, records: Iterable[Record] = ()) -> None:
         self.root = Path(root)
         self._records: dict[str, Record] = {r.utt_id: r for r in records}
+        # Số cuối đã cấp cho mỗi thư mục. Dựng lười vì corpus lớn thì quét toàn bộ chỉ
+        # để ghi một file là phí; cấp xong thì số nằm trong `path`, không tính lại.
+        self._so_cuoi: dict[str, int] = {}
 
     # -------------------------------------------------------------- vào/ra đĩa
     @property
@@ -38,8 +52,9 @@ class Manifest:
     @classmethod
     def load(cls, root: str | Path, required: bool = False) -> "Manifest":
         root = Path(root)
-        path = root / MANIFEST_NAME
-        if not path.exists():
+        path = find_manifest(root)
+        if path is None:
+            path = root / MANIFEST_NAME
             if required:
                 raise FileNotFoundError(
                     f"Chưa có {path}. Hãy chạy `python -m aidetector ingest ...` trước."
@@ -113,17 +128,87 @@ class Manifest:
         return self.root / rec.path
 
     # ------------------------------------------------- ghi audio đúng chuẩn
+    def allocate_path(self, rec: Record) -> str:
+        """Cấp đường dẫn cho một bản ghi MỚI: thư mục chuẩn + số thứ tự kế tiếp.
+
+        Số cấp một lần rồi lưu trong cột `path`; lần chạy sau đọc lại chứ không suy ra
+        từ thứ tự duyệt. Không tái sử dụng số đã cấp kể cả khi bản ghi bị xoá — số cũ
+        trỏ tới file cũ trên đĩa, dùng lại là hai bản ghi cùng một file.
+        """
+        folder = audio_folder(rec)
+        if folder not in self._so_cuoi:
+            lon_nhat = 0
+            for r in self._records.values():
+                if r.path.startswith(folder + "/"):
+                    stem = Path(r.path).stem
+                    if stem.isdigit():
+                        lon_nhat = max(lon_nhat, int(stem))
+            self._so_cuoi[folder] = lon_nhat
+        self._so_cuoi[folder] += 1
+        return f"{folder}/{audio_name(self._so_cuoi[folder])}"
+
     def write_audio(
         self, rec: Record, audio: np.ndarray, spec: AudioSpec = DEFAULT_SPEC
     ) -> Record:
         """Ghi mảng audio vào đúng vị trí chuẩn, cập nhật metadata rồi thêm vào manifest."""
-        rec.path = relative_audio_path(rec)
+        # Ghi đè bản ghi đã có (vd `generate --overwrite`) thì giữ nguyên chỗ cũ: cấp số
+        # mới là để lại một file mồ côi và làm cây phình sau mỗi lượt chạy lại.
+        cu = self._records.get(rec.utt_id)
+        rec.path = cu.path if (cu is not None and cu.path) else self.allocate_path(rec)
         rec.duration = round(len(audio) / spec.sample_rate, 3)
         rec.sample_rate = spec.sample_rate
         rec.channels = spec.channels
         save_audio(self.root / rec.path, audio, spec)
         self.add(rec)
         return rec
+
+    def migrate_layout(self, dry_run: bool = False) -> dict:
+        """Đưa mọi bản ghi về đúng cấu trúc thư mục hiện hành, giữ nguyên `utt_id`.
+
+        Cột `path` là nguồn sự thật nên corpus cũ vẫn ĐỌC được mà không cần chuyển; hàm
+        này để dọn cho đồng nhất một cây duy nhất. Idempotent: bản ghi đã đúng chỗ thì
+        giữ nguyên số cũ, chạy lại lần hai không xáo lại gì.
+        """
+        dung_cho: list[Record] = []
+        self._so_cuoi = {}
+        for rec in sorted(self._records.values(), key=lambda r: r.utt_id):
+            folder = audio_folder(rec)
+            p = Path(rec.path)
+            if p.parent.as_posix() == folder and p.stem.isdigit():
+                self._so_cuoi[folder] = max(self._so_cuoi.get(folder, 0), int(p.stem))
+            else:
+                dung_cho.append(rec)
+
+        # Manifest chỉ được lưu SAU khi mọi file đã dời xong, và phép cấp số ở trên là
+        # tất định (duyệt theo utt_id, `_so_cuoi` dựng từ chính các bản ghi đã đúng chỗ).
+        # Nhờ hai điều đó, bị ngắt giữa chừng thì manifest còn nguyên ⇒ chạy lại tính ra
+        # ĐÚNG những đường dẫn cũ, và nhánh "nguồn mất nhưng đích đã có" nhận ra phần đã
+        # dời để bỏ qua. Lưu dở giữa chừng mới là thứ phá được tính tất định đó.
+        chuyen = thieu = tiep_tuc = 0
+        for rec in dung_cho:
+            cu = self.root / rec.path
+            moi = self.allocate_path(rec)
+            dich = self.root / moi
+            if not cu.exists():
+                if dich.exists():
+                    tiep_tuc += 1       # lượt trước đã dời file này rồi
+                    rec.path = moi
+                    continue
+                thieu += 1
+                rec.path = moi          # file mất thật; prune_missing sẽ dọn nếu cần
+                continue
+            if not dry_run:
+                dich.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(cu, dich)
+            rec.path = moi
+            chuyen += 1
+        if tiep_tuc:
+            log.info("Nhận lại %d file đã dời ở lượt bị ngắt trước", tiep_tuc)
+
+        log.info("Chuyển cấu trúc: %d bản ghi đã đúng chỗ · %d chuyển · %d thiếu file",
+                 len(self._records) - len(dung_cho), chuyen, thieu)
+        return {"kept": len(self._records) - len(dung_cho), "moved": chuyen,
+                "resumed": tiep_tuc, "missing": thieu}
 
     def prune_missing(self) -> int:
         """Bỏ các bản ghi trỏ tới file không còn tồn tại."""

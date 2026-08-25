@@ -88,7 +88,10 @@ def cmd_ingest(args) -> int:
             limit=args.limit, per_speaker=args.per_speaker,
             overwrite=args.overwrite,
             language=cfg.get("language", "vi"),
+            dry_run=args.dry_run,
         )
+    if args.dry_run:
+        return 0
     manifest.save()
     print(manifest.summary())
     # Nguồn đã đủ theo `--limit` thì không nạp gì là ĐÚNG, không phải lỗi: phiên sau
@@ -343,12 +346,22 @@ def cmd_validate(args) -> int:
         log.error("Corpus rỗng.")
         return 2
 
-    log.info("Kiểm tra %d bản ghi theo chuẩn: %s", len(manifest), spec.describe())
+    # Bản ghi đã soi qua ĐÚNG chuẩn này rồi thì bỏ qua: soi lại là đọc lại từng file
+    # audio của cả corpus mỗi phiên, trong khi phần đã duyệt không thể đổi kết quả.
+    # Đổi chuẩn ⇒ vân tay đổi ⇒ mọi bản ghi tự động được soi lại.
+    van_tay = spec.check_fingerprint
+    can_soi = [r for r in manifest if args.recheck or r.checked != van_tay]
+    da_duyet = len(manifest) - len(can_soi)
+    log.info("Kiểm tra %d bản ghi theo chuẩn: %s", len(can_soi), spec.describe())
+    if da_duyet:
+        log.info("Bỏ qua %d bản ghi đã duyệt theo đúng chuẩn này (dùng --recheck để soi lại)",
+                 da_duyet)
     issues: Counter[str] = Counter()
     broken: list[str] = []
+    vua_duyet = 0
     from .utils import progress
 
-    for rec in progress(list(manifest), total=len(manifest), label="validate"):
+    for rec in progress(can_soi, total=len(can_soi), label="validate"):
         path = manifest.abs_path(rec)
         if not path.exists():
             issues["missing_file"] += 1
@@ -360,25 +373,189 @@ def cmd_validate(args) -> int:
             issues["unreadable"] += 1
             broken.append(rec.utt_id)
             continue
-        for issue in check_quality(audio, spec, rec.utt_id):
+        loi = check_quality(audio, spec, rec.utt_id)
+        for issue in loi:
             issues[issue.code] += 1
             broken.append(rec.utt_id)
-        for err in rec.validate():
+        loi_schema = rec.validate()
+        for err in loi_schema:
             issues[f"schema:{err.split(':')[0]}"] += 1
+            # Trước đây lỗi schema chỉ được ĐẾM: `--fix` không dọn được nó, nên corpus
+            # dính một bản ghi sai schema là `validate` đỏ vĩnh viễn và ô A4 dừng
+            # notebook sau nhiều giờ sinh, không có đường ra ngoài sửa tay manifest.
+            broken.append(rec.utt_id)
+        # Đóng dấu chỉ khi đạt CẢ HAI. Đóng dấu một bản ghi sai schema là lần sau nó
+        # được bỏ qua, không ai soi nữa, và `--fix` không bao giờ chạm tới nó.
+        if not loi and not loi_schema:
+            rec.checked = van_tay      # đóng dấu để phiên sau khỏi đọc lại file này
+            vua_duyet += 1
+
+    # Dấu vừa đóng phải xuống đĩa, nếu không phiên sau lại đọc lại toàn bộ.
+    if vua_duyet:
+        manifest.save()
+        log.info("Đã đóng dấu %d bản ghi đạt chuẩn", vua_duyet)
 
     print(manifest.summary())
     if issues:
         print("\nVấn đề phát hiện được:")
         for code, count in issues.most_common():
             print(f"  {code:<20} {count}")
-        print(f"\n{len(set(broken))} bản ghi không đạt chuẩn.")
+        hong = set(broken)
+        # Giữ lại bản ghi TRƯỚC khi loại, để `--prune-files` còn biết file nằm đâu.
+        cu_the = {u: manifest.get(u) for u in hong}
+        print(f"\n{len(hong)} bản ghi không đạt chuẩn.")
         if args.fix:
-            for utt_id in set(broken):
+            # Hỏng cả một mảng lớn thì nguyên nhân nằm ở chuỗi chuẩn hoá, ở adapter, hay
+            # ở chính spec — không phải vài file xấu. Tự loại lúc đó là xoá corpus mà
+            # tưởng mình đang dọn dẹp.
+            ty_le = len(hong) / max(len(manifest), 1)
+            if ty_le > 0.2 and not args.force:
+                log.error(
+                    "%.0f%% corpus không đạt chuẩn — mức đó là lỗi hệ thống, không phải "
+                    "dữ liệu xấu lẻ tẻ. KHÔNG tự loại; tìm nguyên nhân trước, hoặc "
+                    "--force nếu đây đúng là chủ ý.",
+                    100 * ty_le,
+                )
+                return 1
+            # Bản ghi TỪNG đạt một chuẩn khác mà giờ không đạt chuẩn hiện tại nghĩa
+            # là chuẩn vừa đổi, không phải dữ liệu vừa hỏng. Siết `MIN_SECONDS` rồi để
+            # `--fix` lặng lẽ xoá phần không còn lọt là mất dữ liệu mà không ai quyết.
+            tung_dat = [u for u in hong
+                        if (r := manifest.get(u)) is not None and r.checked
+                        and r.checked != van_tay]
+            if tung_dat and not args.force:
+                log.error(
+                    "%d bản ghi từng đạt chuẩn KHÁC giờ không đạt chuẩn hiện tại (%s). "
+                    "Đổi chuẩn là một quyết định, không phải dọn rác — thêm --force nếu "
+                    "thật sự muốn loại chúng.", len(tung_dat), spec.describe(),
+                )
+                return 1
+            for utt_id in hong:
                 manifest.remove(utt_id)
             manifest.save()
-            print(f"Đã loại {len(set(broken))} bản ghi khỏi manifest (--fix).")
+            print(f"Đã loại {len(hong)} bản ghi khỏi manifest (--fix).")
+            if args.prune_files:
+                # Không xoá mặc định: bản ghi bị loại vì chuẩn có thể được nhận lại khi
+                # chuẩn đổi, và file đã xoá thì phải ingest lại từ nguồn. Nhưng để đó thì
+                # mỗi phiên `ingest` nạp lại rồi cấp số MỚI, tích dần file mồ côi.
+                xoa = 0
+                for utt_id in hong:
+                    r = cu_the.get(utt_id)
+                    if r is None:
+                        continue
+                    f = Path(manifest.root) / r.path
+                    if f.exists():
+                        f.unlink()
+                        xoa += 1
+                print(f"Đã xoá {xoa} file audio (--prune-files).")
+            # Đã dọn xong thì corpus đạt chuẩn — trả 0, nếu không phía gọi (notebook)
+            # sẽ dừng cả phiên ngay sau khi việc đã được sửa.
+            return 0
         return 1
     print("\n✔ Toàn bộ corpus đạt chuẩn.")
+    return 0
+
+
+def cmd_progress(args) -> int:
+    """Đã sinh fake xong tới speaker nào — trạng thái để nối tiếp giữa các phiên.
+
+    Đơn vị là SPEAKER vì đó là ranh giới `generate` chốt tiến độ (xem `--after-speaker`).
+    Đích của một speaker là số utterance real của giọng đó **đủ điều kiện làm khuôn**:
+    có transcript và lọt bộ lọc số từ. Lấy mẫu số là mọi real thì tiến độ không bao giờ
+    tới 100% và người đọc tưởng còn nợ.
+
+    Ghi ra JSON để đẩy kèm dataset: nó vài KB, đọc được ngay trên trang dataset, và là
+    thứ phiên sau so sánh trước khi quyết định có được đẩy đè hay không.
+    """
+    from collections import defaultdict
+
+    from .generate.texts import is_usable
+
+    cfg, manifest, _ = _load(args)
+    min_w = int(cfg.get("generate.min_words", 6))
+    max_w = int(cfg.get("generate.max_words", 40))
+
+    khuon: dict[str, list] = defaultdict(list)
+    for rec in manifest.reals:
+        if not rec.augment and rec.text and is_usable(rec.text, min_w, max_w):
+            khuon[rec.speaker].append(rec)
+    co_fake = {f.ref_utt_id for f in manifest.fakes if not f.augment}
+
+    xong: list[str] = []
+    dang_do: dict[str, dict] = {}
+    chua: list[str] = []
+    for spk in sorted(khuon):
+        dich = len(khuon[spk])
+        da = sum(1 for r in khuon[spk] if r.utt_id in co_fake)
+        if da >= dich:
+            xong.append(spk)
+        elif da:
+            dang_do[spk] = {"fake": da, "target": dich}
+        else:
+            chua.append(spk)
+
+    tong_dich = sum(len(v) for v in khuon.values())
+    tong_da = sum(1 for recs in khuon.values() for r in recs if r.utt_id in co_fake)
+    state = {
+        "dataset_records": len(manifest),
+        "real": len(manifest.reals),
+        "fake": len(manifest.fakes),
+        "targets_total": tong_dich,
+        "targets_done": tong_da,
+        "speakers_total": len(khuon),
+        "speakers_done": xong,
+        "speakers_partial": dang_do,
+        "speakers_todo": chua,
+        "engines": {},
+        # Tách theo NGUỒN: phiên sau hỏi "dataset_A đã có trên kho chưa, duyệt tới đâu"
+        # mà không phải tải cả manifest về đọc.
+        "by_source": {},
+    }
+    for rec in manifest:
+        if rec.augment:
+            continue
+        o = state["by_source"].setdefault(rec.source or "?",
+                                          {"real": 0, "fake": 0, "approved": 0})
+        o["fake" if rec.is_fake else "real"] += 1
+        if rec.checked:
+            o["approved"] += 1
+    for f in manifest.fakes:
+        if not f.augment:
+            state["engines"][f.generator] = state["engines"].get(f.generator, 0) + 1
+
+    print(f"Tiến độ sinh fake: {tong_da}/{tong_dich} khuôn"
+          f" ({100 * tong_da / max(tong_dich, 1):.0f}%)")
+    print(f"Speaker: {len(xong)} xong · {len(dang_do)} dở dang · {len(chua)} chưa động tới"
+          f"  (tổng {len(khuon)})")
+    if chua:
+        print("  chưa động tới: " + ", ".join(chua[:8]) + ("…" if len(chua) > 8 else ""))
+    if dang_do:
+        vai = list(dang_do.items())[:5]
+        print("  dở dang: " + " · ".join(f"{s} {v['fake']}/{v['target']}" for s, v in vai))
+    for ten, o in sorted(state["by_source"].items()):
+        print(f"  nguồn {ten:<24} real {o['real']:>6} · fake {o['fake']:>6}"
+              f" · đã duyệt {o['approved']:>6}")
+
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(state, ensure_ascii=False, indent=1),
+                                  encoding="utf-8")
+        print(f"→ {args.out}")
+    return 0
+
+
+def cmd_migrate(args) -> int:
+    """Dọn corpus về đúng cấu trúc thư mục hiện hành."""
+    _, manifest, _ = _load(args)
+    if not len(manifest):
+        log.error("Corpus rỗng.")
+        return 2
+    with timed("migrate", log):
+        result = manifest.migrate_layout(dry_run=args.dry_run)
+    if not args.dry_run and result["moved"]:
+        manifest.save()
+    print(f"Đúng chỗ sẵn: {result['kept']} · chuyển: {result['moved']}"
+          f" · nhận lại từ lượt ngắt: {result['resumed']} · thiếu file: {result['missing']}")
     return 0
 
 
@@ -513,6 +690,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hf-config", default=None)
     p.add_argument("--limit", type=int, help="tối đa bao nhiêu utterance")
     p.add_argument("--per-speaker", type=int, help="tối đa bao nhiêu utterance mỗi speaker")
+    p.add_argument("--dry-run", action="store_true",
+                   help="xem adapter đọc ra gì, không giải mã và không ghi corpus")
     p.set_defaults(func=cmd_ingest)
 
     p = sub.add_parser("generate", parents=[common], help="sinh FAKE dataset bằng TTS/voice cloning")
@@ -558,7 +737,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("validate", parents=[common], help="kiểm tra corpus có đúng chuẩn không")
     p.add_argument("--fix", action="store_true", help="loại bỏ bản ghi hỏng khỏi manifest")
+    p.add_argument("--recheck", action="store_true",
+                   help="soi lại cả những bản ghi đã duyệt theo đúng chuẩn hiện tại")
+    p.add_argument("--force", action="store_true",
+                   help="cho phép --fix loại cả bản ghi từng đạt một chuẩn khác")
+    p.add_argument("--prune-files", action="store_true",
+                   help="xoá luôn file audio của bản ghi bị --fix loại")
     p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser("migrate", parents=[common],
+                       help="dọn corpus về đúng cấu trúc thư mục hiện hành")
+    p.add_argument("--dry-run", action="store_true", help="chỉ đếm, không di chuyển file")
+    p.set_defaults(func=cmd_migrate)
+
+    p = sub.add_parser("progress", parents=[common],
+                       help="đã sinh fake xong tới speaker nào (trạng thái nối tiếp)")
+    p.add_argument("--out", help="ghi trạng thái ra file JSON")
+    p.set_defaults(func=cmd_progress)
 
     p = sub.add_parser("pack", parents=[common], help="gói corpus thành 1 file zip (Kaggle/Colab)")
     p.add_argument("--out", help="đường dẫn zip đầu ra (mặc định: <thư mục làm việc>/corpus.zip)")

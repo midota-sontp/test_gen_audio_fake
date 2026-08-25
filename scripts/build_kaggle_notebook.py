@@ -197,8 +197,17 @@ CFG = "configs/kaggle.yaml"
 def run(*args, optional=False):
     import subprocess
 
-    cmd = [sys.executable, "-m", "aidetector", *[str(a) for a in args], "-c", CFG]
-    print("$ python -m aidetector " + " ".join(str(a) for a in args) + f" -c {{CFG}}\\n")
+    # Chuẩn audio phải giống nhau ở MỌI stage. Chỉ hạ min_seconds cho `ingest` mà không
+    # hạ cho `generate` là real được giữ tới 2s trong khi fake dưới 3s bị bỏ — chính độ
+    # dài thành dấu hiệu phân biệt hai lớp, đúng thứ chuỗi chuẩn hoá này tồn tại để bịt.
+    chuan = []
+    _ms = globals().get("MIN_SECONDS")
+    if _ms:
+        chuan = ["--set", f"audio.min_seconds={{_ms}}"]
+
+    cmd = [sys.executable, "-m", "aidetector", *[str(a) for a in args], *chuan, "-c", CFG]
+    print("$ python -m aidetector " + " ".join(str(a) for a in [*args, *chuan])
+          + f" -c {{CFG}}\\n")
     if subprocess.run(cmd).returncode == 0:
         return True
     if optional:
@@ -242,6 +251,17 @@ MODE = "both"
 # lại từ đây. Khai báo một chỗ duy nhất — A1b (nạp) và A2b (đẩy) đều đọc biến này, để
 # không bao giờ có chuyện đẩy lên một dataset mà nạp về từ một dataset khác.
 DATASET_ID = "sonpham12/vivos-fake-v2"
+
+# Ngưỡng độ dài tối thiểu của một clip, áp cho CẢ real và fake ở mọi stage (ô `run`
+# ở trên tự dán `--set audio.min_seconds` vào từng lệnh).
+#
+# Số đo thật trên VIVOS: ở 3.0 giữ 8.246/12.421 clip (66%), bỏ 4.175 vì quá ngắn — trong
+# đó 2.865 clip vẫn dài ≥2s. Hạ xuống 2.0 lấy lại chừng đó, tức corpus ~11.100 và thêm
+# khoảng 3 giờ sinh. Đổi lại mỗi clip mang ít bằng chứng hơn cho mô hình.
+#
+# ĐỪNG đổi `short_policy` sang "pad": real bị đệm im lặng trong khi fake (~4s) thì không
+# — đó là tự tạo ra dấu hiệu phân biệt hai lớp.
+MIN_SECONDS = 3.0
 
 # Piper/Kokoro đang TẮT: giọng cố định, mô hình bắt ở EER 0.00% nên không dạy được gì,
 # chỉ làm loãng dataset. Bật lại bằng: TTS_ENGINES = ["piper", "kokoro"]
@@ -415,16 +435,48 @@ def _find(name):
     return (sorted(glob.glob(f"/kaggle/input/{slug}/**/{name}", recursive=True))
             or sorted(glob.glob(f"/kaggle/input/**/{name}", recursive=True)))
 
-_mounted = _find("corpus.zip")
-_loose = _find("manifest.csv")
+# Corpus đóng gói ở các phiên trước dùng tên `manifest.csv`; bản mới là `metadata.csv`.
+# Tìm cả hai, ở mọi chỗ — bỏ tên cũ nghĩa là vứt luôn dữ liệu đã đẩy lên Kaggle.
+def _metadata_o(thu_muc):
+    for ten in ("metadata.csv", "manifest.csv"):
+        if (thu_muc / ten).exists():
+            return thu_muc / ten
+    return None
 
-if CORPUS.joinpath("manifest.csv").exists():
+_mounted = _find("corpus.zip")
+# `or` chứ không phải `+`: có cả hai tên thì phải lấy bản MỚI, mà `_loose[-1]` ở dưới
+# lấy phần tử cuối — nối danh sách lại là chọn đúng bản cũ.
+_loose = _find("metadata.csv") or _find("manifest.csv")
+
+# Trạng thái tường minh do phiên trước ghi lại: xong tới speaker nào. Vài KB, đọc được
+# ngay trên trang dataset, và không phải suy ra từ manifest hàng nghìn dòng.
+_tt = _find("progress.json")
+if _tt:
+    import json as _json
+
+    _s = _json.loads(Path(_tt[-1]).read_text(encoding="utf-8"))
+    print(f"Trạng thái phiên trước ghi lại: {_s['targets_done']}/{_s['targets_total']}"
+          f" khuôn đã có fake · speaker {len(_s['speakers_done'])} xong"
+          f" · {len(_s['speakers_partial'])} dở dang"
+          f" · {len(_s['speakers_todo'])} chưa động tới")
+    # Theo từng NGUỒN: bộ dữ liệu nào đã nằm trên kho và đã duyệt tới đâu. Nguồn đã có
+    # đủ thì phiên này không phải chuẩn hoá lại cũng không phải soi lại — `ingest` bỏ qua
+    # theo utt_id, `validate` bỏ qua theo dấu đã duyệt.
+    for _ten, _o in sorted(_s.get("by_source", {}).items()):
+        print(f"  nguồn {_ten:<22} real {_o['real']:>6} · fake {_o['fake']:>6}"
+              f" · đã duyệt {_o['approved']:>6}")
+
+if _metadata_o(CORPUS):
     print("Corpus đã có sẵn trong /kaggle/working — không bung đè lên.")
     run("info")
 elif _mounted:
     print(f"Bung corpus từ {_mounted[-1]}")
     run("unpack", _mounted[-1])
 else:
+    # DỪNG HẲN nếu dataset đã có dữ liệu mà phiên này không nạp được. Đi tiếp nghĩa là
+    # ingest lại từ đầu rồi đẩy một corpus 0 fake ĐÈ LÊN công của các phiên trước —
+    # `datasets version` là ảnh chụp toàn bộ thư mục, không phải cộng dồn.
+    _co_du_lieu = ""
     if _loose:
         # manifest để rời ngoài zip chính là để đọc tiến độ mà không phải tải cả GB.
         import csv
@@ -434,7 +486,7 @@ else:
         fakes = [r for r in rows if r.get("label") == "fake" and not r.get("augment")]
         print(f"Thấy manifest của dataset: {len(rows)} bản ghi · {len(fakes)} fake"
               f" · {len({r['speaker'] for r in fakes})} speaker đã có fake")
-        print("Nhưng KHÔNG thấy corpus.zip — add đúng dataset vào Input rồi chạy lại ô này.")
+        _co_du_lieu = f"{len(rows)} bản ghi ({len(fakes)} fake), nhưng KHÔNG thấy corpus.zip"
     else:
         # Chưa mount thì vẫn hỏi API cho biết dataset đang có gì.
         r = subprocess.run(["kaggle", "datasets", "files", DATASET_ID],
@@ -442,19 +494,35 @@ else:
         if r.returncode == 0:
             print("Dataset trên Kaggle đang có:")
             print(r.stdout.strip()[:800])
-            print(f"\\n→ Add Input → Datasets → {DATASET_ID} rồi chạy lại ô này"
-                  " để nối tiếp thay vì làm lại từ đầu.")
+            if any(t in r.stdout for t in ("corpus.zip", "metadata.csv",
+                                           "manifest.csv", "progress.json")):
+                _co_du_lieu = "dữ liệu trên dataset nhưng chưa Add Input"
         else:
             print("Chưa nối được tới dataset (chưa add Input, chưa có token, hoặc dataset trống).")
-            if MAKE_DATASET:
-                print("Phiên này sẽ bắt đầu từ đầu.")
+
+    if _co_du_lieu:
+        raise SystemExit(
+            f"DỪNG: dataset {DATASET_ID} đã có {_co_du_lieu}.\\n"
+            "Add Input → Datasets → dataset đó rồi chạy lại ô này.\\n"
+            "Chạy tiếp mà không nạp được là ingest lại từ đầu rồi ĐÈ MẤT công phiên trước."
+        )
+    if MAKE_DATASET:
+        print("Dataset trống — phiên này bắt đầu từ đầu.")
+
+# Nguồn nào đã nằm trong kho, đếm theo bản ghi REAL. Ô convert hỏi đúng dict này để
+# quyết định có phải convert lại hay không — đọc từ manifest local (đã bung ở trên) chứ
+# không từ progress.json, vì manifest luôn có còn progress.json thì version cũ có thể thiếu.
+NGUON_DA_CO = {}
 
 # Đã tới đâu rồi — con số này là mốc của cả phiên: phần A biết còn phải sinh bao nhiêu,
 # phần B biết mình sắp huấn luyện trên cái gì.
-if CORPUS.joinpath("manifest.csv").exists():
+if _metadata_o(CORPUS):
     from aidetector.corpus.manifest import Manifest
 
     _m = Manifest.load(CORPUS, required=True)
+    for _r in _m:
+        if not _r.augment and not _r.is_fake:
+            NGUON_DA_CO[_r.source] = NGUON_DA_CO.get(_r.source, 0) + 1
     _done = len({f.speaker for f in _m.fakes})
     print(f"\\nCorpus đang có: {len(_m.reals)} real · {len(_m.fakes)} fake"
           f" · {_done}/{len(_m.speakers('real'))} speaker đã có fake")
@@ -486,6 +554,94 @@ elif not MAKE_DATASET:
 """),
 
 md("""
+### A1c. Convert — đưa dataset đầu vào về chuẩn cấu trúc
+
+```
+real/<nguồn>/<speaker>/xxx.wav          (+ metadata.csv hai cột `path`,`text`)
+```
+
+Mỗi bộ dữ liệu lưu một kiểu, nên **dev viết `CONVERT` theo đúng cấu trúc bộ đang mount**.
+Xong ô này thì mọi bước sau chỉ nhìn thấy cây chuẩn và không cần biết dữ liệu vốn nằm
+thế nào.
+
+`CONVERT = None` khi bộ dữ liệu đã có adapter sẵn (`vivos`, `common_voice`, `folder`,
+`canonical`) — `ingest` tự dò, không phải viết gì.
+
+Ô cũng **xem trước** kết quả mà không giải mã file nào: sai speaker hay thiếu transcript
+lộ ra trong vài giây, thay vì sau khi đã giải mã 12.000 file.
+
+> Sửa ô này trong `scripts/build_kaggle_notebook.py`, đừng sửa thẳng trên Kaggle —
+> notebook sinh ra từ repo nên bản sửa tại chỗ mất khi import lại.
+"""),
+code("""
+# ═══ CONVERT — sửa theo cấu trúc bộ dữ liệu đang mount ═══
+SOURCE = "vivos"      # tên nguồn: vừa là khoá hỏi kho, vừa là `--name` khi ingest
+CONVERT = None        # None = đã có adapter đọc được cấu trúc này, không phải viết gì
+
+# def CONVERT(raw, out):
+#     import shutil
+#     for wav in sorted(raw.rglob("*.wav")):
+#         speaker = wav.parent.name                   # ← chỗ duy nhất phụ thuộc cấu trúc
+#         dich = out / "real" / SOURCE / speaker / wav.name
+#         dich.parent.mkdir(parents=True, exist_ok=True)
+#         shutil.copy(wav, dich)
+#
+# Chỉ dựng lại CẤU TRÚC. KHÔNG chuẩn hoá audio ở đây — resample, chuẩn mức, cắt độ dài
+# là việc của `ingest`; làm hai lần là bào mòn tín hiệu.
+
+from pathlib import Path
+
+_nguon = ["--name", SOURCE]
+_da_co = NGUON_DA_CO.get(SOURCE, 0)
+
+if _da_co:
+    # Kho đã có nguồn này ⇒ bỏ qua convert. Đây là bước tốn kém nhất (chép hàng nghìn
+    # file) và kết quả không đổi; `ingest` phía sau cũng sẽ bỏ qua theo utt_id.
+    print(f"Kho đã có nguồn {SOURCE!r}: {_da_co} utterance real — BỎ QUA convert.")
+elif not MAKE_DATASET:
+    skipped("convert")
+elif CONVERT is None:
+    print(f"Nguồn {SOURCE!r} chưa có trong kho · dùng adapter tự dò cho {RAW}")
+else:
+    _out = Path("/kaggle/working/converted")
+    if not _out.exists():
+        CONVERT(Path(RAW), _out)
+    RAW = str(_out)                    # các bước sau chỉ thấy cây chuẩn
+
+    # Cây do dev vừa dựng có đúng yêu cầu đầu vào không. Kiểm CẤU TRÚC ở đây (vài giây,
+    # không giải mã file nào); chất lượng audio là việc của `validate` ở A2c.
+    _wav = list((_out / "real").glob("*/*/*.wav")) if (_out / "real").is_dir() else []
+    _spk = {p.parent.name for p in _wav}
+    _sai = []
+    if not _wav:
+        _sai.append("không có file nào ở real/<nguồn>/<speaker>/*.wav")
+    if len(_spk) < 3:
+        _sai.append(f"chỉ {len(_spk)} speaker — chia tập speaker-disjoint cần ít nhất 3")
+    if _wav and SOURCE not in {p.parent.parent.name for p in _wav}:
+        _sai.append(f"không có thư mục real/{SOURCE}/ — tên nguồn phải khớp SOURCE")
+    if _sai:
+        raise SystemExit("CONVERT dựng ra cây sai chuẩn đầu vào:\\n"
+                         + "\\n".join(f"  • {s}" for s in _sai))
+    print(f"Đã convert → {RAW} · {len(_wav)} file · {len(_spk)} speaker")
+
+if MAKE_DATASET and not _da_co:
+    run("ingest", RAW, *_nguon, "--dry-run")
+"""),
+
+md("""
+### A1d. Dọn corpus cũ về cây hiện hành
+
+Corpus bung ra từ phiên trước có thể còn cây cũ (`audio/<label>/…/<utt_id>.wav`). `migrate`
+dời file về đúng chỗ và giữ nguyên `utt_id`, nên **không sinh lại gì**.
+
+Idempotent, và chịu được ngắt giữa chừng: manifest chỉ lưu sau khi dời xong, phép cấp số
+là tất định, nên chạy lại tính ra đúng những đường dẫn cũ và nhận lại phần đã dời.
+"""),
+code("""
+run("migrate")
+"""),
+
+md("""
 ## A2. REAL — nạp giọng thật về chuẩn corpus
 
 `ingest` tự nhận diện loại dataset (VIVOS / Common Voice / thư mục wav / real+fake
@@ -514,18 +670,20 @@ hoặc thêm câu thì nâng `N_REAL` — vòng tròn tự dồn phần thêm v�
 """),
 code("""
 def _n_records():
-    csv_path = CORPUS / "manifest.csv"
-    return sum(1 for _ in csv_path.open(encoding="utf-8")) - 1 if csv_path.exists() else 0
+    f = _metadata_o(CORPUS)
+    return sum(1 for _ in f.open(encoding="utf-8")) - 1 if f else 0
 
 # Cờ nào có trần thì truyền, không thì để trống — `--limit` vắng mặt nghĩa là lấy hết.
 _tran = [*(["--limit", N_REAL] if N_REAL else []),
          *(["--per-speaker", PER_SPEAKER] if PER_SPEAKER else [])]
 
 _before = _n_records()
-if MAKE_DATASET:
-    run("ingest", RAW, *_tran)
-else:
+if not MAKE_DATASET:
     skipped("ingest — corpus đã bung ở A1b")
+elif _da_co:
+    print(f"Nguồn {SOURCE!r} đã có đủ trong kho ({_da_co} real) — không nạp lại.")
+else:
+    run("ingest", RAW, *_nguon, *_tran)
 
 # Có thêm bản ghi thì mới có cái để đẩy. Không có thì bỏ lượt đẩy ở A2b: gói và tải cả
 # GB dữ liệu y nguyên như trên dataset là đốt hàng chục phút của phiên vào việc vô ích.
@@ -563,6 +721,34 @@ if MAKE_DATASET:
           f" trên T4 nếu bắt đầu từ 0. Phần đã có ở phiên trước không phải làm lại.")
 else:
     skipped("kiểm tra dataset REAL — chỉ có nghĩa trước khi sinh fake")
+"""),
+
+md("""
+### A2c. Kiểm chất lượng REAL — trước khi sinh, không phải sau
+
+Ô A2 ở trên chỉ kiểm **độ phủ**: đủ audio, đủ speaker, có transcript. Nó không soi một
+mẫu audio nào. Còn `validate` soi từng file theo chuẩn: clipping, gần-im-lặng, NaN/Inf,
+sai độ dài, thiếu file.
+
+Đặt nó **ở đây** chứ không chỉ ở A4, vì với engine cloning mỗi utterance real là **khuôn**
+để sinh fake: clip bị clipping hay gần im lặng thì fake dựng trên nó cũng là rác — mà phát
+hiện ở A4 nghĩa là đã tốn hàng giờ GPU. Đọc lại ~8.000 file mất khoảng một phút.
+
+`--fix` loại bản ghi hỏng khỏi manifest (file wav vẫn nằm trên đĩa). Nó **từ chối** tự loại
+nếu quá 20% corpus hỏng: mức đó là lỗi hệ thống — chuỗi chuẩn hoá, adapter, hay chính spec
+— và tự xoá lúc ấy là dọn mất corpus mà tưởng đang dọn rác.
+
+**Chỉ soi phần mới.** Bản ghi đạt chuẩn được đóng dấu bằng vân tay của chuẩn đó (cột
+`checked`), nên phiên sau bỏ qua chúng thay vì đọc lại từng file audio của cả corpus. Với
+8.000 file đó là vài phút mỗi phiên, đổi lấy con số không đổi. Sửa `MIN_SECONDS` thì vân
+tay đổi và toàn corpus tự động được soi lại — "đã duyệt" chỉ có nghĩa khi nói rõ duyệt
+theo chuẩn nào. `--recheck` để ép soi lại.
+"""),
+code("""
+if MAKE_DATASET:
+    run("validate", "--fix")
+else:
+    skipped("kiểm chất lượng REAL — corpus đã kiểm ở phiên sinh")
 """),
 
 md("""
@@ -726,6 +912,44 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
     STAMP = Path("/kaggle/working/.last_sync")
     LOCK = Path("/kaggle/working/.sync_lock")
     FORCE = "--force" in sys.argv
+    CHO_PHEP_NHO_HON = "--allow-shrink" in sys.argv
+
+    def dem(f):
+        with open(f, encoding="utf-8") as fh:
+            return sum(1 for _ in fh) - 1        # trừ dòng tiêu đề
+
+    # Số bản ghi ĐANG có trên dataset. Tải mỗi manifest.csv (vài MB) chứ không cả GB.
+    # None = không đọc được; lúc đó không chặn, vì trục trặc mạng không được làm đứng
+    # một lượt sinh nhiều giờ — rào chính nằm ở ô A1b.
+    def tai_ve(ten):
+        out = Path("/kaggle/working/.remote") / ten
+        shutil.rmtree(out, ignore_errors=True)
+        r = subprocess.run(["kaggle", "datasets", "download", "-d", DATASET_ID,
+                            "-f", ten, "-p", str(out), "--force"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        for z in out.glob("*.zip"):             # CLI có thể nén file đơn lẻ
+            import zipfile
+            with zipfile.ZipFile(z) as zf:
+                zf.extractall(out)
+        f = out / ten
+        return f if f.exists() else None
+
+    def dem_tren_dataset():
+        # progress.json chỉ vài KB nên thử nó trước; manifest.csv là đường lùi cho
+        # những version đẩy lên trước khi có file trạng thái.
+        f = tai_ve("progress.json")
+        if f is not None:
+            try:
+                return int(json.loads(f.read_text(encoding="utf-8"))["dataset_records"])
+            except Exception:
+                pass
+        for ten in ("metadata.csv", "manifest.csv"):
+            f = tai_ve(ten)
+            if f is not None:
+                return dem(f)
+        return None
 
     # PID của lượt đẩy đang chạy, hoặc None.
     def running():
@@ -757,20 +981,46 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
     # trước còn đang xử lý là chuyện thường; nếu chỉ chốt khi thành công thì mỗi ranh
     # giới speaker lại gói và tải lại cả GB — hỏng liên tục thì đó là hammer, không
     # phải retry. Bản chốt cuối không mất: ô A5 đẩy bằng --force.
+    # `datasets version` là ảnh chụp TOÀN BỘ thư mục staging: đẩy corpus nhỏ hơn là
+    # xoá phần chênh khỏi bản mới nhất. Phiên nào lỡ bắt đầu từ đầu mà đẩy lên thì công
+    # của mọi phiên trước biến mất khỏi version hiện hành.
+    goc_local = next((p for p in (CORPUS / "metadata.csv", CORPUS / "manifest.csv")
+                      if p.exists()), None)
+    if goc_local is None:
+        print("Chưa có corpus để đẩy — bỏ lượt.")
+        raise SystemExit(0)
+    local = dem(goc_local)
+    remote = dem_tren_dataset()
+    if remote is not None and local < remote and not CHO_PHEP_NHO_HON:
+        print(f"TỪ CHỐI ĐẨY: corpus ở đây {{local}} bản ghi < {{remote}} đang có trên dataset.")
+        print("Nhiều khả năng phiên này bắt đầu từ đầu vì chưa Add Input dataset.")
+        print("Nạp corpus cũ rồi chạy tiếp; thật sự muốn thu nhỏ thì thêm --allow-shrink.")
+        raise SystemExit(3)
+    if remote is not None:
+        print(f"[{{time.strftime('%H:%M:%S')}}] corpus {{local}} bản ghi (dataset: {{remote}})")
+
     STAMP.touch()
     LOCK.write_text(str(os.getpid()))
     started = time.time()
 
     try:
-        STAGE.mkdir(exist_ok=True)
+        # Dọn sạch STAGE mỗi lượt: `datasets version` đẩy MỌI file trong thư mục, nên
+        # một file sót lại từ lần trước (vd manifest.csv tên cũ) sẽ lên dataset kèm theo.
+        shutil.rmtree(STAGE, ignore_errors=True)
+        STAGE.mkdir(parents=True, exist_ok=True)
         # `pack` đọc manifest rồi zip đúng những file trong đó. Manifest được ghi bằng
         # tmp + os.replace nên bản đọc được luôn nguyên vẹn, và audio sinh ra SAU thời
         # điểm đó chỉ đơn giản là chưa có trong ảnh chụp này — lượt sau lấy.
         subprocess.run([sys.executable, "-m", "aidetector", "pack",
                         "--out", str(STAGE / "corpus.zip"), "-c", "configs/kaggle.yaml"],
                        check=True, cwd="/kaggle/working/ai-detector")
-        # manifest để rời ngoài zip: A1b đọc tiến độ khỏi phải tải và giải nén cả GB.
-        shutil.copy(CORPUS / "manifest.csv", STAGE / "manifest.csv")
+        # metadata để rời ngoài zip: A1b đọc tiến độ khỏi phải tải và giải nén cả GB.
+        shutil.copy(goc_local, STAGE / "metadata.csv")
+        # progress.json vài KB: xong tới speaker nào, đọc được ngay trên trang dataset
+        # và là thứ phiên sau so trước khi quyết định có được đẩy đè hay không.
+        subprocess.run([sys.executable, "-m", "aidetector", "progress",
+                        "--out", str(STAGE / "progress.json"), "-c", "configs/kaggle.yaml"],
+                       check=True, cwd="/kaggle/working/ai-detector")
 
         (STAGE / "dataset-metadata.json").write_text(json.dumps({{
             "title": "vivos fake v2",
@@ -1406,8 +1656,8 @@ import glob
 
 if DO_TRAIN:
     # Bất kỳ engine nào có trong corpus — cứng nhắc "piper" là rỗng khi TTS tắt.
-    mau = sorted(glob.glob("/kaggle/working/corpus/audio/fake/*/*/*.wav"))[:5]
-    mau += sorted(glob.glob("/kaggle/working/corpus/audio/real/*/*/*.wav"))[:5]
+    mau = sorted(glob.glob("/kaggle/working/corpus/fake/*/*/*.wav"))[:5]
+    mau += sorted(glob.glob("/kaggle/working/corpus/real/*/*/*.wav"))[:5]
     run("detect", *mau)
 else:
     skipped("thử detect — phiên này chưa huấn luyện mô hình nào")

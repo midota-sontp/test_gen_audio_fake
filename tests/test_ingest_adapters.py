@@ -279,3 +279,75 @@ def test_no_phantom_ceiling_when_the_whole_source_was_examined(tmp_path, vivos_l
 
     assert "Đã xét hết nguồn" in caplog.text
     assert "chỉ cấp được" not in caplog.text
+
+
+# ------------------------------------------- nhập lại từ cây chuẩn (bộ data bên ngoài)
+def _canonical_tree(tmp_path, vivos_like):
+    """Dựng cây chuẩn bằng chính pipeline: ingest → corpus → đó là cây cần nhập lại."""
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.vivos import VivosAdapter
+
+    corpus = tmp_path / "phat_hanh"
+    m = Manifest(corpus)
+    ingest_source(m, VivosAdapter(), vivos_like, "vivos", AudioSpec())
+    m.save()
+    return corpus, m
+
+
+def test_canonical_tree_is_detected_over_the_generic_folder_adapter(tmp_path, vivos_like):
+    from aidetector.ingest import detect_adapter
+
+    corpus, _ = _canonical_tree(tmp_path, vivos_like)
+    adapter, score, effective = detect_adapter(corpus)
+    assert adapter.name == "canonical", f"nhận nhầm thành {adapter.name}"
+    assert score >= 0.9 and effective == corpus
+
+
+def test_canonical_import_round_trips_speakers_and_text(tmp_path, vivos_like):
+    """Convert một lần rồi mọi thứ phía sau không cần biết bộ data vốn có cấu trúc gì."""
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.canonical import CanonicalAdapter
+
+    corpus, goc = _canonical_tree(tmp_path, vivos_like)
+    moi = Manifest(tmp_path / "corpus_moi")
+    ket_qua = ingest_source(moi, CanonicalAdapter(), corpus, "phat_hanh", AudioSpec())
+
+    assert ket_qua["kept"] == len(goc.reals)
+    assert {r.speaker for r in moi.reals} == {r.speaker for r in goc.reals}
+    # Transcript phải theo đúng từng file: tên file chỉ là số thứ tự nên khoá theo stem
+    # sẽ trộn lẫn transcript giữa các giọng.
+    assert all(r.text for r in moi.reals)
+    assert {r.text for r in moi.reals} == {r.text for r in goc.reals}
+
+
+def test_canonical_import_is_idempotent(tmp_path, vivos_like):
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.canonical import CanonicalAdapter
+
+    corpus, _ = _canonical_tree(tmp_path, vivos_like)
+    moi = Manifest(tmp_path / "corpus_moi")
+    ingest_source(moi, CanonicalAdapter(), corpus, "phat_hanh", AudioSpec())
+    truoc = {r.utt_id for r in moi}
+    ingest_source(moi, CanonicalAdapter(), corpus, "phat_hanh", AudioSpec())
+    assert {r.utt_id for r in moi} == truoc
+
+
+def test_canonical_import_leaves_fake_to_the_pipeline(tmp_path, vivos_like):
+    """Fake nhập từ ngoài không có `ref_utt_id` ⇒ không ghép cặp được với real nào."""
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import ingest_source
+    from aidetector.ingest.canonical import CanonicalAdapter
+
+    corpus, _ = _canonical_tree(tmp_path, vivos_like)
+    (corpus / "fake" / "engine_la" / "spk").mkdir(parents=True)
+    import shutil
+
+    nguon = next((corpus / "real").glob("*/*/*.wav"))
+    shutil.copy(nguon, corpus / "fake" / "engine_la" / "spk" / "0001.wav")
+
+    moi = Manifest(tmp_path / "corpus_moi")
+    ingest_source(moi, CanonicalAdapter(), corpus, "phat_hanh", AudioSpec())
+    assert not moi.fakes, "fake phải do `generate` sinh, không nhập từ ngoài"
