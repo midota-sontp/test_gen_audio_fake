@@ -91,7 +91,9 @@ def cmd_ingest(args) -> int:
             dry_run=args.dry_run,
         )
     if args.dry_run:
-        return 0
+        # Không đạt chuẩn đầu vào ⇒ mã khác 0 ⇒ `run()` ở notebook dừng cả phiên. Đi tiếp
+        # với đầu vào hỏng chỉ để phát hiện ở bước đắt hơn.
+        return 0 if result.get("ok") else 1
     manifest.save()
     print(manifest.summary())
     # Nguồn đã đủ theo `--limit` thì không nạp gì là ĐÚNG, không phải lỗi: phiên sau

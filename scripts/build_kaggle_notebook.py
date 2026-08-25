@@ -201,9 +201,10 @@ def run(*args, optional=False):
     # hạ cho `generate` là real được giữ tới 2s trong khi fake dưới 3s bị bỏ — chính độ
     # dài thành dấu hiệu phân biệt hai lớp, đúng thứ chuỗi chuẩn hoá này tồn tại để bịt.
     chuan = []
-    _ms = globals().get("MIN_SECONDS")
-    if _ms:
-        chuan = ["--set", f"audio.min_seconds={{_ms}}"]
+    for _k, _v in (("min_seconds", globals().get("MIN_SECONDS")),
+                   ("max_seconds", globals().get("MAX_SECONDS"))):
+        if _v:
+            chuan += ["--set", f"audio.{{_k}}={{_v}}"]
 
     cmd = [sys.executable, "-m", "aidetector", *[str(a) for a in args], *chuan, "-c", CFG]
     print("$ python -m aidetector " + " ".join(str(a) for a in [*args, *chuan])
@@ -262,6 +263,10 @@ DATASET_ID = "sonpham12/vivos-fake-v2"
 # ĐỪNG đổi `short_policy` sang "pad": real bị đệm im lặng trong khi fake (~4s) thì không
 # — đó là tự tạo ra dấu hiệu phân biệt hai lớp.
 MIN_SECONDS = 3.0
+# Độ dài tối đa. `ingest` cắt bản thu dài hơn mức này thành các đoạn ĐÚNG độ dài đó, đánh
+# số trong thư mục của bản thu; đoạn cuối ngắn hơn MIN_SECONDS thì bỏ. Nên đây cũng là
+# nút để biến một file 60 giây thành 15 đoạn 4 giây, không cần code cắt riêng.
+MAX_SECONDS = 10.0
 
 # Piper/Kokoro đang TẮT: giọng cố định, mô hình bắt ở EER 0.00% nên không dạy được gì,
 # chỉ làm loãng dataset. Bật lại bằng: TTS_ENGINES = ["piper", "kokoro"]
@@ -556,76 +561,182 @@ elif not MAKE_DATASET:
 md("""
 ### A1c. Convert — đưa dataset đầu vào về chuẩn cấu trúc
 
-```
-real/<nguồn>/<speaker>/xxx.wav          (+ metadata.csv hai cột `path`,`text`)
-```
-
 Mỗi bộ dữ liệu lưu một kiểu, nên **dev viết `CONVERT` theo đúng cấu trúc bộ đang mount**.
 Xong ô này thì mọi bước sau chỉ nhìn thấy cây chuẩn và không cần biết dữ liệu vốn nằm
 thế nào.
 
-`CONVERT = None` khi bộ dữ liệu đã có adapter sẵn (`vivos`, `common_voice`, `folder`,
-`canonical`) — `ingest` tự dò, không phải viết gì.
+#### Ví dụ: vào một kiểu, ra một kiểu
 
-Ô cũng **xem trước** kết quả mà không giải mã file nào: sai speaker hay thiếu transcript
-lộ ra trong vài giây, thay vì sau khi đã giải mã 12.000 file.
+Bộ dữ liệu lạ, speaker nằm trong **tên file** chứ không phải thư mục:
+
+```
+/kaggle/input/dataset-b/
+├── audio/
+│   ├── 001_nguyen_van_a_0001.wav
+│   ├── 001_nguyen_van_a_0002.wav
+│   └── 002_tran_thi_b_0001.wav
+└── labels.csv                       file,transcript
+```
+
+`CONVERT` phải dựng ra:
+
+```
+/kaggle/working/converted/
+├── metadata.csv                     ← tuỳ chọn; hai cột `path`,`text`
+└── real/
+    └── dataset_b/                   ← ĐÚNG BẰNG giá trị SOURCE
+        ├── 001_nguyen_van_a/
+        │   ├── 001_nguyen_van_a_0001.wav
+        │   └── 001_nguyen_van_a_0002.wav
+        └── 002_tran_thi_b/
+            └── 002_tran_thi_b_0001.wav
+```
+
+`metadata.csv` chỉ cần hai cột, đường dẫn tính từ gốc cây vừa dựng:
+
+```
+path,text
+real/dataset_b/001_nguyen_van_a/001_nguyen_van_a_0001.wav,xin chào các bạn
+real/dataset_b/001_nguyen_van_a/001_nguyen_van_a_0002.wav,hôm nay trời đẹp
+```
+
+#### Ví dụ 2: file phẳng, tên vô nghĩa
+
+```
+/kaggle/input/dataset-a/
+├── 56456456456456.mp3
+├── 78978978978978.mp3
+└── 12312312312312.mp3
+```
+
+Tên file là danh tính duy nhất có được. Đánh giá từng file, đạt thì đưa vào thư mục riêng:
+
+```python
+from aidetector.ingest import convert_flat_recordings
+
+SOURCE = "dataset_a"
+
+def CONVERT(raw, out):
+    convert_flat_recordings(raw, out, source=SOURCE)
+```
+
+```
+converted/real/dataset_a/
+├── 56456456456456/56456456456456_001.mp3
+├── 78978978978978/78978978978978_001.mp3
+└── 12312312312312/12312312312312_001.mp3
+```
+
+Log cho biết loại cái nào vì sao:
+
+```
+convert_flat_recordings: 6 file nguồn · 3 đạt · 3 loại → converted/real/dataset_a/
+  loại 1 file: ngắn hơn 3s
+  loại 1 file: sample rate 8000 < 16000
+  loại 1 file: đọc không được (LibsndfileError)
+```
+
+#### Đánh giá ở hai chỗ, và chúng khác nhau
+
+| Ở đâu | Xét gì | Vì sao ở đó |
+|---|---|---|
+| **convert** | đọc được · độ dài · sample rate | chuẩn hoá **không sửa được** ba thứ này. Đọc từ header, không giải mã |
+| **A2c `validate`** | clipping · gần im lặng · NaN · độ dài sau khi cắt silence | chỉ có nghĩa **sau** chuẩn hoá — đó mới là audio đi vào huấn luyện |
+
+Sàng clipping ở nguồn là sai đối tượng: một mp3 có peak sát trần vẫn thành clip sạch sau
+khi chuẩn mức, còn một file nghe ổn có thể vỡ ra sau khi resample. Ngược lại, file ngắn
+hơn `MIN_SECONDS` thì chuẩn hoá chỉ làm nó ngắn thêm — loại luôn ở nguồn là đúng.
+
+Nhiều file cùng một speaker thì đánh số tiếp: `_001`, `_002`, … Dùng
+`speaker_from="parent"` khi speaker là **tên thư mục** chứ không phải tên file.
+
+#### Truyền hàm đánh giá của riêng bạn
+
+`screen(f) -> str | None` — trả chuỗi lý do để loại, `None` để nhận. Mặc định là
+`screen_source_file`.
+
+```python
+from aidetector.ingest import convert_flat_recordings, screen_source_file
+
+def DANH_GIA(f):
+    # Giữ ba phép sàng mặc định, thêm luật riêng của bộ này.
+    return screen_source_file(f) or (
+        "bản thu thử" if f.stem.startswith("NHAP_") else None
+    )
+
+def CONVERT(raw, out):
+    convert_flat_recordings(raw, out, source=SOURCE, screen=DANH_GIA)
+```
+
+Mỗi lý do trả về thành một dòng trong log kèm số file, nên đặt tên lý do cho cụ thể —
+`"bản thu thử"` đọc được, `"loại"` thì không.
+
+Hai điều nên giữ trong hàm của bạn: đọc **header** thôi (`soundfile.info`), đừng giải mã —
+`ingest` sẽ giải mã, làm hai lần là phí; và đừng xét clipping hay im lặng ở đây, chúng chỉ
+có nghĩa sau chuẩn hoá.
+
+#### Bốn điều hay làm sai
+
+* **Tên file không cần đánh số.** `ingest` tự cấp `0001.wav`, `0002.wav` khi ghi vào
+  corpus — giữ nguyên tên gốc ở đây còn dễ đối chiếu ngược khi có nghi vấn.
+* **Đủ ba tầng.** `real/<nguồn>/<speaker>/` — thiếu tầng nguồn (`real/<speaker>/*.wav`)
+  thì adapter `canonical` không nhận, và `folder` sẽ đoán speaker sai.
+* **Tên thư mục nguồn phải khớp `SOURCE`.** Nó là khoá hỏi kho ở bước 1; lệch một chữ
+  là phiên sau tra ra &ldquo;chưa có&rdquo; và convert lại từ đầu.
+* **Đừng chuẩn hoá audio.** Không resample, không đổi mức, không cắt độ dài — `ingest`
+  làm việc đó. Làm hai lần thì `trim` ăn dần silence và clip sát 3,00 giây rơi khỏi cửa
+  sổ độ dài.
+
+Không có transcript thì bỏ `metadata.csv`, nhưng bước 4 sẽ **dừng phiên**: fake sinh ra
+không ghép cặp được với real nào, và cả thiết kế corpus dựa trên việc ghép cặp đó.
+
+`CONVERT = None` khi bộ dữ liệu đã có adapter sẵn (`vivos`, `common_voice`, `folder`,
+`canonical`) — `ingest` tự dò, không phải viết gì. Bước verify vẫn chạy như thường.
 
 > Sửa ô này trong `scripts/build_kaggle_notebook.py`, đừng sửa thẳng trên Kaggle —
 > notebook sinh ra từ repo nên bản sửa tại chỗ mất khi import lại.
 """),
 code("""
-# ═══ CONVERT — sửa theo cấu trúc bộ dữ liệu đang mount ═══
-SOURCE = "vivos"      # tên nguồn: vừa là khoá hỏi kho, vừa là `--name` khi ingest
-CONVERT = None        # None = đã có adapter đọc được cấu trúc này, không phải viết gì
+# ═══ CONVERT ═══
+SOURCE  = "vivos"     # tên bộ dữ liệu — khoá để hỏi kho "đã chạy lần nào chưa"
+CONVERT = None        # dev viết khi cấu trúc lạ; None = đã có adapter đọc được
 
+# Đọc `raw` (cấu trúc bất kỳ) rồi ghi ra `out` theo chuẩn đầu vào:
+#     out/real/<SOURCE>/<speaker>/<tên file>.wav        (+ out/metadata.csv: path,text)
+# Chỉ dựng lại CẤU TRÚC. Không resample, không chuẩn mức, không cắt độ dài — đó là việc
+# của `ingest`, làm hai lần là bào mòn tín hiệu.
+#
 # def CONVERT(raw, out):
-#     import shutil
+#     import csv, shutil
+#     rows = []
 #     for wav in sorted(raw.rglob("*.wav")):
-#         speaker = wav.parent.name                   # ← chỗ duy nhất phụ thuộc cấu trúc
+#         speaker = wav.name.rsplit("_", 1)[0]        # ← chỗ duy nhất phụ thuộc cấu trúc
 #         dich = out / "real" / SOURCE / speaker / wav.name
 #         dich.parent.mkdir(parents=True, exist_ok=True)
 #         shutil.copy(wav, dich)
-#
-# Chỉ dựng lại CẤU TRÚC. KHÔNG chuẩn hoá audio ở đây — resample, chuẩn mức, cắt độ dài
-# là việc của `ingest`; làm hai lần là bào mòn tín hiệu.
+#         rows.append((str(dich.relative_to(out)), transcript_cua(wav)))
+#     with (out / "metadata.csv").open("w", newline="", encoding="utf-8") as fh:
+#         w = csv.writer(fh); w.writerow(["path", "text"]); w.writerows(rows)
 
-from pathlib import Path
+from aidetector.ingest import convert_and_verify
 
-_nguon = ["--name", SOURCE]
 _da_co = NGUON_DA_CO.get(SOURCE, 0)
+_nguon = ["--name", SOURCE]
 
-if _da_co:
-    # Kho đã có nguồn này ⇒ bỏ qua convert. Đây là bước tốn kém nhất (chép hàng nghìn
-    # file) và kết quả không đổi; `ingest` phía sau cũng sẽ bỏ qua theo utt_id.
-    print(f"Kho đã có nguồn {SOURCE!r}: {_da_co} utterance real — BỎ QUA convert.")
-elif not MAKE_DATASET:
-    skipped("convert")
-elif CONVERT is None:
-    print(f"Nguồn {SOURCE!r} chưa có trong kho · dùng adapter tự dò cho {RAW}")
+if not MAKE_DATASET:
+    skipped("convert + kiểm đầu vào")
 else:
-    _out = Path("/kaggle/working/converted")
-    if not _out.exists():
-        CONVERT(Path(RAW), _out)
-    RAW = str(_out)                    # các bước sau chỉ thấy cây chuẩn
-
-    # Cây do dev vừa dựng có đúng yêu cầu đầu vào không. Kiểm CẤU TRÚC ở đây (vài giây,
-    # không giải mã file nào); chất lượng audio là việc của `validate` ở A2c.
-    _wav = list((_out / "real").glob("*/*/*.wav")) if (_out / "real").is_dir() else []
-    _spk = {p.parent.name for p in _wav}
-    _sai = []
-    if not _wav:
-        _sai.append("không có file nào ở real/<nguồn>/<speaker>/*.wav")
-    if len(_spk) < 3:
-        _sai.append(f"chỉ {len(_spk)} speaker — chia tập speaker-disjoint cần ít nhất 3")
-    if _wav and SOURCE not in {p.parent.parent.name for p in _wav}:
-        _sai.append(f"không có thư mục real/{SOURCE}/ — tên nguồn phải khớp SOURCE")
-    if _sai:
-        raise SystemExit("CONVERT dựng ra cây sai chuẩn đầu vào:\\n"
-                         + "\\n".join(f"  • {s}" for s in _sai))
-    print(f"Đã convert → {RAW} · {len(_wav)} file · {len(_spk)} speaker")
-
-if MAKE_DATASET and not _da_co:
-    run("ingest", RAW, *_nguon, "--dry-run")
+    # Một hàm, ba việc đi liền nhau: hỏi kho → convert nếu chưa có → kiểm đạt chuẩn.
+    # Tách ra thì rất dễ có đường đi bỏ qua phép kiểm, mà đường bị bỏ qua đúng là đường
+    # hay hỏng nhất — adapter sẵn có đọc sai tầng thư mục speaker của một bộ dữ liệu lạ.
+    # Không đạt chuẩn ⇒ ném lỗi ⇒ dừng phiên, thay vì phát hiện ở bước đắt hơn.
+    _kq = convert_and_verify(SOURCE, RAW, CONVERT,
+                             out="/kaggle/working/converted", already=_da_co)
+    RAW = _kq["root"]
+    if not _kq["skipped"]:
+        _r = _kq["report"]
+        print(f"Đầu vào: {_r['items']} utterance · {_r['speakers']} speaker"
+              f" · {_r['with_text']} có transcript · adapter {_r['adapter']}")
 """),
 
 md("""

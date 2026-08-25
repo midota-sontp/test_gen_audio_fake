@@ -10,7 +10,7 @@ import numpy as np
 
 from ..corpus.manifest import Manifest
 from ..corpus.schema import LABEL_REAL, Record, make_utt_id
-from ..corpus.spec import AudioSpec, normalize, normalize_file
+from ..corpus.spec import AUDIO_EXTENSIONS, AudioSpec, normalize, normalize_file
 from ..utils import get_logger, progress, slugify
 from .base import (  # noqa: F401
     SourceAdapter,
@@ -73,6 +73,163 @@ def _spread_by_speaker(items: Iterator[SourceItem]) -> Iterator[SourceItem]:
                 yield nxt
 
 
+def screen_source_file(f: Path, min_seconds: float = 3.0,
+                       min_sample_rate: int = 16_000) -> str | None:
+    """Phép đánh giá MẶC ĐỊNH cho một file nguồn: trả lý do bị loại, hoặc None nếu qua.
+
+    Truyền hàm khác vào `convert_flat_recordings(screen=...)` để thay — chữ ký chỉ cần
+    `(Path) -> str | None`. Hàm này dùng được làm nền cho hàm của bạn.
+
+    Chỉ xét những gì chuẩn hoá KHÔNG sửa được, và đọc từ header chứ không giải mã:
+
+    * đọc không được ⇒ không có đường nào cứu
+    * ngắn hơn `min_seconds` ⇒ chuẩn hoá chỉ làm nó ngắn thêm (trim cắt silence)
+    * sample rate thấp hơn chuẩn corpus ⇒ nâng lên là bịa ra phần phổ không tồn tại, và
+      đó đúng là chiều mà mô hình lấy làm đường tắt
+
+    Những gì chỉ có nghĩa SAU chuẩn hoá — clipping, gần im lặng, độ dài sau khi cắt
+    silence — để `validate` soi trên audio đã chuẩn hoá. Soi ở đây là soi sai đối tượng.
+    """
+    import soundfile as sf
+
+    try:
+        info = sf.info(str(f))
+    except Exception as exc:  # noqa: BLE001 — nguồn ngoài, đủ kiểu hỏng
+        return f"đọc không được ({type(exc).__name__})"
+    if info.frames == 0:
+        return "rỗng"
+    if info.frames / info.samplerate < min_seconds:
+        return f"ngắn hơn {min_seconds:g}s"
+    if info.samplerate < min_sample_rate:
+        return f"sample rate {info.samplerate} < {min_sample_rate}"
+    return None
+
+
+def convert_flat_recordings(
+    raw: str | Path,
+    out: str | Path,
+    source: str,
+    screen: "Callable[[Path], str | None] | None" = None,
+    min_seconds: float = 3.0,
+    min_sample_rate: int = 16_000,
+    speaker_from: str = "stem",
+) -> dict:
+    """Bộ dữ liệu phẳng → cây chuẩn, và chỉ đưa vào những file ĐẠT.
+
+        /dataset_A/56456456456456.mp3
+          → đánh giá → đạt → out/real/<source>/56456456456456/56456456456456_001.mp3
+
+    Tên file là danh tính duy nhất có được, nên mỗi bản thu thành một thư mục. File không
+    đạt thì không vào cây — đỡ cho `ingest` phải giải mã rồi `validate` phải loại.
+
+    `screen(f) -> str | None` là phép đánh giá: trả chuỗi lý do để loại, `None` để nhận.
+    Mặc định là `screen_source_file` — chỉ xét những gì chuẩn hoá **không sửa được**.
+    Phép kiểm chất lượng thật chạy ở `validate`, trên audio đã chuẩn hoá; đó mới là audio
+    đi vào huấn luyện, và sàng clipping ở nguồn là sàng sai đối tượng.
+
+    CHỈ chép file, không giải mã: resample, chuẩn mức, cắt độ dài là việc của `ingest`.
+    """
+    import shutil
+    from collections import Counter
+
+    raw, out = Path(raw), Path(out)
+    # Phép đánh giá là tham số: mỗi bộ dữ liệu có kiểu rác riêng, và cái gì đáng loại ở
+    # nguồn thì chỉ người biết bộ đó mới nói được.
+    danh_gia = screen or (lambda f: screen_source_file(f, min_seconds, min_sample_rate))
+    bo: Counter[str] = Counter()
+    dem = giu = 0
+    for f in sorted(p for p in raw.rglob("*") if p.suffix.lower() in AUDIO_EXTENSIONS):
+        dem += 1
+        ly_do = danh_gia(f)
+        if ly_do:
+            bo[ly_do] += 1
+            continue
+        ten = f.stem if speaker_from == "stem" else f.parent.name
+        thu_muc = out / "real" / source / slugify(ten, 48)
+        thu_muc.mkdir(parents=True, exist_ok=True)
+        # Đánh số trong thư mục: nhiều file cùng dồn về một speaker thì không đè nhau.
+        so = len([p for p in thu_muc.iterdir() if p.is_file()]) + 1
+        dich = thu_muc / f"{slugify(ten, 48)}_{so:03d}{f.suffix.lower()}"
+        if not dich.exists():
+            shutil.copy(f, dich)
+        giu += 1
+
+    log.info("convert_flat_recordings: %d file nguồn · %d đạt · %d loại → %s/real/%s/",
+             dem, giu, dem - giu, out, source)
+    for ly_do, n in bo.most_common():
+        log.info("  loại %d file: %s", n, ly_do)
+    if giu < 3:
+        log.warning("Chỉ %d bản thu đạt ⇒ %d speaker. Chia tập speaker-disjoint cần ít "
+                    "nhất 3 — kiểm lại xem tên file có thật là danh tính người nói không.",
+                    giu, giu)
+    return {"recordings": dem, "kept": giu, "rejected": dict(bo), "root": str(out)}
+
+
+def convert_and_verify(
+    source: str,
+    raw: str | Path,
+    convert: "Callable[[Path, Path], None] | None" = None,
+    out: str | Path = "converted",
+    already: int = 0,
+) -> dict:
+    """Một bước: hỏi kho → convert nếu chưa có → kiểm đầu vào đạt chuẩn.
+
+    Ba việc này đi cùng nhau nên để cùng một chỗ: tách ra thì rất dễ có đường đi bỏ qua
+    phép kiểm — và đường bị bỏ qua đúng là đường hay hỏng nhất (adapter sẵn có đọc sai
+    tầng thư mục speaker của một bộ dữ liệu lạ).
+
+    `convert(raw, out)` do người gọi viết vì mỗi bộ dữ liệu lưu một kiểu; nó chỉ dựng lại
+    CẤU TRÚC, còn chuẩn hoá audio là việc của `ingest_source`.
+
+    Ném `ValueError` khi đầu vào không đạt chuẩn — đi tiếp chỉ để phát hiện ở bước đắt
+    hơn. Trả về `root` là thư mục mà `ingest` nên đọc.
+    """
+    raw = Path(raw)
+    if already:
+        log.info("Kho đã có nguồn %r: %d utterance real — bỏ qua convert.", source, already)
+        return {"source": source, "root": str(raw), "already": already,
+                "skipped": True, "converted": False, "report": None}
+
+    root = raw
+    if convert is not None:
+        root = Path(out)
+        if not root.exists():
+            convert(raw, root)
+        _kiem_cay_convert(root, source)
+        log.info("Đã convert %s → %s", raw, root)
+
+    adapter_cls, score, effective = detect_adapter(root)
+    report = ingest_source(Manifest(root / ".khong-dung"), adapter_cls(), effective,
+                           source, AudioSpec(), dry_run=True)
+    if not report["ok"]:
+        raise ValueError("Đầu vào chưa đạt chuẩn:\n"
+                         + "\n".join(f"  • {s}" for s in report["problems"]))
+    return {"source": source, "root": str(effective), "already": 0,
+            "skipped": False, "converted": convert is not None, "report": report}
+
+
+def _kiem_cay_convert(root: Path, source: str) -> None:
+    """Cây do người gọi vừa dựng có đúng ba tầng và đúng tên nguồn không.
+
+    Kiểm trước khi giao cho adapter, vì lỗi ở đây có thông điệp cụ thể hơn nhiều so với
+    "adapter không nhận ra thư mục này".
+    """
+    thu_muc = root / "real"
+    wav = [p for p in thu_muc.glob("*/*/*") if p.suffix.lower() in AUDIO_EXTENSIONS] \
+        if thu_muc.is_dir() else []
+    sai = []
+    if not wav:
+        sai.append(f"không có file nào ở {root}/real/<nguồn>/<speaker>/")
+    elif source not in {p.parent.parent.name for p in wav}:
+        # `source` là khoá hỏi kho ở lượt sau; lệch một chữ là phiên sau tra ra "chưa có"
+        # rồi convert lại từ đầu.
+        sai.append(f"không có thư mục real/{source}/ — tên nguồn phải khớp {source!r}, "
+                   f"đang thấy: {sorted({p.parent.parent.name for p in wav})[:4]}")
+    if sai:
+        raise ValueError("CONVERT dựng ra cây sai chuẩn đầu vào:\n"
+                         + "\n".join(f"  • {s}" for s in sai))
+
+
 def _preview(adapter: SourceAdapter, items, source_name: str, total: int | None) -> dict:
     """Adapter đọc ra gì — đếm mà KHÔNG giải mã một file audio nào.
 
@@ -96,18 +253,29 @@ def _preview(adapter: SourceAdapter, items, source_name: str, total: int | None)
              source_name, adapter.name, tong, len(dem), co_text)
     for dong in mau:
         log.info("  %s", dong)
-    if len(dem) < 3:
-        log.warning("Chỉ %d speaker — adapter %r có thể đọc sai cấu trúc thư mục. "
-                    "Chia tập speaker-disjoint cần ít nhất 3 giọng.", len(dem), adapter.name)
+
+    # Ba điều kiện này KHÔNG phải cảnh báo mà là điều kiện đủ để đi tiếp. Đầu vào thiếu
+    # một trong ba thì mọi bước sau đều vô nghĩa, và phát hiện ở bước sau nghĩa là đã trả
+    # tiền giải mã cả bộ dữ liệu — hoặc tệ hơn, trả cả giờ GPU sinh fake.
+    sai = []
+    if not tong:
+        sai.append(f"adapter {adapter.name!r} không đọc ra utterance nào")
+    if tong and len(dem) < 3:
+        sai.append(f"chỉ {len(dem)} speaker — chia tập speaker-disjoint cần ít nhất 3; "
+                   f"adapter {adapter.name!r} có thể đọc sai tầng thư mục speaker")
     if tong and not co_text:
-        log.warning("Không utterance nào có transcript — fake sẽ phải dùng câu dự phòng "
-                    "và không ghép cặp được với real.")
+        sai.append("không utterance nào có transcript — fake không ghép cặp được với real")
+    for dong in sai:
+        log.error("%s", dong)
     if total and abs(total - tong) > max(1, total * 0.02):
         log.warning("count_hint nói %d nhưng duyệt ra %d — adapter bỏ sót hoặc đếm thừa.",
                     total, tong)
+    if not sai:
+        log.info("✔ đầu vào đạt chuẩn để nạp")
     return {"source": source_name, "adapter": adapter.name, "items": tong,
             "speakers": len(dem), "with_text": co_text, "kept": 0, "already": 0,
-            "dry_run": True, "drop_invalid": 0, "skip_exists": 0, "skip_no_audio": 0,
+            "dry_run": True, "ok": not sai, "problems": sai,
+            "drop_invalid": 0, "skip_exists": 0, "skip_no_audio": 0,
             "skip_speaker_full": 0, "drops": {}}
 
 

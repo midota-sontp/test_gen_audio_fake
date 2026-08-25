@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from pathlib import Path
 
 import pytest
 import soundfile as sf
@@ -351,3 +352,284 @@ def test_canonical_import_leaves_fake_to_the_pipeline(tmp_path, vivos_like):
     moi = Manifest(tmp_path / "corpus_moi")
     ingest_source(moi, CanonicalAdapter(), corpus, "phat_hanh", AudioSpec())
     assert not moi.fakes, "fake phải do `generate` sinh, không nhập từ ngoài"
+
+
+def test_the_documented_convert_example_actually_works(tmp_path):
+    """Ví dụ trong ô A1c phải chạy được thật, không chỉ trông hợp lý.
+
+    Dựng đúng bộ dữ liệu mẫu (speaker nằm trong TÊN FILE), convert theo đúng cách tài
+    liệu mô tả, rồi khẳng định `canonical` đọc lại được cả speaker lẫn transcript.
+    """
+    import csv
+    import shutil
+
+    from aidetector.corpus.manifest import Manifest
+    from aidetector.ingest import detect_adapter, ingest_source
+    from conftest import SENTENCES
+
+    SOURCE = "dataset_b"
+    raw = tmp_path / "dataset-b" / "audio"
+    raw.mkdir(parents=True)
+    cau = {}
+    for spk, n in (("001_nguyen_van_a", 4), ("002_tran_thi_b", 4), ("003_le_van_c", 4)):
+        for i in range(1, n + 1):
+            ten = f"{spk}_{i:04d}.wav"
+            sf.write(str(raw / ten), speech_like(4.0, seed=hash(ten) % 9999), SR,
+                     subtype="PCM_16")
+            cau[ten] = SENTENCES[i % len(SENTENCES)]
+    with (raw.parent / "labels.csv").open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["file", "transcript"])
+        for ten, txt in cau.items():
+            w.writerow([ten, txt])
+
+    # ── đúng những gì tài liệu bảo dev làm ────────────────────────────────
+    out = tmp_path / "converted"
+    rows = []
+    for wav in sorted(raw.glob("*.wav")):
+        speaker = wav.name.rsplit("_", 1)[0]          # speaker nằm trong tên file
+        dich = out / "real" / SOURCE / speaker / wav.name
+        dich.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(wav, dich)
+        rows.append((str(dich.relative_to(out)), cau[wav.name]))
+    with (out / "metadata.csv").open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["path", "text"])
+        w.writerows(rows)
+
+    # ── cây đó phải được nhận và đọc đúng ─────────────────────────────────
+    adapter, score, effective = detect_adapter(out)
+    assert adapter.name == "canonical" and effective == out, (adapter.name, score)
+
+    m = Manifest(tmp_path / "corpus")
+    kq = ingest_source(m, adapter(), out, SOURCE, AudioSpec())
+    assert kq["kept"] == 12 and kq["speakers"] == 3
+    assert {r.speaker for r in m.reals} == {"001_nguyen_van_a", "002_tran_thi_b",
+                                            "003_le_van_c"}
+    assert all(r.text for r in m.reals), "transcript phải khớp theo từng đường dẫn"
+    assert all(r.path.startswith(f"real/{SOURCE}/") for r in m.reals)
+
+
+# --------------------------- convert + đánh giá đầu vào trong MỘT bước
+def _bo_du_lieu_la(tmp_path):
+    """Bộ dữ liệu lạ: speaker nằm trong TÊN FILE, transcript ở labels.csv."""
+    import csv
+
+    from conftest import SENTENCES
+
+    raw = tmp_path / "dataset-b" / "audio"
+    raw.mkdir(parents=True)
+    cau = {}
+    for spk in ("001_a", "002_b", "003_c"):
+        for i in range(1, 5):
+            ten = f"{spk}_{i:04d}.wav"
+            sf.write(str(raw / ten), speech_like(4.0, seed=hash(ten) % 9999), SR,
+                     subtype="PCM_16")
+            cau[ten] = SENTENCES[i % len(SENTENCES)]
+    with (raw.parent / "labels.csv").open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["file", "transcript"])
+        w.writerows(cau.items())
+    return raw, cau
+
+
+def _convert_dung(cau, tang_nguon="dataset_b"):
+    import csv
+    import shutil
+
+    def convert(raw, out):
+        rows = []
+        for wav in sorted(raw.glob("*.wav")):
+            speaker = wav.name.rsplit("_", 1)[0]
+            dich = out / "real" / tang_nguon / speaker / wav.name
+            dich.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(wav, dich)
+            rows.append((str(dich.relative_to(out)), cau[wav.name]))
+        with (out / "metadata.csv").open("w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["path", "text"])
+            w.writerows(rows)
+
+    return convert
+
+
+def test_convert_and_verify_runs_both_in_one_step(tmp_path):
+    from aidetector.ingest import convert_and_verify
+
+    raw, cau = _bo_du_lieu_la(tmp_path)
+    kq = convert_and_verify("dataset_b", raw, _convert_dung(cau),
+                            out=tmp_path / "converted")
+
+    assert kq["converted"] and not kq["skipped"]
+    assert kq["report"]["ok"] and kq["report"]["speakers"] == 3
+    assert kq["report"]["with_text"] == 12
+    assert Path(kq["root"]).name == "converted"
+
+
+def test_the_store_short_circuits_everything(tmp_path):
+    """Đã có trong kho ⇒ không gọi CONVERT, không kiểm gì cả."""
+    from aidetector.ingest import convert_and_verify
+
+    raw, _ = _bo_du_lieu_la(tmp_path)
+
+    def khong_duoc_goi(a, b):
+        raise AssertionError("CONVERT bị gọi dù kho đã có nguồn này")
+
+    kq = convert_and_verify("dataset_b", raw, khong_duoc_goi,
+                            out=tmp_path / "converted", already=8246)
+    assert kq["skipped"] and kq["already"] == 8246
+    assert not (tmp_path / "converted").exists()
+
+
+def test_a_convert_writing_the_wrong_folder_name_is_caught(tmp_path):
+    """`SOURCE` là khoá hỏi kho — lệch một chữ là phiên sau convert lại từ đầu."""
+    from aidetector.ingest import convert_and_verify
+
+    raw, cau = _bo_du_lieu_la(tmp_path)
+    with pytest.raises(ValueError, match="tên nguồn phải khớp"):
+        convert_and_verify("dataset_b", raw, _convert_dung(cau, tang_nguon="go_nham"),
+                           out=tmp_path / "converted")
+
+
+def test_input_without_transcript_is_rejected(tmp_path):
+    """Fake không ghép cặp được với real nào — cả thiết kế corpus dựa vào việc ghép cặp."""
+    import shutil
+
+    from aidetector.ingest import convert_and_verify
+
+    raw, _ = _bo_du_lieu_la(tmp_path)
+
+    def convert(r, out):
+        for wav in sorted(r.glob("*.wav")):
+            dich = out / "real" / "dataset_b" / wav.name.rsplit("_", 1)[0] / wav.name
+            dich.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(wav, dich)          # cố ý không ghi metadata.csv
+
+    with pytest.raises(ValueError, match="transcript"):
+        convert_and_verify("dataset_b", raw, convert, out=tmp_path / "converted")
+
+
+def test_verification_runs_even_without_a_convert_function(tmp_path):
+    """Đường KHÔNG có CONVERT là đường hay hỏng nhất: adapter sẵn có đọc sai tầng speaker."""
+    from aidetector.ingest import convert_and_verify
+
+    phang = tmp_path / "mot_dong"
+    phang.mkdir()
+    for i in range(6):
+        sf.write(str(phang / f"{i}.wav"), speech_like(4.0, seed=i), SR, subtype="PCM_16")
+
+    with pytest.raises(ValueError, match="speaker"):
+        convert_and_verify("phang", phang)
+
+
+def test_flat_recordings_are_screened_then_placed(tmp_path, caplog):
+    """`/dataset_A/56456456456456.mp3` → đánh giá → đạt → thư mục riêng, tên `_001`.
+
+    File không đạt thì KHÔNG vào cây: đỡ cho `ingest` giải mã rồi `validate` loại lại.
+    """
+    import logging
+
+    from aidetector.ingest import convert_flat_recordings
+
+    raw = tmp_path / "dataset-a"
+    raw.mkdir()
+    for ten in ("56456456456456", "78978978978978", "12312312312312"):
+        sf.write(str(raw / f"{ten}.wav"), speech_like(4.0, seed=hash(ten) % 999), SR,
+                 subtype="PCM_16")
+    # Ba kiểu không đạt, mỗi kiểu một lý do chuẩn hoá không sửa được.
+    sf.write(str(raw / "qua_ngan.wav"), speech_like(1.0, seed=7), SR, subtype="PCM_16")
+    sf.write(str(raw / "rate_thap.wav"), speech_like(4.0, seed=8)[::2], 8_000,
+             subtype="PCM_16")
+    (raw / "khong_doc_duoc.wav").write_bytes(b"khong phai wav")
+
+    out = tmp_path / "converted"
+    with caplog.at_level(logging.INFO):
+        kq = convert_flat_recordings(raw, out, source="dataset_a")
+
+    assert kq["recordings"] == 6 and kq["kept"] == 3
+    assert set(kq["rejected"]) == {"ngắn hơn 3s", "sample rate 8000 < 16000",
+                                   "đọc không được (LibsndfileError)"}
+
+    goc = out / "real" / "dataset_a"
+    assert sorted(p.name for p in goc.iterdir()) == [
+        "12312312312312", "56456456456456", "78978978978978"]
+    # Quy ước tên: <stem>_001 trong thư mục <stem>.
+    assert (goc / "56456456456456" / "56456456456456_001.wav").exists()
+    # Chỉ CHÉP, không giải mã: byte phải y hệt file gốc.
+    assert (goc / "56456456456456" / "56456456456456_001.wav").read_bytes() == \
+        (raw / "56456456456456.wav").read_bytes()
+
+
+def test_two_files_of_one_speaker_get_separate_numbers(tmp_path):
+    """Nhiều file dồn về một speaker thì không được đè nhau."""
+    from aidetector.ingest import convert_flat_recordings
+
+    raw = tmp_path / "raw" / "nguoi_a"
+    raw.mkdir(parents=True)
+    for i in (1, 2, 3):
+        sf.write(str(raw / f"lan{i}.wav"), speech_like(4.0, seed=i), SR, subtype="PCM_16")
+
+    out = tmp_path / "converted"
+    kq = convert_flat_recordings(raw.parent, out, source="d", speaker_from="parent")
+
+    assert kq["kept"] == 3
+    tep = sorted(p.name for p in (out / "real" / "d" / "nguoi_a").iterdir())
+    assert tep == ["nguoi_a_001.wav", "nguoi_a_002.wav", "nguoi_a_003.wav"]
+
+
+def test_screening_leaves_post_normalisation_checks_to_validate(tmp_path):
+    """Clipping và gần-im-lặng chỉ có nghĩa SAU chuẩn hoá — sàng ở nguồn là sai đối tượng.
+
+    File im lặng hoàn toàn nhưng dài và đúng sample rate vẫn qua được cửa convert; nó bị
+    `validate` loại sau khi `ingest` chuẩn hoá. Đó là đúng chỗ.
+    """
+    import numpy as np
+
+    from aidetector.ingest import convert_flat_recordings
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    sf.write(str(raw / "im_lang.wav"), np.zeros(SR * 4, dtype="float32"), SR,
+             subtype="PCM_16")
+    kq = convert_flat_recordings(raw, tmp_path / "out", source="d")
+    assert kq["kept"] == 1 and not kq["rejected"]
+
+
+def test_the_screening_function_can_be_replaced(tmp_path):
+    """Mỗi bộ dữ liệu có kiểu rác riêng — cái gì đáng loại ở nguồn thì chỉ người biết bộ
+    đó mới nói được, nên phép đánh giá phải truyền vào được."""
+    from aidetector.ingest import convert_flat_recordings
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    for ten in ("tot_a", "tot_b", "tot_c", "NHAP_x", "NHAP_y"):
+        sf.write(str(raw / f"{ten}.wav"), speech_like(4.0, seed=hash(ten) % 99), SR,
+                 subtype="PCM_16")
+
+    def cua_toi(f):
+        # Quy ước riêng của bộ này: tiền tố NHAP_ là bản thu thử, không dùng.
+        return "bản thu thử (NHAP_)" if f.stem.startswith("NHAP_") else None
+
+    kq = convert_flat_recordings(raw, tmp_path / "out", source="d", screen=cua_toi)
+
+    assert kq["recordings"] == 5 and kq["kept"] == 3
+    assert kq["rejected"] == {"bản thu thử (NHAP_)": 2}
+
+
+def test_a_custom_screen_can_build_on_the_default(tmp_path):
+    """Thêm luật riêng mà không mất ba phép sàng mặc định."""
+    from aidetector.ingest import convert_flat_recordings, screen_source_file
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    sf.write(str(raw / "dai_va_tot.wav"), speech_like(4.0, seed=1), SR, subtype="PCM_16")
+    sf.write(str(raw / "qua_ngan.wav"), speech_like(1.0, seed=2), SR, subtype="PCM_16")
+    sf.write(str(raw / "loai_tay.wav"), speech_like(4.0, seed=3), SR, subtype="PCM_16")
+
+    def cua_toi(f):
+        return screen_source_file(f) or ("trong danh sách đen"
+                                         if f.stem == "loai_tay" else None)
+
+    kq = convert_flat_recordings(raw, tmp_path / "out", source="d", screen=cua_toi)
+    assert kq["kept"] == 1
+    assert set(kq["rejected"]) == {"ngắn hơn 3s", "trong danh sách đen"}

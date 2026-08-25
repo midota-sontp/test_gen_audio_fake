@@ -853,26 +853,29 @@ def test_the_resume_cell_reads_the_recorded_speaker_progress(notebook):
     assert "speakers_done" in src and "speakers_todo" in src
 
 
-def test_min_seconds_is_one_knob_applied_to_every_stage(notebook, notebook_code):
-    """Chuẩn độ dài phải giống nhau ở mọi stage.
+def test_the_duration_window_is_one_knob_applied_to_every_stage(notebook, notebook_code):
+    """Cửa sổ độ dài phải giống nhau ở mọi stage.
 
     Hạ ngưỡng cho `ingest` mà không hạ cho `generate` là real giữ tới 2s trong khi fake
     dưới 3s bị bỏ — chính độ dài thành dấu hiệu phân biệt hai lớp.
     """
-    assert notebook_code.count("MIN_SECONDS = ") == 1, "khai báo trùng ⇒ hai chuẩn"
-    dat = _cells_with(notebook, "MIN_SECONDS = ")[0]
-    chay = _cells_with(notebook, "def run(")[0]
+    for ten in ("MIN_SECONDS = ", "MAX_SECONDS = "):
+        assert notebook_code.count(ten) == 1, f"{ten} khai báo trùng ⇒ hai chuẩn"
 
+    chay = _cells_with(notebook, "def run(")[0]
+    dat = _cells_with(notebook, "MIN_SECONDS = ")[0]
     src = _cell_src(notebook, "def run(")
-    assert 'audio.min_seconds={_ms}' in src
     # `run` đọc biến lúc GỌI nên khai báo sau cũng được; không được đọc lúc định nghĩa.
-    assert 'globals().get("MIN_SECONDS")' in src
+    for ten in ("MIN_SECONDS", "MAX_SECONDS"):
+        assert f'globals().get("{ten}")' in src
+    assert 'f"audio.{_k}={_v}"' in src
     assert chay < dat, "run phải sẵn sàng trước khi ô đặt hằng số chạy"
 
-    # Không stage nào được tự đặt ngưỡng riêng.
+    # Không stage nào được tự đặt ngưỡng riêng — chỉ `run` dán vào, một lần, cho tất cả.
     rieng = [i for i, c in enumerate(notebook["cells"])
-             if c["cell_type"] == "code" and "audio.min_seconds" in "".join(c["source"])]
-    assert rieng == [chay, dat] or rieng == [chay], rieng
+             if c["cell_type"] == "code" and i != chay
+             and '"--set", "audio.' in "".join(c["source"])]
+    assert not rieng, f"ô {rieng} tự truyền ngưỡng độ dài"
 
 
 def test_the_upload_folder_is_wiped_before_each_push(notebook):
@@ -912,13 +915,11 @@ def test_the_resumed_corpus_is_migrated_to_the_current_layout(notebook):
 
 
 # ---------------------------------- convert (dataset lạ) và migrate (corpus cũ) tách đôi
-def test_structure_conversion_is_previewed_before_paying_for_it(notebook):
+def test_structure_conversion_is_verified_before_paying_for_it(notebook):
     """Adapter đọc sai cấu trúc là hỏng mọi thứ phía sau — và ingest 12.000 file mới biết
-    là trả giá vô ích. Ô xem trước không giải mã file nào."""
-    idx = [i for i in _cells_with(notebook, 'run("ingest"')
-           if '"--dry-run"' in "".join(notebook["cells"][i]["source"])]
-    assert idx, "thiếu ô xem trước cấu trúc"
-    assert idx[0] < _cells_with(notebook, "INGEST_ADDED = ")[0], "phải xem trước khi nạp thật"
+    là trả giá vô ích. Phép kiểm chỉ duyệt tên đường dẫn, không giải mã file nào."""
+    o_convert = _cells_with(notebook, "convert_and_verify(")[0]
+    assert o_convert < _cells_with(notebook, "INGEST_ADDED = ")[0], "phải kiểm trước khi nạp thật"
 
 
 def test_the_convert_cell_is_the_only_place_that_knows_the_input_layout(notebook):
@@ -928,13 +929,13 @@ def test_the_convert_cell_is_the_only_place_that_knows_the_input_layout(notebook
     bước sau làm việc trên cây chuẩn và không cần biết dữ liệu vốn nằm thế nào.
     """
     src = _cell_src(notebook, "CONVERT = None")
-    for phai_co in ("SOURCE = ", "def CONVERT(raw, out)", '_nguon = ["--name", SOURCE]'):
+    for phai_co in ("SOURCE  = ", "def CONVERT(raw, out)", '_nguon = ["--name", SOURCE]'):
         assert phai_co in src, f"ô convert thiếu {phai_co!r}"
     # Convert chỉ dựng lại CẤU TRÚC; chuẩn hoá audio là việc của ingest, làm hai lần là
     # bào mòn tín hiệu (trim ăn dần, clip sát ngưỡng rơi khỏi cửa sổ độ dài).
-    assert "KHÔNG chuẩn hoá audio" in src
+    assert "Không resample, không chuẩn mức, không cắt độ dài" in src
 
-    # Và nó phải chạy TRƯỚC ingest, đồng thời quyết định adapter mà ingest dùng.
+    # Và nó phải chạy TRƯỚC ingest, đồng thời quyết định tên nguồn ingest dùng.
     convert = _cells_with(notebook, "CONVERT = None")[0]
     ingest = _cells_with(notebook, "INGEST_ADDED = ")[0]
     assert convert < ingest
@@ -960,19 +961,49 @@ def test_convert_is_skipped_when_the_store_already_has_the_source(notebook):
 
     convert = _cell_src(notebook, "CONVERT = None")
     assert "_da_co = NGUON_DA_CO.get(SOURCE, 0)" in convert
-    # Hỏi kho TRƯỚC khi gọi CONVERT, không phải sau.
-    assert convert.index("_da_co = ") < convert.index("CONVERT(Path(RAW)")
-    assert "BỎ QUA convert" in convert
+    # Kho được hỏi trước, và câu trả lời đi thẳng vào hàm gộp qua `already=`.
+    assert "already=_da_co" in convert
+    assert convert.index("_da_co = ") < convert.index("convert_and_verify(")
 
     ingest = _cell_src(notebook, "INGEST_ADDED = ")
     assert "elif _da_co:" in ingest, "ingest cũng phải bỏ qua khi kho đã có nguồn"
 
 
-def test_a_converted_tree_is_checked_against_the_input_standard(notebook):
-    """Dev viết CONVERT ⇒ dev viết sai được. Cây sai chuẩn thì mọi bước sau vô nghĩa."""
+def test_convert_and_verify_are_one_call(notebook):
+    """Ba việc đi liền nhau nên nằm trong một hàm ở repo, không rải ra ô notebook.
+
+    Tách ra thì rất dễ có đường đi bỏ qua phép kiểm — mà đường bị bỏ qua đúng là đường
+    hay hỏng nhất: adapter sẵn có đọc sai tầng thư mục speaker của một bộ dữ liệu lạ.
+    """
     src = _cell_src(notebook, "CONVERT = None")
-    assert 'raise SystemExit("CONVERT dựng ra cây sai chuẩn' in src
-    for dieu_kien in ("real/<nguồn>/<speaker>/*.wav", "ít nhất 3", "phải khớp SOURCE"):
-        assert dieu_kien in src, f"thiếu phép kiểm: {dieu_kien}"
-    # Kiểm CẤU TRÚC thôi — chất lượng audio là việc của `validate` ở A2c.
-    assert "chất lượng audio là việc của `validate`" in src
+    assert "from aidetector.ingest import convert_and_verify" in src
+    assert src.count("convert_and_verify(") == 1, "phải đúng MỘT lời gọi"
+    # Ô chỉ còn khai báo và in kết quả; không có nhánh nào tự đi vòng qua hàm đó.
+    assert "if CONVERT is not None" not in src
+    assert "RAW = _kq[\"root\"]" in src
+
+
+def test_a_bad_input_stops_the_session(notebook):
+    """`run()` dừng phiên khi lệnh trả mã khác 0 — verify phải dùng chính đường đó."""
+    from aidetector.ingest import _preview
+    from aidetector.ingest.base import SourceItem
+
+    class Gia:
+        name = "gia"
+
+    def mot_speaker():
+        for i in range(4):
+            yield SourceItem(key=f"k{i}", audio_path=Path(f"/x/{i}.wav"),
+                             speaker="mot_giong", text="xin chào các bạn hôm nay")
+
+    r = _preview(Gia(), mot_speaker(), "nguon_la", 4)
+    assert r["ok"] is False
+    assert any("speaker" in s for s in r["problems"])
+
+    def khong_text():
+        for i in range(9):
+            yield SourceItem(key=f"k{i}", audio_path=Path(f"/x/{i}.wav"),
+                             speaker=f"spk{i}", text="")
+
+    r = _preview(Gia(), khong_text(), "nguon_la", 9)
+    assert r["ok"] is False and any("transcript" in s for s in r["problems"])
