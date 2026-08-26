@@ -73,35 +73,49 @@ def _spread_by_speaker(items: Iterator[SourceItem]) -> Iterator[SourceItem]:
                 yield nxt
 
 
-def screen_source_file(f: Path, min_seconds: float = 3.0,
-                       min_sample_rate: int = 16_000) -> str | None:
-    """Phép đánh giá MẶC ĐỊNH cho một file nguồn: trả lý do bị loại, hoặc None nếu qua.
+def screen_source_file(
+    f: Path, spec: AudioSpec | None = None, min_sample_rate: int = 16_000,
+) -> str | None:
+    """Một file nguồn có đạt chuẩn corpus không — trả lý do bị loại, hoặc None nếu đạt.
 
-    Truyền hàm khác vào `convert_flat_recordings(screen=...)` để thay — chữ ký chỉ cần
-    `(Path) -> str | None`. Hàm này dùng được làm nền cho hàm của bạn.
+    Đánh giá bằng ĐÚNG `check_quality` và ĐÚNG `AudioSpec` mà `validate` dùng, trên bản
+    audio đã chuẩn hoá. Nếu chỉ đọc header thì "đạt chuẩn" ở đây và ở `validate` là hai
+    thứ khác nhau, và một file lọt cửa này vẫn bị loại ba bước sau.
 
-    Chỉ xét những gì chuẩn hoá KHÔNG sửa được, và đọc từ header chứ không giải mã:
+    Chuẩn hoá ở đây chỉ để QUYẾT ĐỊNH rồi bỏ đi — `convert_flat_recordings` chép file
+    GỐC. Nhờ vậy tín hiệu vẫn chỉ đi qua chuỗi chuẩn hoá một lần, ở `ingest`.
 
-    * đọc không được ⇒ không có đường nào cứu
-    * ngắn hơn `min_seconds` ⇒ chuẩn hoá chỉ làm nó ngắn thêm (trim cắt silence)
-    * sample rate thấp hơn chuẩn corpus ⇒ nâng lên là bịa ra phần phổ không tồn tại, và
-      đó đúng là chiều mà mô hình lấy làm đường tắt
-
-    Những gì chỉ có nghĩa SAU chuẩn hoá — clipping, gần im lặng, độ dài sau khi cắt
-    silence — để `validate` soi trên audio đã chuẩn hoá. Soi ở đây là soi sai đối tượng.
+    Truyền hàm khác vào `convert_flat_recordings(screen=...)` để thay; chữ ký chỉ cần
+    `(Path) -> str | None`, và hàm này dùng được làm nền.
     """
     import soundfile as sf
 
+    from ..corpus.spec import check_quality
+
+    spec = spec or AudioSpec()
+
+    # Sample rate phải xét TRƯỚC khi chuẩn hoá: `load_audio` resample lên 16 kHz nên sau
+    # đó không còn dấu vết gì của việc nguồn vốn là 8 kHz — mà phần phổ nâng lên là bịa,
+    # và đó đúng là chiều mô hình lấy làm đường tắt.
     try:
         info = sf.info(str(f))
     except Exception as exc:  # noqa: BLE001 — nguồn ngoài, đủ kiểu hỏng
         return f"đọc không được ({type(exc).__name__})"
-    if info.frames == 0:
-        return "rỗng"
-    if info.frames / info.samplerate < min_seconds:
-        return f"ngắn hơn {min_seconds:g}s"
     if info.samplerate < min_sample_rate:
         return f"sample rate {info.samplerate} < {min_sample_rate}"
+
+    reasons: Counter[str] = Counter()
+    chunks = normalize_file(f, spec, reasons)
+    if not chunks:
+        ma = next(iter(reasons), "không chuẩn hoá được")
+        return {"too_short": f"ngắn hơn {spec.min_seconds:g}s sau khi cắt silence",
+                "too_long": f"dài hơn {spec.max_seconds:g}s",
+                "empty": "rỗng",
+                "unreadable": "đọc không được"}.get(ma, ma)
+    for c in chunks:
+        loi = check_quality(c, spec, str(f))
+        if loi:
+            return loi[0].code
     return None
 
 
@@ -110,7 +124,7 @@ def convert_flat_recordings(
     out: str | Path,
     source: str,
     screen: "Callable[[Path], str | None] | None" = None,
-    min_seconds: float = 3.0,
+    spec: AudioSpec | None = None,
     min_sample_rate: int = 16_000,
     speaker_from: str = "stem",
 ) -> dict:
@@ -123,9 +137,8 @@ def convert_flat_recordings(
     đạt thì không vào cây — đỡ cho `ingest` phải giải mã rồi `validate` phải loại.
 
     `screen(f) -> str | None` là phép đánh giá: trả chuỗi lý do để loại, `None` để nhận.
-    Mặc định là `screen_source_file` — chỉ xét những gì chuẩn hoá **không sửa được**.
-    Phép kiểm chất lượng thật chạy ở `validate`, trên audio đã chuẩn hoá; đó mới là audio
-    đi vào huấn luyện, và sàng clipping ở nguồn là sàng sai đối tượng.
+    Mặc định là `screen_source_file`, dùng đúng `check_quality` và đúng `AudioSpec` mà
+    `validate` dùng — nên "đạt chuẩn" ở đây và ở `validate` là cùng một nghĩa.
 
     CHỈ chép file, không giải mã: resample, chuẩn mức, cắt độ dài là việc của `ingest`.
     """
@@ -135,7 +148,7 @@ def convert_flat_recordings(
     raw, out = Path(raw), Path(out)
     # Phép đánh giá là tham số: mỗi bộ dữ liệu có kiểu rác riêng, và cái gì đáng loại ở
     # nguồn thì chỉ người biết bộ đó mới nói được.
-    danh_gia = screen or (lambda f: screen_source_file(f, min_seconds, min_sample_rate))
+    danh_gia = screen or (lambda f: screen_source_file(f, spec, min_sample_rate))
     bo: Counter[str] = Counter()
     dem = giu = 0
     for f in sorted(p for p in raw.rglob("*") if p.suffix.lower() in AUDIO_EXTENSIONS):

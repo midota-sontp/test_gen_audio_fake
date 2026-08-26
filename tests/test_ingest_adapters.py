@@ -547,7 +547,8 @@ def test_flat_recordings_are_screened_then_placed(tmp_path, caplog):
         kq = convert_flat_recordings(raw, out, source="dataset_a")
 
     assert kq["recordings"] == 6 and kq["kept"] == 3
-    assert set(kq["rejected"]) == {"ngắn hơn 3s", "sample rate 8000 < 16000",
+    assert set(kq["rejected"]) == {"ngắn hơn 3s sau khi cắt silence",
+                                   "sample rate 8000 < 16000",
                                    "đọc không được (LibsndfileError)"}
 
     goc = out / "real" / "dataset_a"
@@ -577,11 +578,11 @@ def test_two_files_of_one_speaker_get_separate_numbers(tmp_path):
     assert tep == ["nguoi_a_001.wav", "nguoi_a_002.wav", "nguoi_a_003.wav"]
 
 
-def test_screening_leaves_post_normalisation_checks_to_validate(tmp_path):
-    """Clipping và gần-im-lặng chỉ có nghĩa SAU chuẩn hoá — sàng ở nguồn là sai đối tượng.
+def test_screening_uses_the_same_standard_as_validate(tmp_path):
+    """"Đạt chuẩn" ở convert phải cùng nghĩa với "đạt chuẩn" ở `validate`.
 
-    File im lặng hoàn toàn nhưng dài và đúng sample rate vẫn qua được cửa convert; nó bị
-    `validate` loại sau khi `ingest` chuẩn hoá. Đó là đúng chỗ.
+    File im lặng hoàn toàn từng lọt cửa convert (header nói nó dài 4 giây, 16 kHz) rồi bị
+    loại ba bước sau. Giờ nó bị bắt ngay ở cửa, bằng đúng `check_quality`.
     """
     import numpy as np
 
@@ -591,8 +592,34 @@ def test_screening_leaves_post_normalisation_checks_to_validate(tmp_path):
     raw.mkdir()
     sf.write(str(raw / "im_lang.wav"), np.zeros(SR * 4, dtype="float32"), SR,
              subtype="PCM_16")
+    sf.write(str(raw / "tot.wav"), speech_like(4.0, seed=1), SR, subtype="PCM_16")
+
     kq = convert_flat_recordings(raw, tmp_path / "out", source="d")
-    assert kq["kept"] == 1 and not kq["rejected"]
+    assert kq["kept"] == 1, kq["rejected"]
+    assert set(kq["rejected"]) <= {"silent", "empty", "rỗng"}, kq["rejected"]
+    assert (tmp_path / "out" / "real" / "d" / "tot" / "tot_001.wav").exists()
+
+
+def test_screening_decides_on_normalised_audio_but_copies_the_original(tmp_path):
+    """Quyết định trên bản đã chuẩn hoá, chép file GỐC.
+
+    Nhờ vậy tín hiệu chỉ đi qua chuỗi chuẩn hoá MỘT lần, ở `ingest`. Chép bản đã chuẩn
+    hoá thì `ingest` chuẩn hoá lần hai: `trim` ăn tiếp phần silence để lại và clip sát
+    ngưỡng rơi khỏi cửa sổ độ dài.
+    """
+    from aidetector.ingest import convert_flat_recordings
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    # 44,1 kHz: nếu convert chép bản đã chuẩn hoá thì file ra sẽ là 16 kHz.
+    sf.write(str(raw / "cao.wav"), speech_like(4.0, seed=3, sr=44_100), 44_100,
+             subtype="PCM_16")
+
+    kq = convert_flat_recordings(raw, tmp_path / "out", source="d")
+    assert kq["kept"] == 1, kq["rejected"]
+    ra = tmp_path / "out" / "real" / "d" / "cao" / "cao_001.wav"
+    assert sf.info(str(ra)).samplerate == 44_100, "phải là file gốc, chưa resample"
+    assert ra.read_bytes() == (raw / "cao.wav").read_bytes()
 
 
 def test_the_screening_function_can_be_replaced(tmp_path):
@@ -632,4 +659,5 @@ def test_a_custom_screen_can_build_on_the_default(tmp_path):
 
     kq = convert_flat_recordings(raw, tmp_path / "out", source="d", screen=cua_toi)
     assert kq["kept"] == 1
-    assert set(kq["rejected"]) == {"ngắn hơn 3s", "trong danh sách đen"}
+    assert set(kq["rejected"]) == {"ngắn hơn 3s sau khi cắt silence",
+                                   "trong danh sách đen"}
