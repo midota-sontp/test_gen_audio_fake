@@ -296,50 +296,49 @@ python -m aidetector run --skip ingest generate
 
 ## Chạy trên Kaggle (GPU miễn phí)
 
-**Một file duy nhất: [notebooks/aidetector_kaggle.ipynb](notebooks/aidetector_kaggle.ipynb)**
-— `File → Import Notebook` trên Kaggle rồi chạy. Notebook **nhúng sẵn toàn bộ mã
-nguồn** (base64 của `aidetector/` + `configs/`), không cần clone repo hay thêm
-dataset chứa code.
+**Hai file, một cho mỗi việc** — `File → Import Notebook` trên Kaggle rồi chạy. Cả hai
+**nhúng sẵn toàn bộ mã nguồn** (base64 của `aidetector/` + `configs/`), không cần clone
+repo hay thêm dataset chứa code:
+
+| Notebook | Làm gì | Input cần add |
+|---|---|---|
+| [notebooks/aidetector_dataset.ipynb](notebooks/aidetector_dataset.ipynb) | ingest → generate → validate → **nghe thử + xem phổ** → đẩy lên Kaggle Dataset | một bộ giọng thật (VIVOS…) |
+| [notebooks/aidetector_train.ipynb](notebooks/aidetector_train.ipynb) | split → augment → features → train → evaluate | corpus do file trên đẩy lên |
 
 **Trong panel bên phải phải bật:** Accelerator = `GPU T4 x2`/`P100`, Internet = `On`.
 Rồi Add Input → Datasets một bộ giọng thật tiếng Việt. Không có GPU thì OmniVoice
 (voice cloning) gần như không chạy nổi — bỏ nó khỏi `--engines`, Piper và Kokoro vẫn
 chạy tốt trên CPU.
 
-Notebook chia hai phần, **chạy phần A trước**:
+**Chạy file dataset trước.** Nó dừng lại ở một corpus đã đóng gói và đẩy lên Kaggle
+Dataset, nên bạn kiểm tra được dữ liệu **trước khi** tốn giờ GPU huấn luyện: thống kê cân
+bằng real/fake, số lượng theo từng engine, tỉ lệ fake có real đối chứng, và nghe trực tiếp
+từng cặp real/fake cùng câu cùng giọng. Có công tắc `SMOKE = True` chạy thử ~40 mẫu trong
+vài phút. Xong rồi mới mở file train, add đúng dataset đó vào Input và Save & Run All.
 
-| | Làm gì | Ghi chú |
-|---|---|---|
-| **PHẦN A** | ingest → generate → validate → **nghe thử + xem phổ** → đẩy lên Dataset | có công tắc `SMOKE = True` chạy thử ~40 mẫu vài phút |
-| **PHẦN B** | split → augment → features → train → evaluate | chỉ chạy khi dataset đã ưng |
+#### Vì sao hai file chứ không một file với công tắc
 
-Phần A dừng lại ở một dataset đóng gói sẵn, nên bạn kiểm tra được dữ liệu **trước
-khi** tốn giờ GPU huấn luyện: thống kê cân bằng real/fake, số lượng theo từng engine,
-tỉ lệ fake có real đối chứng, và nghe trực tiếp từng cặp real/fake cùng câu cùng giọng.
+Sinh fake bằng voice cloning mất nhiều giờ (~4 giây/mẫu trên T4) nên hai việc không bao
+giờ nằm cùng một phiên. Tách file thì **mọi ô trong file đang mở đều là ô phải chạy** —
+Save & Run All không còn phải bỏ qua nửa notebook, và không có đường nào chạy lộn phần.
 
-#### `MODE` — phiên này chạy phần nào
+Ba chỗ hai file thật sự khác nhau, chứ không chỉ ẩn ô đi:
 
-Sinh fake bằng voice cloning mất nhiều giờ (~4 giây/mẫu trên T4), nên hai phần thường
-không nằm cùng một phiên. Công tắc `MODE` ở ô cài thư viện quyết định:
+* **File train không cài engine sinh audio nào** — đỡ vài phút và tránh hẳn màn
+  `transformers` 4.x/5.x giằng nhau, vì WavLM chạy được trên cả hai nhánh.
+* **File train không dò dataset REAL** — nó mount corpus đã sinh sẵn chứ không mount
+  VIVOS, nên đòi cho được một bộ giọng thật là dừng oan.
+* **File train bắt buộc phải có corpus** — không nạp được gì, hoặc nạp ra corpus thiếu hẳn
+  một lớp, thì ô A1b dừng ngay thay vì đốt mấy giờ GPU vào tay không.
 
-| `MODE` | Chạy | Dùng khi |
-|---|---|---|
-| `"dataset"` | chỉ phần A | dành cả phiên để sinh fake; corpus tự đẩy lên Dataset tại ranh giới mỗi speaker |
-| `"train"` | chỉ phần B | corpus đã có trong Dataset, chỉ muốn huấn luyện |
-| `"both"` (mặc định) | A rồi B | chạy thử, hoặc quy mô nhỏ đủ gọn trong một phiên |
+Đổi lại, `MODE = "both"` (chạy trọn pipeline trong một phiên) không còn: muốn thử
+end-to-end thì chạy file dataset với `SMOKE = True` rồi chạy file train.
 
-Ô nào không thuộc phần đang chạy thì tự bỏ qua và in lý do, nên **Save & Run All** ở chế
-độ nào cũng đúng — không phải chọn tay từng ô. Ba điểm `MODE` đổi hành vi chứ không chỉ
-bỏ qua:
-
-* **`"train"` không cài engine sinh audio nào** — đỡ vài phút và tránh hẳn màn `transformers`
-  4.x/5.x giằng nhau, vì WavLM chạy được trên cả hai nhánh.
-* **`"train"` không dò dataset REAL** — phiên đó mount corpus đã sinh sẵn chứ không mount
-  VIVOS, nên đòi cho được một bộ giọng thật ở ô A1 là dừng oan.
-* **`"train"` bắt buộc phải có corpus** — không bung được gì, hoặc bung ra corpus thiếu hẳn
-  một lớp, thì ô A1b dừng ngay thay vì để phần B đốt mấy giờ GPU vào tay không.
-
-Ô nạp corpus (A1b) chạy ở **mọi** chế độ — nó là đường duy nhất mang dữ liệu vào phiên.
+Hai file **không được sửa tay** — cả hai do `scripts/build_kaggle_notebook.py` sinh ra từ
+cùng một danh sách ô, nên ô dùng chung (bung mã nguồn, `run()`, **A1b** nạp corpus) giống
+nhau từng byte. Đó là thứ giữ cho file train không huấn luyện theo một chuẩn dữ liệu khác
+chuẩn lúc sinh; có test chặn cả ba việc: file lệch script, ô dùng chung lệch nhau, và file
+dùng một tên mà chính nó không định nghĩa.
 
 #### Chạy full nguồn, nhiều phiên
 
@@ -361,12 +360,12 @@ Vòng một phiên:
 2. **A3b** `--dry-run` xác nhận lại bằng đúng phép đếm của lượt sinh (theo `utt_id`), kèm
    tiến độ theo speaker.
 3. **A3b** sinh phần còn thiếu, đẩy lên dataset ở ranh giới mỗi speaker.
-4. **A3c** đếm lại: `còn 0` ⇒ xong, phiên sau đặt `MODE = "train"`. Còn dương ⇒ hết giờ
+4. **A3c** đếm lại: `còn 0` ⇒ xong, phiên sau mở file train. Còn dương ⇒ hết giờ
    giữa đường, vào lại là tiếp đúng chỗ.
 
 Số đo thật trên VIVOS: 12.420 file → **7.367** utterance đạt chuẩn (59,3%; phần bỏ là
 clip ngắn hơn `min_seconds = 3s`), 65 speaker. Với 3,7 giây/mẫu trên T4 thì sinh đủ 1:1 là
-**~7,6 giờ** — vừa trong một phiên `MODE = "dataset"` 9 giờ, nhưng sát; hết giờ giữa đường
+**~7,6 giờ** — vừa trong một phiên tạo dataset 9 giờ, nhưng sát; hết giờ giữa đường
 thì phiên sau tiếp, không mất gì.
 
 `PER_SPEAKER = None` là chọn "mọi utterance" thay vì "phần công bằng của mỗi giọng". Trần
@@ -380,7 +379,12 @@ Sau khi sửa code trong repo, build lại notebook cho khớp:
 python scripts/build_kaggle_notebook.py
 ```
 
-Payload tất định (cùng code ⇒ cùng hash) và có test chặn notebook lệch khỏi repo.
+Một lệnh sinh lại **cả hai** file. Payload tất định (cùng code ⇒ cùng hash) và có test
+chặn notebook lệch khỏi repo. Thử chạy trọn cả hai ngay trên máy, trong một `/kaggle` giả:
+
+```bash
+python scripts/run_notebook_locally.py /tmp/sandbox <thư-mục-VIVOS>
+```
 
 Config riêng: **[configs/kaggle.yaml](configs/kaggle.yaml)** — kế thừa `default.yaml`,
 chỉ đổi đường dẫn sang `/kaggle/working`, tăng batch và bật thêm `omnivoice`. Thiết bị
@@ -493,21 +497,20 @@ Thứ duy nhất tăng theo nhịp mà không tự dọn là **số version**: m
 bản mới nhất luôn là superset của mọi bản cũ. Mặc định `True` — xoá version là không lấy
 lại được.
 
-Ba chế độ dùng chung dataset đó:
+Hai notebook dùng chung dataset đó, nhưng chỉ một chiều đẩy:
 
-| `MODE` | Nạp về | Đẩy lên |
+| Notebook | Nạp về | Đẩy lên |
 |---|---|---|
-| `"dataset"` | A1b bung corpus phiên trước | ba mốc ở trên |
-| `"both"` | như trên | như trên |
-| `"train"` | A1b bung corpus — **bắt buộc**, không có thì dừng ngay | không đẩy |
+| `aidetector_dataset.ipynb` | A1b nạp corpus phiên trước | ba mốc ở trên |
+| `aidetector_train.ipynb` | A1b nạp corpus — **bắt buộc**, không có thì dừng ngay | không đẩy |
 
-`"train"` không đẩy là có chủ ý: phần B chạy `augment`, nó ghi thêm bản nhiễu/nén vào
+File train không đẩy là có chủ ý: phần B chạy `augment`, nó ghi thêm bản nhiễu/nén vào
 corpus. Đẩy sau đó là bơm dữ liệu phái sinh vào dataset, buộc mọi phiên sau tải thêm phần
 mà một lệnh `augment` sinh lại được trong vài phút. Mô hình và báo cáo đi đường Output
 (ô B4 gói `model.zip`, `reports_bundle.zip`).
 
-Chuỗi thường dùng: `MODE = "dataset"` vài phiên cho tới khi đủ mẫu (mỗi phiên chỉ sinh
-phần còn thiếu — xem `--dry-run` để biết còn bao nhiêu), rồi một phiên `MODE = "train"`.
+Chuỗi thường dùng: file dataset vài phiên cho tới khi đủ mẫu (mỗi phiên chỉ sinh phần còn
+thiếu — xem `--dry-run` để biết còn bao nhiêu), rồi một phiên file train.
 
 Cần Kaggle token: [kaggle.com/settings](https://www.kaggle.com/settings) → Create New
 Token, rồi Add-ons → Secrets thêm `KAGGLE_USERNAME` và `KAGGLE_KEY`. Không có token thì
@@ -533,9 +536,9 @@ công của nó.**
 | | Ô | Làm gì | Dừng phiên khi |
 |---|---|---|---|
 | 1 | — | **Add Input**: kho lưu trữ + bộ dữ liệu nguồn | — |
-| 2 | setup | `MODE` · `TTS_ENGINES` · `DATASET_ID` · `MIN_SECONDS` | `MODE` gõ sai |
+| 2 | setup | `TTS_ENGINES` · `DATASET_ID` · `MIN_SECONDS` (`MODE` đã chốt theo file) | `MODE` bị sửa tay thành giá trị lạ |
 | 3 | A1 | quy mô (`None` = toàn bộ nguồn) | không dataset nào đọc được |
-| 4 | **A1b** | nạp kho → `migrate` → in trạng thái, cả tổng lẫn **theo từng nguồn** | kho có dữ liệu mà **không mount được**; `MODE="train"` mà không có corpus; corpus chỉ một lớp |
+| 4 | **A1b** | nạp kho → `migrate` → in trạng thái, cả tổng lẫn **theo từng nguồn** | kho có dữ liệu mà **không mount được**; file train mà không có corpus; corpus chỉ một lớp |
 | 5 | A2 | `ingest` — bỏ qua phần đã có **trước khi giải mã** | <10 real · <3 speaker · 0 transcript |
 | 6 | **A2c** | `validate --fix` — **chỉ soi phần chưa đóng dấu** | >20% corpus hỏng (lỗi hệ thống, không tự xoá) |
 | 7 | A2b | kiểm `Đồng bộ: BẬT` → chốt mốc sau ingest | — |
@@ -543,10 +546,13 @@ công của nó.**
 | 9 | A3c | đếm lại: `còn 0` ⇒ xong | — |
 | 10 | A4 | `validate` + thống kê + nghe thử + đo giống giọng/phát âm | corpus không đạt chuẩn |
 | 11 | A5 | `sync_now()` (chặn, đợi lượt nền) + `sync_log()` | — |
-| 12 | B | split → augment → features → train → evaluate | chỉ khi `DO_TRAIN` |
+| 12 | B | split → augment → features → train → evaluate | ở file train, phiên riêng |
 
-Chuỗi điển hình: `MODE = "dataset"` vài phiên cho tới khi **A3c** báo `còn 0 phải sinh`,
-rồi một phiên `MODE = "train"`.
+Bảng trên là hai file gộp lại: ô 1–11 thuộc `aidetector_dataset.ipynb`, ô 12 thuộc
+`aidetector_train.ipynb`; ô 2 và 4 có ở cả hai và giống nhau từng byte.
+
+Chuỗi điển hình: file dataset vài phiên cho tới khi **A3c** báo `còn 0 phải sinh`, rồi một
+phiên file train.
 
 **Trước khi thả lượt sinh nhiều giờ đầu tiên**, gọi tay `sync_now()` ngay ở A2b khi corpus
 mới chỉ có real: thấy `✔ thêm version` là đường ống thông. Đường đẩy có thể hỏng vì token,

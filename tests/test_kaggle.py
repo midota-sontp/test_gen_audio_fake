@@ -156,12 +156,33 @@ def test_unpack_is_incremental(corpus, tmp_path):
 
 
 # ------------------------------------------------------------------- notebook
-NOTEBOOK = Path("notebooks/aidetector_kaggle.ipynb")
+#: Hai file, hai việc: sinh dataset mất nhiều giờ GPU, huấn luyện chỉ cần corpus đã có.
+#: Cả hai sinh ra từ CÙNG danh sách ô trong script build — xem `notebook` ở dưới.
+NOTEBOOKS = {
+    "dataset": Path("notebooks/aidetector_dataset.ipynb"),
+    "train": Path("notebooks/aidetector_train.ipynb"),
+}
 
 
 @pytest.fixture(scope="module")
 def notebook() -> dict:
-    return json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    """TẤT CẢ ô, đúng thứ tự build — hai file là hai hình chiếu của danh sách này.
+
+    Mọi test về NỘI DUNG pipeline soi ở đây: tách file không được làm mất ô nào, và
+    thứ tự các stage là thứ tự trong danh sách này. Còn những gì thuộc từng FILE
+    (nbformat, payload còn khớp repo, file có tự đủ không) thì soi qua `tep`.
+    """
+    builder = _load_builder()
+    files = builder.collect_files()
+    b64, sha, size = builder.build_payload(files)
+    cells = builder.build_cells(builder.payload_literal(b64), sha, size, len(files))
+    return {"cells": builder.cells_for(cells)}
+
+
+@pytest.fixture(scope="module", params=sorted(NOTEBOOKS))
+def tep(request) -> tuple[str, dict]:
+    """(phần, notebook) của từng file thật trên đĩa."""
+    return request.param, json.loads(NOTEBOOKS[request.param].read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
@@ -187,24 +208,27 @@ def _cell_src(notebook, needle) -> str:
     return "".join(notebook["cells"][found[0]]["source"])
 
 
-def test_there_is_exactly_one_notebook():
-    """Một file duy nhất để import — hai bản song song chỉ gây nhầm."""
-    assert sorted(p.name for p in Path("notebooks").glob("*.ipynb")) == [NOTEBOOK.name]
+def test_there_are_exactly_two_notebooks():
+    """Đúng hai file: một tạo dataset, một huấn luyện. Không có bản thứ ba lơ lửng."""
+    assert (sorted(p.name for p in Path("notebooks").glob("*.ipynb"))
+            == sorted(p.name for p in NOTEBOOKS.values()))
 
 
-def test_notebook_is_valid_nbformat(notebook):
-    assert notebook["nbformat"] == 4
-    assert notebook["cells"], "notebook rỗng"
-    for cell in notebook["cells"]:
+def test_notebook_is_valid_nbformat(tep):
+    _, nb = tep
+    assert nb["nbformat"] == 4
+    assert nb["cells"], "notebook rỗng"
+    for cell in nb["cells"]:
         assert cell["cell_type"] in ("markdown", "code")
         assert isinstance(cell["source"], list)
 
 
-def test_every_code_cell_parses_as_python(notebook):
+def test_every_code_cell_parses_as_python(tep):
     """Bỏ dòng magic `!...` của IPython rồi kiểm tra cú pháp Python thuần."""
     import ast
 
-    for i, cell in enumerate(notebook["cells"]):
+    _, nb = tep
+    for i, cell in enumerate(nb["cells"]):
         if cell["cell_type"] != "code":
             continue
         source = "".join(cell["source"])
@@ -212,10 +236,12 @@ def test_every_code_cell_parses_as_python(notebook):
         ast.parse(pure)  # ném SyntaxError kèm số dòng nếu hỏng
 
 
-def test_notebook_is_self_contained(notebook_text):
-    """Không được phụ thuộc vào việc clone repo hay mount dataset chứa code."""
-    assert "_PAYLOAD" in notebook_text and "base64.b64decode" in notebook_text
-    assert "git clone" not in notebook_text
+def test_notebook_is_self_contained(tep):
+    """MỖI file phải tự bung được mã nguồn: không clone repo, không dataset chứa code."""
+    _, nb = tep
+    text = "".join("".join(c["source"]) for c in nb["cells"])
+    assert "_PAYLOAD" in text and "base64.b64decode" in text
+    assert "git clone" not in text
 
 
 def _load_builder():
@@ -237,12 +263,14 @@ def test_payload_is_deterministic():
     assert builder.build_payload(files) == builder.build_payload(files)
 
 
-def test_notebook_payload_matches_the_current_source(notebook_text):
+def test_notebook_payload_matches_the_current_source(tep):
     """Payload nhúng phải khớp code trong repo; lệch ⇒ chạy lại script build."""
     builder = _load_builder()
     _, sha, _ = builder.build_payload(builder.collect_files())
-    assert sha in notebook_text, (
-        "notebook đã lệch với mã nguồn — chạy: python scripts/build_kaggle_notebook.py"
+    ten, nb = tep
+    assert sha in "".join("".join(c["source"]) for c in nb["cells"]), (
+        f"{NOTEBOOKS[ten].name} đã lệch với mã nguồn"
+        " — chạy: python scripts/build_kaggle_notebook.py"
     )
 
 
@@ -456,11 +484,12 @@ def test_tts_is_off_but_still_one_switch_away(notebook_code):
     assert "if TTS_ENGINES:" in notebook_code, "phải còn đường bật lại"
 
 
-# ------------------------------------------------------------ MODE: A hay B hay cả hai
+# ------------------------------------------------------------- MODE: file này làm phần nào
 #
-# Sinh fake bằng cloning mất nhiều giờ nên phần tạo dataset và phần huấn luyện thường
-# không nằm cùng một phiên. `MODE` chọn phiên này làm gì, và mọi ô phải tôn trọng nó —
-# Save & Run All là cách dùng thật, nên "bỏ qua bằng tay" không phải một lựa chọn.
+# Sinh fake bằng cloning mất nhiều giờ nên phần tạo dataset và phần huấn luyện không nằm
+# cùng một phiên — chúng là hai file. `MODE` được script build chốt sẵn trong mỗi file, và
+# mọi ô dùng chung phải tôn trọng nó: Save & Run All là cách dùng thật, nên "bỏ qua bằng
+# tay" không phải một lựa chọn.
 def _mode_block(notebook_code: str) -> str:
     """Đoạn suy ra MAKE_DATASET/DO_TRAIN — lấy ra để CHẠY, chứ không chỉ khớp chuỗi."""
     start = notebook_code.index("if MODE not in")
@@ -470,7 +499,6 @@ def _mode_block(notebook_code: str) -> str:
 @pytest.mark.parametrize("mode,phases", [
     ("dataset", (True, False)),
     ("train", (False, True)),
-    ("both", (True, True)),
 ])
 def test_mode_decides_which_phases_run(notebook_code, mode, phases):
     namespace = {"MODE": mode}
@@ -486,7 +514,7 @@ def test_a_misspelled_mode_stops_the_notebook(notebook_code):
 
 def test_mode_is_set_before_anything_reads_it(notebook):
     """MODE và `skipped()` phải nằm ở ô cài thư viện: nó quyết định cài gói nào."""
-    setup = _cells_with(notebook, 'MODE = "both"')
+    setup = _cells_with(notebook, "MODE = ")
     assert len(setup) == 1, "MODE phải khai báo đúng một chỗ"
     assert "def skipped(" in "".join(notebook["cells"][setup[0]]["source"])
 
@@ -585,9 +613,105 @@ def test_mode_gates_the_stages_that_actually_run(notebook, notebook_code, mode,
     assert not (khong_duoc_chay & called), f"MODE={mode} chạy thừa: {khong_duoc_chay & called}"
 
 
-def test_both_still_runs_the_whole_pipeline(notebook, notebook_code):
+def test_the_two_files_together_run_the_whole_pipeline(notebook, notebook_code):
+    """Tách file không được làm rơi stage nào ra ngoài cả hai."""
+    ca_hai = (_stages_that_run(notebook, notebook_code, "dataset")
+              | _stages_that_run(notebook, notebook_code, "train"))
     assert {"ingest", "generate", "split", "augment", "features", "train", "evaluate",
-            "detect"} <= _stages_that_run(notebook, notebook_code, "both")
+            "detect"} <= ca_hai
+
+
+# ----------------------------------------------- hai file: hình chiếu của một danh sách
+#
+# Hai file rời nhau thì nguy cơ số một là chúng lệch nhau: ô A1b ở file train nạp corpus
+# theo một chuẩn, ô sinh ở file dataset ghi theo chuẩn khác, và chỗ lệch chỉ lộ ra sau
+# nhiều giờ GPU. Nên hai file KHÔNG được sửa tay: chúng là hai hình chiếu của cùng một
+# danh sách ô, và phần dùng chung phải giống nhau từng byte.
+def _duoc_chieu(part: str) -> list[dict]:
+    builder = _load_builder()
+    files = builder.collect_files()
+    b64, sha, size = builder.build_payload(files)
+    cells = builder.build_cells(builder.payload_literal(b64), sha, size, len(files))
+    import copy
+
+    ra = copy.deepcopy(builder.cells_for(cells, part))
+    kia = builder.TRAIN if part == builder.DATASET else builder.DATASET
+    builder.dat_che_do(ra, part, builder.OUT[kia].name)
+    return ra
+
+
+def test_each_file_is_exactly_the_projection_of_the_shared_list(tep):
+    """Sửa tay một file là mở đường cho hai file lệch nhau — build lại thì mất hết."""
+    ten, nb = tep
+    assert [c["source"] for c in nb["cells"]] == [c["source"] for c in _duoc_chieu(ten)], (
+        f"{NOTEBOOKS[ten].name} lệch script build — chạy:"
+        " python scripts/build_kaggle_notebook.py"
+    )
+
+
+def test_the_shared_cells_are_byte_identical_in_both_files():
+    """Bung mã nguồn, `run()`, A1b nạp corpus: ba thứ cả hai file phải hiểu y như nhau."""
+    nbs = {ten: json.loads(p.read_text(encoding="utf-8")) for ten, p in NOTEBOOKS.items()}
+    src = {ten: ["".join(c["source"]) for c in nb["cells"]] for ten, nb in nbs.items()}
+    chung = [s for s in src["dataset"] if s in src["train"]]
+    for dau in ("_PAYLOAD = (", "def run(*args", "_cay_bung_san(", 'run("migrate")'):
+        assert any(dau in s for s in chung), f"ô chứa {dau!r} phải dùng chung, không sao chép"
+    # `MODE = ` là chỗ DUY NHẤT hai file được khác nhau trong phần dùng chung.
+    assert 'MODE = "dataset"' in "".join(src["dataset"])
+    assert 'MODE = "train"' in "".join(src["train"])
+
+
+def test_each_file_defines_every_name_it_uses(tep):
+    """Ô nào dùng tên gì thì tên đó phải được định nghĩa trong CHÍNH file đó, trước đó.
+
+    Đây là rào duy nhất cho việc tách file: một helper nằm ở ô chỉ có trong file dataset
+    mà file train lại gọi thì lỗi chỉ nổ ra trên Kaggle, sau khi đã tải xong mọi thứ.
+    """
+    import ast
+    import builtins
+
+    def dinh_nghia(tree):
+        ra = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                ra.add(n.id)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                ra.add(n.name)
+            elif isinstance(n, ast.arg):
+                ra.add(n.arg)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                ra.update((a.asname or a.name).split(".")[0] for a in n.names)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                ra.add(n.name)
+            elif isinstance(n, (ast.Global, ast.Nonlocal)):
+                ra.update(n.names)
+        return ra
+
+    ten, nb = tep
+    co = set(dir(builtins)) | {"get_ipython", "display"}
+    for i, cell in enumerate(nb["cells"]):
+        if cell["cell_type"] != "code":
+            continue
+        src = "\n".join(l for l in "".join(cell["source"]).splitlines()
+                         if not l.lstrip().startswith("!"))
+        tree = ast.parse(src)
+        co |= dinh_nghia(tree)          # tên định nghĩa trong chính ô này cũng hợp lệ
+        thieu = {n.id for n in ast.walk(tree)
+                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)} - co
+        assert not thieu, f"{NOTEBOOKS[ten].name} ô {i} dùng tên chưa có: {sorted(thieu)}"
+
+
+@pytest.mark.parametrize("part,khong_duoc_co", [
+    ("dataset", ('run("split"', 'run("features"', 'run("train"', 'run("evaluate"')),
+    ("train", ('run("ingest"', 'run("generate"', "SYNC_SCRIPT.write_text", "CONVERT")),
+])
+def test_neither_file_carries_the_other_half(part, khong_duoc_co):
+    """Ô của phần kia còn nằm lại là mời người dùng chạy nó — hoặc chỉ để đọc rồi bỏ qua."""
+    nb = json.loads(NOTEBOOKS[part].read_text(encoding="utf-8"))
+    code = "".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
+    for dau in khong_duoc_co:
+        assert dau not in code, f"{NOTEBOOKS[part].name} còn sót {dau!r}"
+
 
 
 # ---------------------------------------- đồng bộ Kaggle Dataset: một nguồn, ba mốc
@@ -816,7 +940,31 @@ def test_a_session_that_cannot_load_the_corpus_stops(notebook):
     assert "raise SystemExit(" in src
     # Phải chặn cả hai đường biết dataset có dữ liệu: manifest rời, và hỏi API.
     assert '"corpus.zip", "metadata.csv",' in src
-    assert src.index("_co_du_lieu = f\"{len(rows)} bản ghi") < src.index("if _co_du_lieu:")
+    assert src.index("_co_du_lieu = (f\"{len(rows)} bản ghi") < src.index("if _co_du_lieu:")
+
+
+# ------------------------------------------- Kaggle giải nén zip, ô nạp phải chịu được
+def test_an_already_extracted_corpus_is_adopted_by_symlink(notebook):
+    """Kaggle giải nén mọi .zip đưa lên dataset và không giữ lại bản nén.
+
+    Nên `corpus.zip` thường KHÔNG có trong mount dù dataset vẫn đủ dữ liệu: nó nằm đó
+    dưới dạng cây `real/ fake/`. Dừng vì "không thấy corpus.zip" trong tình huống đó là
+    bỏ đi cả một corpus lành lặn — và trên phiên `train` thì là bỏ cả phiên.
+    """
+    src = _cell_src(notebook, 'run("unpack"')
+    assert "_cay_bung_san(" in src and "_muon_cay(" in src
+    # Thứ tự bắt buộc: zip trước (rõ ràng hơn), cây bung sẵn sau, DỪNG là đường cuối.
+    assert (src.index('run("unpack"')
+            < src.index("_xong, _thieu = _muon_cay(")
+            < src.index("_co_du_lieu = ("))
+    # Phân biệt gốc corpus thật với bản metadata.csv để rời: audio có mặt cạnh nó không.
+    assert '(goc / r["path"]).exists()' in src
+    # /kaggle/input chỉ-đọc: audio phải là symlink, manifest phải là bản copy ghi được,
+    # vì split ghi cột `split` và validate ghi `checked` vào chính file đó.
+    assert "os.symlink(nguon, dich)" in src
+    assert 'shutil.copy(meta, CORPUS / "metadata.csv")' in src
+    # Manifest luôn mới hơn ảnh chụp một nhịp — bản ghi chưa có file phải bị loại.
+    assert "prune_missing()" in src
 
 
 def test_the_push_refuses_to_shrink_the_dataset(notebook):

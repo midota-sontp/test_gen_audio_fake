@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chạy trọn notebook Kaggle ngay trên máy, trong một môi trường giả lập.
+"""Chạy trọn hai notebook Kaggle ngay trên máy, trong một môi trường giả lập.
 
 Nhiều lỗi của notebook chỉ lộ ra khi chạy thật: một stage im lặng nuốt lỗi, một ô
 đọc phải dữ liệu cũ, một engine tuỳ chọn làm dừng cả phiên. Kiểm tra cú pháp không
@@ -7,7 +7,11 @@ bắt được những thứ đó. Script này thay `/kaggle/working` và `/kagg
 thư mục sandbox rồi exec tuần tự mọi ô code trong CÙNG một namespace, đúng như
 Jupyter — nên không cần tài khoản Kaggle vẫn thử được toàn bộ.
 
-    python scripts/run_notebook_locally.py <thư-mục-sandbox> <thư-mục-VIVOS>
+    python scripts/run_notebook_locally.py <thư-mục-sandbox> <thư-mục-VIVOS> [dataset|train]
+
+Không nêu tên file thì chạy CẢ HAI, dataset trước rồi train — mỗi file một namespace
+riêng đúng như hai phiên Kaggle, nhưng dùng chung `/kaggle/working` giả, nên corpus vừa
+sinh chính là đầu vào của lượt train (ô A1b nhận ra và không bung đè lên).
 
 Ô cài đặt (pip/apt) bị bỏ qua: môi trường chạy phải cài sẵn thư viện.
 Thoát 0 nếu mọi ô chạy xong, khác 0 nếu có ô nào dừng hoặc ném ngoại lệ.
@@ -21,7 +25,10 @@ import sys
 import traceback
 from pathlib import Path
 
-NOTEBOOK = Path("notebooks/aidetector_kaggle.ipynb")
+NOTEBOOKS = {
+    "dataset": Path("notebooks/aidetector_dataset.ipynb"),
+    "train": Path("notebooks/aidetector_train.ipynb"),
+}
 
 
 def build_fake_kaggle(sandbox: Path, vivos: Path) -> tuple[Path, Path]:
@@ -43,27 +50,11 @@ def prepare_cell(source: str, work: Path, mounts: Path) -> tuple[str, str]:
     return (code, "") if code.strip() else ("", "ô rỗng sau khi bỏ lệnh shell")
 
 
-def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print(__doc__)
-        return 2
-    sandbox, vivos = Path(argv[1]).resolve(), Path(argv[2]).resolve()
-    if not vivos.is_dir():
-        print(f"Không thấy thư mục VIVOS: {vivos}")
-        return 2
-
-    work, mounts = build_fake_kaggle(sandbox, vivos)
-
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import IPython.display as display_mod
-
-    display_mod.display = lambda *a, **k: print("   [hiển thị]", *a)
-
-    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+def run_notebook(path: Path, work: Path, mounts: Path) -> int:
+    """Exec tuần tự mọi ô code của một file trong CÙNG một namespace, như Jupyter."""
+    notebook = json.loads(path.read_text(encoding="utf-8"))
     cells = [c for c in notebook["cells"] if c["cell_type"] == "code"]
-    print(f"{NOTEBOOK}: {len(notebook['cells'])} ô ({len(cells)} ô code)\n")
+    print(f"\n{'#' * 78}\n# {path}: {len(notebook['cells'])} ô ({len(cells)} ô code)\n")
 
     namespace: dict = {"__name__": "__main__"}
     for index, cell in enumerate(cells):
@@ -92,6 +83,34 @@ def main(argv: list[str]) -> int:
                 encoding="utf-8",
             )
             print(f"  [harness] đã trỏ {config.name} sang sandbox")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) not in (3, 4):
+        print(__doc__)
+        return 2
+    sandbox, vivos = Path(argv[1]).resolve(), Path(argv[2]).resolve()
+    chon = argv[3] if len(argv) == 4 else None
+    if chon is not None and chon not in NOTEBOOKS:
+        print(f"Tên file phải là một trong {sorted(NOTEBOOKS)}, không phải {chon!r}")
+        return 2
+    if not vivos.is_dir():
+        print(f"Không thấy thư mục VIVOS: {vivos}")
+        return 2
+
+    work, mounts = build_fake_kaggle(sandbox, vivos)
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import IPython.display as display_mod
+
+    display_mod.display = lambda *a, **k: print("   [hiển thị]", *a)
+
+    for ten in ([chon] if chon else ["dataset", "train"]):
+        if run_notebook(NOTEBOOKS[ten], work, mounts):
+            return 1
 
     print(f"\n{'=' * 78}\n✔ TOÀN BỘ NOTEBOOK CHẠY XONG, KHÔNG LỖI")
     return 0

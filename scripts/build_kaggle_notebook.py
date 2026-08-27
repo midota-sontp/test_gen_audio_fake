@@ -21,6 +21,7 @@ Chạy lại sau mỗi lần sửa code để notebook không bị lệch với 
 from __future__ import annotations
 
 import base64
+import copy
 import gzip
 import hashlib
 import io
@@ -30,7 +31,16 @@ import textwrap
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-OUT = REPO / "notebooks" / "aidetector_kaggle.ipynb"
+
+#: Hai file, hai việc — sinh dataset mất nhiều giờ GPU, huấn luyện thì chỉ cần corpus đã
+#: có, nên chúng không bao giờ nằm cùng một phiên Kaggle. Cả hai sinh ra từ CÙNG danh
+#: sách ô dưới đây: ô dùng chung (bung mã nguồn, `run`, A1b nạp corpus) giống nhau từng
+#: byte ở hai file, nên không có chuyện hai file lệch nhau về chuẩn dữ liệu.
+CHUNG, DATASET, TRAIN = "chung", "dataset", "train"
+OUT = {
+    DATASET: REPO / "notebooks" / "aidetector_dataset.ipynb",
+    TRAIN: REPO / "notebooks" / "aidetector_train.ipynb",
+}
 
 #: Những gì được nhúng. Cố ý KHÔNG nhúng tests/ và notebooks/ cho nhẹ.
 INCLUDE_GLOBS = ("aidetector/**/*.py", "configs/*.yaml", "requirements.txt",
@@ -93,56 +103,130 @@ def code(text: str) -> dict:
             "source": text.strip("\n").splitlines(keepends=True)}
 
 
+# Mốc chia phần trong danh sách ô: mọi ô SAU nó thuộc `ten`, cho tới mốc kế tiếp. Đánh
+# dấu theo vùng thay vì gắn thẻ từng ô — ranh giới thì có bốn năm chỗ, còn ô thì hơn
+# năm mươi, và vùng còn đọc được như mục lục của notebook.
+def phan(ten: str) -> dict:
+    return {"_phan": ten}
+
+
+def cells_for(cells: list[dict], part: str | None = None) -> list[dict]:
+    """Ô của một file, hoặc TẤT CẢ ô theo đúng thứ tự build khi `part=None`."""
+    ra, hien = [], CHUNG
+    for cell in cells:
+        if "_phan" in cell:
+            hien = cell["_phan"]
+        elif part is None or hien in (CHUNG, part):
+            ra.append(cell)
+    return ra
+
+
+# Ô setup là ô DÙNG CHUNG, nên `MODE` được chốt ở đây — lúc ghi ra file — chứ không phải
+# trong danh sách ô. Giữ `MODE` là biến chứ không xoá hẳn các cổng `if MAKE_DATASET:`:
+# chúng là thứ giữ cho ô dùng chung giống nhau từng byte giữa hai file.
+def dat_che_do(cells: list[dict], part: str, file_kia: str) -> None:
+    cu = ('# Phiên này làm gì: "dataset" (chỉ phần A) · "train" (chỉ phần B) · "both" (cả hai).\n',
+          'MODE = "both"\n')
+    lam = "phần A — tạo dataset" if part == DATASET else "phần B — huấn luyện"
+    moi = (f"# File này chạy {lam}. Phần còn lại ở\n"
+           f"# {file_kia} — cùng payload, cùng ô A1b.\n",
+           f'MODE = "{part}"\n')
+    thay = 0
+    for cell in cells:
+        src = cell["source"]
+        if cu[0] in src and cu[1] in src:
+            src[src.index(cu[0])] = moi[0]
+            src[src.index(cu[1])] = moi[1]
+            thay += 1
+    assert thay == 1, f"phải chốt MODE ở đúng một ô, gặp {thay}"
+
+
 def build_cells(payload: str, sha: str, size: int, n_files: int) -> list[dict]:
     return [
+phan(DATASET),
 md(f"""
-# ai-detector — phát hiện giọng nói giả tiếng Việt
+# ai-detector — TẠO DATASET giọng nói giả tiếng Việt
 
 Notebook **tự chứa toàn bộ mã nguồn** ({n_files} file, {size / 1024:.0f} KB nhúng sẵn) —
 không cần clone repo, không cần dataset chứa code. Import lên Kaggle là chạy được.
 
 ```
 REAL (giọng thật tiếng Việt)
-   └── Piper · Kokoro · OmniVoice ──> FAKE
-                 └── augmentation ──> WavLM ──> Classifier ──> REAL / FAKE
+   └── Piper · Kokoro · OmniVoice ──> FAKE ──> đẩy lên Kaggle Dataset
 ```
 
-## Notebook chia làm hai phần — `MODE` chọn phiên này chạy phần nào
+## Pipeline nằm ở HAI notebook
 
-| | Làm gì | Khi nào chạy |
+Sinh fake bằng voice cloning mất nhiều giờ GPU, còn huấn luyện chỉ cần corpus đã có —
+hai việc không nằm cùng một phiên Kaggle, nên chúng là hai file:
+
+| Notebook | Làm gì | Cần gì trong Input |
 |---|---|---|
-| **PHẦN A** | tạo dataset: ingest → generate → **kiểm tra + nghe thử** → đóng gói | chạy trước, xem dataset có ổn không |
-| **PHẦN B** | huấn luyện: split → augment → WavLM → classifier → đánh giá | chỉ chạy khi dataset đã ưng ý |
+| **`aidetector_dataset.ipynb`** ← file này | ingest → generate → kiểm tra → đẩy lên Dataset | một bộ giọng thật (VIVOS, Common Voice vi…) |
+| `aidetector_train.ipynb` | split → augment → WavLM → classifier → đánh giá | corpus do file này đẩy lên |
 
-Sinh fake bằng voice cloning mất nhiều giờ, nên hai phần thường **không** nằm cùng một
-phiên. Công tắc **`MODE`** ở ô cài thư viện quyết định phiên này làm gì:
+Cả hai nhúng **cùng một payload mã nguồn** và dùng **cùng ô A1b** để nạp corpus, nên
+không có chuyện hai file lệch nhau về chuẩn dữ liệu. Mọi ô trong file này đều thuộc
+việc tạo dataset — **Save & Run All** là đúng, không phải chọn tay ô nào.
 
-| `MODE` | Chạy | Khi nào dùng |
-|---|---|---|
-| `"dataset"` | chỉ phần A | dành cả phiên để sinh fake; corpus tự đẩy lên Dataset dọc đường |
-| `"train"` | chỉ phần B | corpus đã có trong Dataset, chỉ muốn huấn luyện |
-| `"both"` | A rồi B | chạy thử, hoặc quy mô nhỏ đủ gọn trong một phiên |
-
-Ô nào không thuộc phần đang chạy thì tự bỏ qua và in ra lý do, nên **Save & Run All** ở
-chế độ nào cũng đúng — không phải chọn tay từng ô.
-
-Phần A có công tắc **`SMOKE = True`**: chạy thử ~40 mẫu trong vài phút để xem
-engine nào hoạt động, audio nghe ra sao. Ưng rồi mới đặt `SMOKE = False` chạy thật.
+Công tắc **`SMOKE = True`**: chạy thử ~40 mẫu trong vài phút để xem engine nào hoạt
+động, audio nghe ra sao. Ưng rồi mới đặt `SMOKE = False` chạy thật.
 
 ## Cần bật trong panel bên phải
 
 | Mục | Đặt thành | Vì sao |
 |---|---|---|
 | **Accelerator** | `GPU T4 x2` hoặc `P100` | OmniVoice (voice cloning) không chạy nổi trên CPU |
-| **Internet** | `On` | tải WavLM, giọng Piper/Kokoro, cài thư viện |
+| **Internet** | `On` | tải giọng Piper/Kokoro, checkpoint cloning, cài thư viện |
 
-Rồi **Add Input → Datasets** một bộ giọng thật tiếng Việt (VIVOS, Common Voice vi…).
-Pipeline tự nhận diện định dạng — không cần chỉnh gì thêm.
+Rồi **Add Input → Datasets** một bộ giọng thật tiếng Việt. Pipeline tự nhận diện định
+dạng — không cần chỉnh gì thêm. Muốn nối tiếp corpus phiên trước thì add **cả** dataset
+corpus (`DATASET_ID` ở ô setup); A1b sẽ nạp nó.
 
-> Phiên Kaggle ~9 giờ rồi **xoá sạch `/kaggle/working`**. Ô cuối phần A đóng gói
-> dataset thành một zip để bạn lưu ra Dataset, phiên sau train mà khỏi tạo lại.
+> Phiên Kaggle ~9 giờ rồi **xoá sạch `/kaggle/working`**. Corpus được đẩy lên Kaggle
+> Dataset tại ranh giới mỗi speaker (A2b), nên out giữa lượt sinh chỉ mất vài phút GPU.
 """),
 
+phan(TRAIN),
+md(f"""
+# ai-detector — HUẤN LUYỆN mô hình phát hiện giọng giả
+
+Notebook **tự chứa toàn bộ mã nguồn** ({n_files} file, {size / 1024:.0f} KB nhúng sẵn) —
+không cần clone repo, không cần dataset chứa code. Import lên Kaggle là chạy được.
+
+```
+corpus (real + fake) ──> augmentation ──> WavLM ──> Classifier ──> REAL / FAKE
+```
+
+## Pipeline nằm ở HAI notebook
+
+| Notebook | Làm gì | Cần gì trong Input |
+|---|---|---|
+| `aidetector_dataset.ipynb` | ingest → generate → kiểm tra → đẩy lên Dataset | một bộ giọng thật (VIVOS, Common Voice vi…) |
+| **`aidetector_train.ipynb`** ← file này | split → augment → WavLM → classifier → đánh giá | corpus do file kia đẩy lên |
+
+Cả hai nhúng **cùng một payload mã nguồn** và dùng **cùng ô A1b** để nạp corpus, nên
+không có chuyện huấn luyện trên một chuẩn dữ liệu khác chuẩn lúc sinh. Mọi ô trong file
+này đều thuộc việc huấn luyện — **Save & Run All** là đúng.
+
+File này **không sinh audio và không đẩy gì lên dataset corpus**: phần B chạy `augment`,
+đẩy sau đó là bơm dữ liệu phái sinh vào dataset, buộc mọi phiên sau tải thêm phần mà một
+lệnh `augment` sinh lại được trong vài phút. Mô hình và báo cáo đi đường Output — ô B4
+gói `model.zip` và `reports_bundle.zip`.
+
+## Cần bật trong panel bên phải
+
+| Mục | Đặt thành | Vì sao |
+|---|---|---|
+| **Accelerator** | `GPU T4 x2` hoặc `P100` | WavLM trích đặc trưng cho hàng chục nghìn clip |
+| **Internet** | `On` | tải checkpoint WavLM, cài thư viện |
+
+Rồi **Add Input → Datasets → corpus đã sinh** (`DATASET_ID` ở ô setup, mặc định
+`sonpham12/vivos-fake-v2`). Không nạp được corpus thì ô A1b **dừng ngay** — huấn luyện
+trên tay không là bỏ cả phiên GPU.
+"""),
+
+phan(CHUNG),
 # ─────────────────────────────────────────────────────────── chuẩn bị
 md("## 0. Chuẩn bị"),
 code(f"""
@@ -223,27 +307,30 @@ if _stale:
     print(f"Đã gỡ {{len(_stale)}} module aidetector cũ khỏi bộ nhớ kernel")
 """),
 
+phan(DATASET),
 md("""
 Cài thư viện.
 
-Hai công tắc của cả phiên nằm ở ô dưới, không ở A1, vì chính chúng quyết định phải cài
-gói nào.
-
-**`MODE`** — phiên này làm gì:
-
-* **`"both"` (mặc định)** — chạy cả hai phần.
-* **`"dataset"`** — chỉ phần A. Bỏ qua split/augment/train/evaluate.
-* **`"train"`** — chỉ phần B, và **không cài engine sinh audio nào cả**: đỡ vài phút
-  cài đặt, tránh hẳn màn giằng nhau về phiên bản `transformers` ở dưới. Corpus phải
-  đến từ Input (xem A1b) — không có thì ô A1b dừng luôn thay vì train trên tay không.
-
-**`TTS_ENGINES`** — engine giọng cố định, chỉ có nghĩa khi `MODE` còn tạo dataset:
+Công tắc **`TTS_ENGINES`** nằm ở ô dưới chứ không ở A1, vì chính nó quyết định phải cài
+gói nào:
 
 * **rỗng (mặc định)** — chỉ voice cloning. Cài `transformers>=5.3` một lượt là xong.
 * **`["piper", "kokoro"]`** — bật lại TTS. Kokoro cần `transformers` 4.x mà OmniVoice
   cần `>=5.3`; hai engine không sống chung trong một môi trường nên phải ghim 4.x ở đây
   rồi nâng lên 5.x ở A3b, tức sinh fake thành hai lượt.
 """),
+
+phan(TRAIN),
+md("""
+Cài thư viện — lượt cài **nhẹ nhất** trong hai notebook: không engine sinh audio nào cả,
+đỡ vài phút và tránh hẳn màn giằng nhau về phiên bản `transformers` (Kokoro cần 4.x,
+OmniVoice cần ≥5.3). WavLM chạy được trên cả hai nhánh nên cứ dùng bản Kaggle cài sẵn.
+
+`TTS_ENGINES` vẫn có trong ô dưới vì hai file dùng chung đúng một ô setup, nhưng ở file
+này nó không có tác dụng gì.
+"""),
+
+phan(CHUNG),
 code("""
 # Phiên này làm gì: "dataset" (chỉ phần A) · "train" (chỉ phần B) · "both" (cả hai).
 MODE = "both"
@@ -272,10 +359,13 @@ MAX_SECONDS = 10.0
 # chỉ làm loãng dataset. Bật lại bằng: TTS_ENGINES = ["piper", "kokoro"]
 TTS_ENGINES = []
 
-if MODE not in ("dataset", "train", "both"):
-    raise SystemExit(f'MODE={MODE!r} không hợp lệ — "dataset", "train" hoặc "both".')
-MAKE_DATASET = MODE in ("dataset", "both")
-DO_TRAIN = MODE in ("train", "both")
+# Hai giá trị, một cho mỗi file — không còn "both": phần A và phần B nằm ở hai notebook,
+# nên "một phiên chạy cả hai" là chuyện không tồn tại nữa. Vẫn kiểm, vì MODE sai mà chạy
+# tiếp im lặng là bỏ cả phiên GPU.
+if MODE not in ("dataset", "train"):
+    raise SystemExit(f'MODE={MODE!r} không hợp lệ — "dataset" hoặc "train".')
+MAKE_DATASET = MODE == "dataset"
+DO_TRAIN = MODE == "train"
 
 # Nói rõ vì sao một ô không làm gì: Run All mà im lặng thì log không đọc được.
 def skipped(what):
@@ -321,6 +411,7 @@ run("info")
 """),
 
 # ─────────────────────────────────────────────────────────── PHẦN A
+phan(DATASET),
 md("""
 ---
 # PHẦN A — Tạo dataset
@@ -334,9 +425,6 @@ md("""
 
 `SMOKE = True` chạy thử nhanh (~40 real + 40 fake, vài phút). Xem kết quả ở A4–A5,
 ưng rồi đặt `SMOKE = False` và chạy lại từ A2 để làm thật.
-
-Ở `MODE = "train"` ô này chỉ đặt con số rồi thôi — nó **không** dò dataset giọng thật,
-vì phiên chỉ-huấn-luyện mount corpus đã sinh sẵn chứ không mount VIVOS.
 """),
 code("""
 import logging
@@ -409,6 +497,7 @@ else:
     print("Ước thời gian sinh: in ở ô A2 sau khi biết corpus có bao nhiêu real.")
 """),
 
+phan(CHUNG),
 md("""
 ### A1b. Nạp corpus của phiên trước
 
@@ -421,9 +510,26 @@ Kaggle xem dataset đang có gì (nếu đã cài token) rồi nhắc — chứ 
 từ đầu và làm mất công phiên trước. Mount nhiều dataset thì ô này lấy **đúng** cái khớp
 `DATASET_ID`, không phải cái đầu bảng chữ cái.
 
-Ô này chạy ở **mọi** `MODE` — nó là đường duy nhất mang corpus vào phiên. Riêng
-`MODE = "train"` thì corpus là điều kiện bắt buộc: không bung được gì, hoặc bung ra một
-corpus thiếu hẳn một lớp, thì ô dừng ngay chứ không để phần B huấn luyện trên tay không.
+Ô này **giống nhau từng byte ở cả hai notebook** — nó là đường duy nhất mang corpus vào
+một phiên. Khác nhau chỉ ở chỗ thiếu corpus thì sao: notebook dataset bắt đầu từ đầu,
+còn notebook train dừng ngay, kể cả khi corpus bung ra được nhưng thiếu hẳn một lớp —
+huấn luyện trên tay không là bỏ cả phiên GPU.
+
+#### `corpus.zip` không còn trên dataset là chuyện BÌNH THƯỜNG
+
+Kaggle **tự giải nén** mọi `.zip` đưa lên dataset và không giữ lại bản nén. Nên
+`corpus.zip` mà A2b đẩy lên biến thành cây `real/ fake/ metadata.csv` nằm thẳng trong
+mount. Ô này nhận cả hai dạng:
+
+| Mount có gì | Ô này làm gì |
+|---|---|
+| `corpus.zip` | `unpack` như cũ |
+| cây `real/ fake/` đã bung | **symlink** vào `/kaggle/working/corpus` — không copy |
+| chỉ `metadata.csv`, không audio | DỪNG, in ra đang mount gì để soi |
+
+Đường symlink còn nhanh hơn zip: khỏi mất vài phút bung và 1 GB đĩa. `/kaggle/input`
+chỉ-đọc, nên chỉ `metadata.csv` được copy thật (split ghi cột `split`, validate ghi
+`checked` vào đó); audio cũ là symlink trỏ vào mount, audio mới ghi thẳng vào cây.
 """),
 code("""
 import glob
@@ -453,6 +559,63 @@ _mounted = _find("corpus.zip")
 # lấy phần tử cuối — nối danh sách lại là chọn đúng bản cũ.
 _loose = _find("metadata.csv") or _find("manifest.csv")
 
+# Kaggle GIẢI NÉN mọi .zip đưa lên dataset và KHÔNG giữ lại bản nén. Nên `corpus.zip`
+# vừa đẩy lên biến thành cây `real/ fake/ metadata.csv` nằm thẳng trong mount, và
+# "không thấy corpus.zip" hầu như chưa bao giờ là mất dữ liệu — dữ liệu ở đó, bung sẵn.
+#
+# Cây bung sẵn còn nạp NHANH HƠN zip: đọc trực tiếp từ /kaggle/input, khỏi mất vài phút
+# bung và 1 GB đĩa. Nhưng mount chỉ-đọc, mà mọi stage sau (generate, augment, split,
+# validate) đều ghi vào corpus — nên phải dựng một cây GHI ĐƯỢC ở /kaggle/working/corpus:
+# metadata.csv là bản copy, mỗi audio cũ là một symlink trỏ vào mount, audio mới ghi
+# thẳng vào cây như thường.
+# Các cây corpus đã bung trong mount, tốt nhất trước: (tỉ lệ khớp, số dòng, gốc, meta).
+# "Khớp" = manifest kể tên audio nào thì audio đó có mặt cạnh nó. Đó là phép duy nhất
+# phân biệt được gốc corpus thật với bản metadata.csv để rời ngoài zip — hai file trùng
+# nội dung, chỉ khác chỗ đứng.
+def _cay_bung_san():
+    import csv
+
+    uv = []
+    for duong in _find("metadata.csv") + _find("manifest.csv"):
+        goc = Path(duong).parent
+        with open(duong, encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        if not rows:
+            continue
+        # Đếm trên mẫu 200 dòng: stat 15 nghìn file qua mount là chậm thật, mà tỉ lệ
+        # khớp thì mẫu đã nói đủ — cây đúng khớp gần 100%, cây sai khớp gần 0%.
+        mau = rows[:: max(1, len(rows) // 200)][:200]
+        khop = sum(1 for r in mau if r.get("path") and (goc / r["path"]).exists())
+        uv.append((khop / len(mau), len(rows), goc, Path(duong)))
+    uv.sort(reverse=True)
+    return uv
+
+# Dựng corpus ghi được từ cây chỉ-đọc: manifest copy, audio symlink.
+def _muon_cay(goc, meta):
+    import csv
+    import os
+    import shutil
+
+    CORPUS.mkdir(parents=True, exist_ok=True)
+    # Manifest phải là bản COPY: split ghi cột `split` vào nó, validate ghi `checked`.
+    shutil.copy(meta, CORPUS / "metadata.csv")
+    xong = thieu = 0
+    with open(meta, encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh):
+            if not row.get("path"):
+                thieu += 1
+                continue
+            nguon, dich = goc / row["path"], CORPUS / row["path"]
+            if dich.exists():
+                continue
+            if not nguon.exists():
+                thieu += 1
+                continue
+            dich.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(nguon, dich)
+            xong += 1
+    return xong, thieu
+
 # Trạng thái tường minh do phiên trước ghi lại: xong tới speaker nào. Vài KB, đọc được
 # ngay trên trang dataset, và không phải suy ra từ manifest hàng nghìn dòng.
 _tt = _find("progress.json")
@@ -477,6 +640,20 @@ if _metadata_o(CORPUS):
 elif _mounted:
     print(f"Bung corpus từ {_mounted[-1]}")
     run("unpack", _mounted[-1])
+elif _cay := next((u for u in _cay_bung_san() if u[0] >= 0.9), None):
+    # Ngưỡng 0.9 chứ không phải 1.0: manifest luôn mới hơn ảnh chụp một nhịp, nên vài
+    # bản ghi cuối chưa kịp có file là chuyện thường — `prune_missing` loại chúng ở dưới.
+    _ti, _tong, _goc, _meta = _cay
+    print(f"Không có corpus.zip — Kaggle đã giải nén nó. Dùng cây bung sẵn: {_goc}")
+    _xong, _thieu = _muon_cay(_goc, _meta)
+    print(f"Đã trỏ {_xong} audio vào {CORPUS} bằng symlink (không copy, không tốn đĩa)"
+          + (f" · {_thieu} bản ghi chưa có file" if _thieu else ""))
+
+    from aidetector.corpus.manifest import Manifest
+
+    _m0 = Manifest.load(CORPUS, required=True)
+    if _m0.prune_missing():
+        _m0.save()
 else:
     # DỪNG HẲN nếu dataset đã có dữ liệu mà phiên này không nạp được. Đi tiếp nghĩa là
     # ingest lại từ đầu rồi đẩy một corpus 0 fake ĐÈ LÊN công của các phiên trước —
@@ -491,7 +668,15 @@ else:
         fakes = [r for r in rows if r.get("label") == "fake" and not r.get("augment")]
         print(f"Thấy manifest của dataset: {len(rows)} bản ghi · {len(fakes)} fake"
               f" · {len({r['speaker'] for r in fakes})} speaker đã có fake")
-        _co_du_lieu = f"{len(rows)} bản ghi ({len(fakes)} fake), nhưng KHÔNG thấy corpus.zip"
+        # Manifest có mà audio thì không: in ra ĐANG MOUNT GÌ, vì đó là thứ duy nhất
+        # phân biệt "add sai dataset" với "version mới còn đang xử lý trên Kaggle".
+        _goc_in = Path("/kaggle/input")
+        _cac = sorted(d.name for d in _goc_in.iterdir()) if _goc_in.is_dir() else []
+        print(f"Đang mount: {', '.join(_cac) or '(chưa add Input nào)'}")
+        for _t, _n, _g, _ in _cay_bung_san()[:3]:
+            print(f"  {_g}: {_n} bản ghi · {100 * _t:.0f}% audio có mặt cạnh manifest")
+        _co_du_lieu = (f"{len(rows)} bản ghi ({len(fakes)} fake), nhưng mount KHÔNG có"
+                       " corpus.zip lẫn cây audio bung sẵn")
     else:
         # Chưa mount thì vẫn hỏi API cho biết dataset đang có gì.
         r = subprocess.run(["kaggle", "datasets", "files", DATASET_ID],
@@ -558,6 +743,7 @@ elif not MAKE_DATASET:
     )
 """),
 
+phan(DATASET),
 md("""
 ### A1c. Convert — đưa dataset đầu vào về chuẩn cấu trúc
 
@@ -739,6 +925,7 @@ else:
               f" · {_r['with_text']} có transcript · adapter {_r['adapter']}")
 """),
 
+phan(CHUNG),
 md("""
 ### A1d. Dọn corpus cũ về cây hiện hành
 
@@ -752,6 +939,7 @@ code("""
 run("migrate")
 """),
 
+phan(DATASET),
 md("""
 ## A2. REAL — nạp giọng thật về chuẩn corpus
 
@@ -867,8 +1055,10 @@ md("""
 
 Đích là `DATASET_ID` ở ô setup — **cùng một biến** mà ô A1b nạp về, nên không bao giờ có
 chuyện đẩy lên một chỗ rồi phiên sau nạp từ chỗ khác. Mỗi lần đẩy gồm **toàn bộ**:
-`corpus.zip` (real + fake + manifest) cộng một bản `manifest.csv` để rời bên ngoài — nhờ
-đó A1b đọc được tiến độ mà không phải tải cả GB.
+`corpus.zip` (real + fake + manifest) cộng một bản `metadata.csv` để rời bên ngoài — nhờ
+đó A1b đọc được tiến độ mà không phải tải cả GB. Kaggle giải nén `corpus.zip` ngay khi
+nhận, nên trên trang dataset nó hiện ra dưới dạng cây `real/ fake/`; A1b nạp được cả hai
+dạng nên không phải chống lại chuyện đó.
 
 Mục này đặt **trước** bước sinh vì bước sinh gọi `sync_corpus.py`, file đó phải có sẵn.
 
@@ -911,18 +1101,17 @@ không lấy lại được; đổi khi dung lượng thành vấn đề.
 
 Lượt đẩy nền không in được vào ô nào — xem bằng `sync_log()`; ô A5 tự in toàn bộ.
 
-#### Cả ba chế độ dùng chung dataset này
+#### Hai notebook dùng chung dataset này, nhưng chỉ MỘT chiều đẩy
 
-| `MODE` | Nạp về | Đẩy lên |
+| Notebook | Nạp về | Đẩy lên |
 |---|---|---|
-| `"dataset"` | A1b bung corpus phiên trước | ba mốc ở trên |
-| `"both"` | như trên | như trên |
-| `"train"` | A1b bung corpus — **bắt buộc**, không có thì dừng ngay | không đẩy |
+| `aidetector_dataset.ipynb` | A1b nạp corpus phiên trước | ba mốc ở trên |
+| `aidetector_train.ipynb` | A1b nạp corpus — **bắt buộc**, không có thì dừng ngay | không đẩy |
 
-`"train"` không đẩy là có chủ ý, không phải bỏ sót: phần B chạy `augment`, nó ghi thêm
-bản nhiễu/nén vào corpus. Đẩy sau đó là bơm dữ liệu phái sinh vào dataset, buộc mọi phiên
-sau tải thêm phần mà một lệnh `augment` sinh lại được trong vài phút. Mô hình và báo cáo
-đi đường Output — ô B4 gói `model.zip` và `reports_bundle.zip`.
+Notebook train không đẩy là có chủ ý, không phải bỏ sót: phần B chạy `augment`, nó ghi
+thêm bản nhiễu/nén vào corpus. Đẩy sau đó là bơm dữ liệu phái sinh vào dataset, buộc mọi
+phiên sau tải thêm phần mà một lệnh `augment` sinh lại được trong vài phút. Mô hình và
+báo cáo đi đường Output — ô B4 gói `model.zip` và `reports_bundle.zip`.
 
 Cài token một lần: [kaggle.com/settings](https://www.kaggle.com/settings) → Create New
 Token → mở `kaggle.json`, rồi Add-ons → Secrets thêm `KAGGLE_USERNAME` và `KAGGLE_KEY`.
@@ -1676,24 +1865,31 @@ else:
 """),
 
 md("""
-> ### Dừng lại ở đây nếu chỉ cần dataset
->
-> Xem lại A4: hai lớp có cân bằng không, engine nào sinh được bao nhiêu, nghe thử
-> thấy hợp lý chưa. Nếu đang ở `SMOKE = True` thì giờ đặt `SMOKE = False` ở ô A1 và
-> chạy lại A2–A5 để làm thật. Ưng rồi mới sang phần B.
->
-> Đặt `MODE = "dataset"` thì mọi ô của phần B dưới đây tự bỏ qua, không phải chọn tay —
-> rồi phiên sau `MODE = "train"` huấn luyện trên đúng corpus vừa đẩy lên.
+---
+### Xong dataset — huấn luyện ở notebook kia
+
+Xem lại A4: hai lớp có cân bằng không, engine nào sinh được bao nhiêu, nghe thử thấy hợp
+lý chưa. Nếu đang ở `SMOKE = True` thì giờ đặt `SMOKE = False` ở ô A1 và chạy lại A2–A5
+để làm thật.
+
+Ưng rồi thì mở **`aidetector_train.ipynb`**, Add Input đúng `DATASET_ID` ở trên, và Save
+& Run All. Corpus vừa đẩy lên đã là đầu vào của nó — không phải bung lại, không phải
+chỉnh gì.
 """),
 
 # ─────────────────────────────────────────────────────────── PHẦN B
+phan(TRAIN),
 md("""
 ---
 # PHẦN B — Huấn luyện
 
-Chạy khi dataset đã ưng, tức `MODE` là `"train"` hoặc `"both"`. Corpus được nạp ở ô
-**A1b** — ô đó chạy ở mọi chế độ nên phần B không phải bung lại gì. Muốn lấy corpus từ
-một dataset khác thì `run("unpack", "/kaggle/input/<tên-dataset>/corpus.zip")`.
+Corpus đã được nạp ở ô **A1b** phía trên nên phần này không phải bung lại gì. Muốn lấy
+corpus từ một dataset khác thì đổi `DATASET_ID` ở ô setup, hoặc gọi thẳng
+`run("unpack", "/kaggle/input/<tên-dataset>/corpus.zip")`.
+
+Kiểm tra chất lượng corpus (nghe thử, đo độ giống giọng, đo phát âm) nằm ở
+`aidetector_dataset.ipynb` mục A4 — nó thuộc lúc **quyết định** dataset, không thuộc lúc
+huấn luyện. Thành phần corpus thì A1b vừa in ở trên.
 """),
 
 md("""
@@ -1809,11 +2005,9 @@ Toàn bộ tham số nằm trong `configs/default.yaml` (bản Kaggle kế thừ
     ]
 
 
-def main() -> None:
-    files = collect_files()
-    b64, sha, size = build_payload(files)
-    notebook = {
-        "cells": build_cells(payload_literal(b64), sha, size, len(files)),
+def notebook_wrapper(cells: list[dict]) -> dict:
+    return {
+        "cells": cells,
         "metadata": {
             "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
             "language_info": {"name": "python", "version": "3.11"},
@@ -1825,10 +2019,23 @@ def main() -> None:
         "nbformat": 4,
         "nbformat_minor": 5,
     }
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(notebook, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def main() -> None:
+    files = collect_files()
+    b64, sha, size = build_payload(files)
+    tat_ca = build_cells(payload_literal(b64), sha, size, len(files))
     print(f"Đã nhúng {len(files)} file ({size / 1024:.0f} KB nén) · sha256 {sha[:16]}…")
-    print(f"→ {OUT}  ({OUT.stat().st_size / 1024:.0f} KB)")
+
+    for part, out in OUT.items():
+        # deepcopy: hai file là hai hình chiếu của CÙNG danh sách ô, nên chúng dùng
+        # chung đối tượng dict. Chốt MODE mà không copy trước là sửa luôn file kia.
+        cells = copy.deepcopy(cells_for(tat_ca, part))
+        dat_che_do(cells, part, OUT[TRAIN if part == DATASET else DATASET].name)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(notebook_wrapper(cells), ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        print(f"→ {out}  ({out.stat().st_size / 1024:.0f} KB · {len(cells)} ô)")
 
 
 if __name__ == "__main__":
