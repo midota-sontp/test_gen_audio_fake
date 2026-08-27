@@ -183,6 +183,11 @@ Rồi **Add Input → Datasets** một bộ giọng thật tiếng Việt. Pipel
 dạng — không cần chỉnh gì thêm. Muốn nối tiếp corpus phiên trước thì add **cả** dataset
 corpus (`DATASET_ID` ở ô setup); A1b sẽ nạp nó.
 
+**Một phiên làm đúng một bộ, và một bộ ở đúng một Kaggle Dataset** — `SOURCE` (ô A1c) và
+`DATASET_ID` (ô setup) phải nói về cùng bộ đó, lệch là notebook dừng. Thêm bộ thứ hai là
+mở một phiên khác với cặp `SOURCE`/`DATASET_ID` khác; lúc huấn luyện add cả hai dataset
+vào Input là chúng tự gộp.
+
 > Phiên Kaggle ~9 giờ rồi **xoá sạch `/kaggle/working`**. Corpus được đẩy lên Kaggle
 > Dataset tại ranh giới mỗi speaker (A2b), nên out giữa lượt sinh chỉ mất vài phút GPU.
 """),
@@ -224,6 +229,10 @@ gói `model.zip` và `reports_bundle.zip`.
 Rồi **Add Input → Datasets → corpus đã sinh** (`DATASET_ID` ở ô setup, mặc định
 `sonpham12/vivos-fake-v2`). Không nạp được corpus thì ô A1b **dừng ngay** — huấn luyện
 trên tay không là bỏ cả phiên GPU.
+
+Mỗi Kaggle Dataset chứa **một bộ**, nên có bao nhiêu bộ thì add bấy nhiêu dataset: ô A1b
+gộp tất cả thành một corpus rồi mới chia tập. Đó cũng là cách chạy nhiều phiên sinh song
+song — mỗi phiên một bộ, một kho — mà không phiên nào đè lên phiên nào.
 """),
 
 phan(CHUNG),
@@ -335,9 +344,20 @@ code("""
 # Phiên này làm gì: "dataset" (chỉ phần A) · "train" (chỉ phần B) · "both" (cả hai).
 MODE = "both"
 
-# Kho dữ liệu dùng chung cho MỌI chế độ: phần A đẩy corpus lên đây, mọi phiên sau nạp
-# lại từ đây. Khai báo một chỗ duy nhất — A1b (nạp) và A2b (đẩy) đều đọc biến này, để
-# không bao giờ có chuyện đẩy lên một dataset mà nạp về từ một dataset khác.
+# MỘT KAGGLE DATASET = MỘT BỘ. Gốc dataset chứa đúng một thư mục bộ:
+#
+#     <bộ>/metadata.csv · <bộ>/real/<speaker>/ · <bộ>/fake/<engine>/<speaker>/
+#
+# Nhờ vậy gộp nhiều bộ chỉ là Add Input nhiều dataset: mỗi mount đóng góp một thư mục,
+# mà cột `path` bắt đầu bằng tên bộ nên không mount nào giẫm lên đường dẫn của mount nào.
+# Hai bản của CÙNG một bộ thì ngược lại — chúng đánh số `0001.wav` độc lập nhau, gộp là
+# hỏng câm; ô A1b dừng phiên khi thấy một bộ tới từ hai Input.
+#
+# Khai báo một chỗ duy nhất — A1b (nạp) và A2b (đẩy) đều đọc biến này, để không bao giờ
+# có chuyện đẩy lên một dataset mà nạp về từ một dataset khác:
+#
+#   phiên TẠO DATASET — kho của đúng bộ `SOURCE` (ô A1c), và CHỈ mount này được nạp.
+#   phiên HUẤN LUYỆN  — điểm khởi đầu; mọi dataset corpus khác đang mount cũng gộp vào.
 DATASET_ID = "sonpham12/vivos-fake-v2"
 
 # Ngưỡng độ dài tối thiểu của một clip, áp cho CẢ real và fake ở mọi stage (ô `run`
@@ -466,9 +486,24 @@ else:
     if not mounted:
         raise SystemExit("Chưa add dataset nào — Add Input → Datasets ở panel bên phải.")
 
+    # Mount là CORPUS của chính ta thì không phải nguồn REAL: đó là kho của phiên trước
+    # (một dataset = một bộ) và ô A1b lo nạp nó. Không loại ra thì cây corpus được chấm
+    # 0.95 điểm — đè cả Common Voice (0.9) lẫn VIVOS thiếu một split (0.7) — và phiên này
+    # đi ingest lại chính corpus của mình thành một nguồn mới.
+    def _la_corpus(folder):
+        for meta in (*sorted(folder.glob("*/metadata.csv")), folder / "metadata.csv"):
+            if meta.exists():
+                with meta.open(encoding="utf-8") as fh:
+                    if "utt_id" in fh.readline():
+                        return True
+        return False
+
     print("Dataset đang mount:")
     usable = []
     for folder in mounted:
+        if _la_corpus(folder):
+            print(f"  ⤼ {folder.name:<26} corpus đã sinh — ô A1b nạp, không ingest lại")
+            continue
         try:
             adapter, score, effective = detect_adapter(folder)
         except ValueError as exc:
@@ -501,14 +536,29 @@ phan(CHUNG),
 md("""
 ### A1b. Nạp corpus của phiên trước
 
-Bung `DATASET_ID` (khai báo ở ô setup) ra `/kaggle/working` để chạy tiếp. `ingest` và
-`generate` đều idempotent theo `utt_id` nên chúng chỉ làm phần còn thiếu — không có bước
-nào làm lại từ đầu.
+Bung kho ra `/kaggle/working` để chạy tiếp. `ingest` và `generate` đều idempotent theo
+`utt_id` nên chúng chỉ làm phần còn thiếu — không có bước nào làm lại từ đầu.
 
 Muốn nối lại thì phải **Add Input → Datasets → dataset đó**. Chưa add thì ô này vẫn hỏi
 Kaggle xem dataset đang có gì (nếu đã cài token) rồi nhắc — chứ không im lặng bắt đầu lại
-từ đầu và làm mất công phiên trước. Mount nhiều dataset thì ô này lấy **đúng** cái khớp
-`DATASET_ID`, không phải cái đầu bảng chữ cái.
+từ đầu và làm mất công phiên trước.
+
+#### Một dataset = một bộ, nên "gộp nhiều bộ" là add nhiều Input
+
+| Phiên | Ô này nạp gì |
+|---|---|
+| **tạo dataset** | **chỉ** kho khớp `DATASET_ID` — kho của bộ `SOURCE` |
+| **huấn luyện** | **mọi** mount là corpus, gộp lại thành một corpus nhiều bộ |
+
+Phiên tạo dataset hẹp là có chủ ý: mọi thứ nằm trong corpus lúc đó sẽ được đẩy lên
+`DATASET_ID` ở mốc kế tiếp, nên kéo bộ khác vào là bơm bộ lạ vào kho của bộ này. Phiên
+huấn luyện thì ngược lại — càng nhiều bộ càng đúng thứ tập test đo.
+
+Gộp được là nhờ cột `path` bắt đầu bằng **tên bộ**: mỗi mount đóng góp một thư mục riêng,
+không đụng đường dẫn của mount nào. Đổi lại, một bộ có mặt ở **hai** Input là ô này
+**dừng phiên** — hai bản đánh số `0001.wav` độc lập nhau, mà cả `unpack` lẫn symlink đều
+bỏ qua đường dẫn đã tồn tại, nên gộp lại là bản ghi của kho sau trỏ vào audio của kho
+trước. Không phép kiểm nào ở dưới bắt được chuyện đó.
 
 Ô này **giống nhau từng byte ở cả hai notebook** — nó là đường duy nhất mang corpus vào
 một phiên. Khác nhau chỉ ở chỗ thiếu corpus thì sao: notebook dataset bắt đầu từ đầu,
@@ -527,6 +577,9 @@ nằm thẳng trong mount. Ô này nhận cả hai dạng:
 | cây `<bộ>/real/ <bộ>/fake/` đã bung | **symlink** vào `/kaggle/working/corpus` — không copy |
 | chỉ `metadata.csv`, không audio | DỪNG, in ra đang mount gì để soi |
 
+Mỗi mount đi qua đúng bảng này một lần, nên một phiên train mount ba kho thì bung một cái
+và symlink hai cái cũng không sao.
+
 Đường symlink còn nhanh hơn zip: khỏi mất vài phút bung và 1 GB đĩa. `/kaggle/input`
 chỉ-đọc, nên chỉ `metadata.csv` được copy thật (split ghi cột `split`, validate ghi
 `checked` vào đó); audio cũ là symlink trỏ vào mount, audio mới ghi thẳng vào cây.
@@ -543,13 +596,20 @@ from pathlib import Path
 
 CORPUS = Path("/kaggle/working/corpus")
 
-# Kaggle mount dataset ở /kaggle/input/<slug>. Tìm ĐÚNG dataset đã cấu hình trước rồi
-# mới chấp nhận corpus.zip bất kỳ: mount nhiều dataset mà "lấy cái cuối theo abc" thì
-# phiên này nối tiếp công của dataset nào là chuyện xổ số.
+# Kaggle mount mỗi dataset ở /kaggle/input/<slug>, và MỘT DATASET = MỘT BỘ. Nên câu hỏi
+# "kho nào là của phiên này" có hai câu trả lời, tuỳ việc:
+#
+#   tạo dataset — CHỈ kho khớp `DATASET_ID`. Kéo bộ khác vào corpus là lượt đẩy sau bơm
+#                 bộ lạ vào kho của bộ này, phá đúng bất biến vừa dựng lên.
+#   huấn luyện  — MỌI mount là corpus, gộp hết: kho khớp `DATASET_ID` trước, rồi tới các
+#                 kho khác. Càng nhiều bộ càng đúng thứ test đo — tổng quát sang giọng mới.
 def _find(name):
     slug = DATASET_ID.split("/")[-1]
-    return (sorted(glob.glob(f"/kaggle/input/{slug}/**/{name}", recursive=True))
-            or sorted(glob.glob(f"/kaggle/input/**/{name}", recursive=True)))
+    rieng = sorted(glob.glob(f"/kaggle/input/{slug}/**/{name}", recursive=True))
+    if MAKE_DATASET:
+        return rieng
+    return rieng + [p for p in sorted(glob.glob(f"/kaggle/input/**/{name}", recursive=True))
+                    if p not in rieng]
 
 # Corpus tách theo BỘ DỮ LIỆU: mỗi bộ một thư mục với `metadata.csv` của riêng nó. Nên
 # "corpus có gì chưa" là câu hỏi về một DANH SÁCH file, không phải một file.
@@ -647,12 +707,13 @@ def _muon_cay(goc):
 
 # Trạng thái tường minh do phiên trước ghi lại: xong tới speaker nào. Vài KB, đọc được
 # ngay trên trang dataset, và không phải suy ra từ manifest hàng nghìn dòng.
-_tt = _find("progress.json")
-if _tt:
+# Mỗi kho một file, nên gộp nhiều bộ là in nhiều dòng — cộng chúng lại thành một con số
+# là mất đúng thứ đang cần biết: bộ nào đã xong, bộ nào còn nợ.
+for _tep in _find("progress.json"):
     import json as _json
 
-    _s = _json.loads(Path(_tt[-1]).read_text(encoding="utf-8"))
-    print(f"Trạng thái phiên trước ghi lại: {_s['targets_done']}/{_s['targets_total']}"
+    _s = _json.loads(Path(_tep).read_text(encoding="utf-8"))
+    print(f"[{Path(_tep).parent.name}] phiên trước ghi lại: {_s['targets_done']}/{_s['targets_total']}"
           f" khuôn đã có fake · speaker {len(_s['speakers_done'])} xong"
           f" · {len(_s['speakers_partial'])} dở dang"
           f" · {len(_s['speakers_todo'])} chưa động tới")
@@ -663,27 +724,78 @@ if _tt:
         print(f"  nguồn {_ten:<22} real {_o['real']:>6} · fake {_o['fake']:>6}"
               f" · đã duyệt {_o['approved']:>6}")
 
+# Bộ nào đã tới từ kho nào. Một bộ có mặt ở hai Input là DỪNG: hai bản của cùng một bộ
+# đánh số `0001.wav` độc lập nhau, mà `unpack` lẫn symlink đều bỏ qua đường dẫn đã tồn
+# tại — gộp lại là bản ghi của kho sau trỏ vào audio của kho trước. Hỏng câm.
+_nap_tu = {}
+
+# Những bộ một kho sẽ đóng góp: tầng đầu của cột `path` (với zip thì của tên mục).
+def _bo_trong(nguon):
+    import csv
+    import zipfile
+
+    nguon = Path(nguon)
+    if nguon.suffix == ".zip":
+        with zipfile.ZipFile(nguon) as zf:
+            return {n.split("/")[0] for n in zf.namelist() if "/" in n}
+    ra = set()
+    for meta in _cac_meta(nguon):
+        with open(meta, encoding="utf-8", newline="") as fh:
+            ra.update(r["path"].split("/")[0] for r in csv.DictReader(fh) if r.get("path"))
+    return ra
+
+# Kho chứa đường dẫn này, tức mount /kaggle/input/<slug>. Đơn vị ghi nhận phải là MOUNT
+# chứ không phải file: zip và cây bung sẵn của cùng một dataset là một kho, hai dataset
+# tình cờ chứa cùng tên bộ thì không.
+def _kho_cua(duong):
+    goc, duong = Path("/kaggle/input"), Path(duong)
+    return str(goc / duong.relative_to(goc).parts[0]) if goc in duong.parents else str(duong)
+
+def _ghi_nhan(nguon):
+    bo, kho = _bo_trong(nguon), _kho_cua(nguon)
+    trung = sorted(b for b in bo if _nap_tu.get(b, kho) != kho)
+    if trung:
+        raise SystemExit(
+            f"DỪNG: bộ {', '.join(trung)} có ở HAI Input khác nhau.\\n"
+            + "\\n".join(f"  {b}: đã nạp từ {_nap_tu[b]}, nay lại thấy ở {kho}" for b in trung)
+            + "\\nMột dataset = một bộ. Bỏ bớt Input rồi chạy lại ô này."
+        )
+    _nap_tu.update(dict.fromkeys(bo, kho))
+    return sorted(bo)
+
+_da_nap = False
 if _cac_meta(CORPUS):
     print("Corpus đã có sẵn trong /kaggle/working — không bung đè lên.")
     run("info")
-elif _mounted:
-    print(f"Bung corpus từ {_mounted[-1]}")
-    run("unpack", _mounted[-1])
-elif _cay := next((u for u in _cay_bung_san() if u[0] >= 0.9), None):
+    _da_nap = True
+else:
+    for _z in _mounted:
+        print(f"Bung corpus từ {_z} · bộ {', '.join(_ghi_nhan(_z)) or '?'}")
+        run("unpack", _z)
+        _da_nap = True
     # Ngưỡng 0.9 chứ không phải 1.0: manifest luôn mới hơn ảnh chụp một nhịp, nên vài
     # bản ghi cuối chưa kịp có file là chuyện thường — `prune_missing` loại chúng ở dưới.
-    _ti, _tong, _goc = _cay
-    print(f"Không có corpus.zip — Kaggle đã giải nén nó. Dùng cây bung sẵn: {_goc}")
-    _xong, _thieu = _muon_cay(_goc)
-    print(f"Đã trỏ {_xong} audio vào {CORPUS} bằng symlink (không copy, không tốn đĩa)"
-          + (f" · {_thieu} bản ghi chưa có file" if _thieu else ""))
+    for _ti, _tong, _goc in _cay_bung_san():
+        # Bộ đã vào corpus qua zip của CHÍNH kho này thì cây bung sẵn không thêm gì. Tới
+        # từ kho khác thì ngược lại — `_ghi_nhan` dừng phiên, và đó là việc của nó.
+        _bo = _bo_trong(_goc)
+        if _ti < 0.9 or (_bo and all(_nap_tu.get(_b) == _kho_cua(_goc) for _b in _bo)):
+            continue
+        print(f"Không có corpus.zip — Kaggle đã giải nén nó. Dùng cây bung sẵn: {_goc}"
+              f" · bộ {', '.join(_ghi_nhan(_goc)) or '?'}")
+        _xong, _thieu = _muon_cay(_goc)
+        print(f"Đã trỏ {_xong} audio vào {CORPUS} bằng symlink (không copy, không tốn đĩa)"
+              + (f" · {_thieu} bản ghi chưa có file" if _thieu else ""))
+        _da_nap = True
 
-    from aidetector.corpus.manifest import Manifest
+    if _da_nap:
+        from aidetector.corpus.manifest import Manifest
 
-    _m0 = Manifest.load(CORPUS, required=True)
-    if _m0.prune_missing():
-        _m0.save()
-else:
+        _m0 = Manifest.load(CORPUS, required=True)
+        if _m0.prune_missing():
+            _m0.save()
+
+if not _da_nap:
     # DỪNG HẲN nếu dataset đã có dữ liệu mà phiên này không nạp được. Đi tiếp nghĩa là
     # ingest lại từ đầu rồi đẩy một corpus 0 fake ĐÈ LÊN công của các phiên trước —
     # `datasets version` là ảnh chụp toàn bộ thư mục, không phải cộng dồn.
@@ -745,6 +857,9 @@ if _cac_meta(CORPUS):
     _done = len({f.speaker for f in _m.fakes})
     print(f"\\nCorpus đang có: {len(_m.reals)} real · {len(_m.fakes)} fake"
           f" · {_done}/{len(_m.speakers('real'))} speaker đã có fake")
+    if len(NGUON_DA_CO) > 1:
+        print(f"Gộp từ {len(NGUON_DA_CO)} bộ: "
+              + " · ".join(f"{_t} ({_n} real)" for _t, _n in sorted(NGUON_DA_CO.items())))
 
     # ĐÃ GEN ĐẾN ĐÂU so với đích "mỗi real đủ điều kiện có một fake". Đây là câu duy
     # nhất đáng hỏi trước khi bắt đầu một phiên nối tiếp, và nó đọc được từ chính
@@ -938,6 +1053,16 @@ from aidetector.ingest import convert_and_verify
 _da_co = NGUON_DA_CO.get(SOURCE, 0)
 _nguon = ["--name", SOURCE]
 
+# Một dataset = một bộ: kho vừa nạp ở A1b phải là kho của CHÍNH bộ này. Lệch nghĩa là
+# DATASET_ID và SOURCE đang nói về hai bộ khác nhau — đi tiếp là ingest bộ này rồi đẩy nó
+# vào kho của bộ kia, và phiên sau nạp kho đó về sẽ thấy hai bộ trong một mount.
+_bo_la = sorted(set(NGUON_DA_CO) - {SOURCE})
+if MAKE_DATASET and _bo_la:
+    raise SystemExit(
+        f"DỪNG: corpus vừa nạp có bộ {', '.join(_bo_la)}, nhưng phiên này làm bộ {SOURCE!r}.\\n"
+        f"{DATASET_ID} là kho của đúng MỘT bộ — sửa SOURCE ở ô này, hoặc DATASET_ID ở ô setup."
+    )
+
 if not MAKE_DATASET:
     skipped("convert + kiểm đầu vào")
 else:
@@ -996,8 +1121,13 @@ chia sẵn) rồi ép mọi file về đúng một chuẩn:
     └── real/<speaker>/0001.wav
 ```
 
-Thêm bộ mới là thêm một thư mục: đặt `SOURCE` khác ở ô A1c rồi chạy lại A2 — bộ cũ không
-bị ghi lại một byte nào. Bỏ một bộ là xoá một thư mục.
+Thêm bộ mới là thêm một thư mục: mở một phiên khác với `SOURCE` khác ở ô A1c và
+`DATASET_ID` khác ở ô setup — bộ cũ không bị ghi lại một byte nào. Bỏ một bộ là xoá một
+thư mục, hoặc đơn giản là không add dataset của nó vào Input phiên train.
+
+**Một thư mục bộ ⇄ một Kaggle Dataset.** Gốc dataset đúng bằng thư mục `<bộ>/` ở trên, nên
+mount nó vào phiên khác là thư mục đó hiện nguyên hình, và ba bộ là ba Input gộp lại thành
+cây ba nhánh y như chạy trên một máy.
 
 Fake nằm trong thư mục của **chính bộ đã sinh ra nó** (`source` thừa hưởng từ real gốc),
 rồi mới tách theo engine. Tầng cuối luôn là speaker, nên đứng ở một giọng là thấy cả hai
@@ -1107,11 +1237,16 @@ md("""
 ## A2b. Đồng bộ lên Kaggle Dataset
 
 Đích là `DATASET_ID` ở ô setup — **cùng một biến** mà ô A1b nạp về, nên không bao giờ có
-chuyện đẩy lên một chỗ rồi phiên sau nạp từ chỗ khác. Mỗi lần đẩy gồm **toàn bộ**:
-`corpus.zip` (real + fake + manifest của mọi bộ) cộng một bản `<bộ>/metadata.csv` để rời
-bên ngoài — nhờ đó A1b đọc được tiến độ mà không phải tải cả GB. Kaggle giải nén `corpus.zip` ngay khi
-nhận, nên trên trang dataset nó hiện ra dưới dạng cây `<bộ>/real/ <bộ>/fake/`; A1b nạp được cả hai
-dạng nên không phải chống lại chuyện đó.
+chuyện đẩy lên một chỗ rồi phiên sau nạp từ chỗ khác. Mỗi lần đẩy gồm **toàn bộ** những
+gì bộ này có: `corpus.zip` (real + fake + `metadata.csv` của bộ) cộng một bản
+`<bộ>/metadata.csv` để rời bên ngoài — nhờ đó A1b đọc được tiến độ mà không phải tải cả GB.
+Kaggle giải nén `corpus.zip` ngay khi nhận, nên trên trang dataset nó hiện ra dưới dạng cây
+`<bộ>/real/ <bộ>/fake/`; A1b nạp được cả hai dạng nên không phải chống lại chuyện đó.
+
+**Kho này là của đúng MỘT bộ.** Corpus trong phiên có nhiều hơn một bộ thì lượt đẩy
+**từ chối chạy** chứ không gói cả đám: kho của bộ này mà chứa bộ khác thì phiên train
+mount nó về sẽ thấy hai bộ trong một Input, và bộ đó lại còn có thể trùng với một Input
+khác — đúng cái hỏng câm mà A1b dựng rào để chặn.
 
 Mục này đặt **trước** bước sinh vì bước sinh gọi `sync_corpus.py`, file đó phải có sẵn.
 
@@ -1302,7 +1437,7 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
         f = out / ten
         return f if f.exists() else None
 
-    def dem_tren_dataset():
+    def dem_tren_dataset(bo):
         # progress.json chỉ vài KB nên thử nó trước; manifest.csv là đường lùi cho
         # những version đẩy lên trước khi có file trạng thái.
         f = tai_ve("progress.json")
@@ -1311,10 +1446,10 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
                 return int(json.loads(f.read_text(encoding="utf-8"))["dataset_records"])
             except Exception:
                 pass
-        # Đường lùi cho những version đẩy lên TRƯỚC khi có progress.json — chúng còn ở
-        # cấu trúc gộp nên manifest nằm ngay gốc. Version tách theo bộ thì không đoán
-        # được tên thư mục để tải, và cũng không cần: progress.json luôn có.
-        for ten in ("metadata.csv", "manifest.csv"):
+        # Đường lùi cho những version đẩy lên TRƯỚC khi có progress.json. Kho của một bộ
+        # để manifest ở `<bộ>/metadata.csv`; các version cũ theo cấu trúc gộp thì để ngay
+        # gốc. Thử cả hai, bắt đầu bằng cái của bộ đang đẩy.
+        for ten in ([f"{{bo}}/metadata.csv"] if bo else []) + ["metadata.csv", "manifest.csv"]:
             f = tai_ve(ten)
             if f is not None:
                 return dem(f)
@@ -1357,8 +1492,21 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
     if not meta_local:
         print("Chưa có corpus để đẩy — bỏ lượt.")
         raise SystemExit(0)
+    # MỘT DATASET = MỘT BỘ. Corpus nhiều bộ nghĩa là phiên này đã kéo bộ khác vào; đẩy
+    # tiếp là bơm bộ lạ vào kho của bộ này, và phiên sau nạp kho đó về sẽ thấy hai bộ
+    # trong một mount — đúng thứ cấu trúc này dựng lên để tránh.
+    #
+    # Đếm THƯ MỤC BỘ, không đếm số file manifest: corpus vừa bung từ một version cũ còn
+    # bảng gộp ở gốc bên cạnh shard mới, và đó vẫn là một bộ.
+    theo_bo = [f for f in meta_local if f.parent != CORPUS]
+    if len(theo_bo) > 1:
+        print(f"TỪ CHỐI ĐẨY: corpus có {{len(theo_bo)}} bộ — "
+              + ", ".join(sorted(f.parent.name for f in theo_bo)))
+        print(f"{{DATASET_ID}} là kho của đúng MỘT bộ. Mỗi bộ một dataset, mỗi phiên một bộ.")
+        raise SystemExit(4)
+    BO = theo_bo[0].parent.name if theo_bo else ""
     local = sum(dem(f) for f in meta_local)
-    remote = dem_tren_dataset()
+    remote = dem_tren_dataset(BO)
     if remote is not None and local < remote and not CHO_PHEP_NHO_HON:
         print(f"TỪ CHỐI ĐẨY: corpus ở đây {{local}} bản ghi < {{remote}} đang có trên dataset.")
         print("Nhiều khả năng phiên này bắt đầu từ đầu vì chưa Add Input dataset.")
@@ -1396,7 +1544,7 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
                        check=True, cwd="/kaggle/working/ai-detector")
 
         (STAGE / "dataset-metadata.json").write_text(json.dumps({{
-            "title": "vivos fake v2",
+            "title": f"aidetector corpus {{BO}}" if BO else "aidetector corpus",
             "id": DATASET_ID,
             "licenses": [{{"name": "CC0-1.0"}}],
         }}, ensure_ascii=False))
@@ -1945,7 +2093,8 @@ Xem lại A4: hai lớp có cân bằng không, engine nào sinh được bao nh
 lý chưa. Nếu đang ở `SMOKE = True` thì giờ đặt `SMOKE = False` ở ô A1 và chạy lại A2–A5
 để làm thật.
 
-Ưng rồi thì mở **`aidetector_train.ipynb`**, Add Input đúng `DATASET_ID` ở trên, và Save
+Ưng rồi thì mở **`aidetector_train.ipynb`**, Add Input `DATASET_ID` ở trên (cùng mọi
+dataset bộ khác muốn huấn luyện chung — mỗi bộ một Input), và Save
 & Run All. Corpus vừa đẩy lên đã là đầu vào của nó — không phải bung lại, không phải
 chỉnh gì.
 """),

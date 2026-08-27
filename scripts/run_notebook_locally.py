@@ -13,7 +13,7 @@ Không nêu tên file thì chạy CẢ HAI, dataset trước rồi train — m�
 riêng đúng như hai phiên Kaggle, nhưng dùng chung `/kaggle/working` giả, nên corpus vừa
 sinh chính là đầu vào của lượt train (ô A1b nhận ra và không bung đè lên).
 
-Ô cài đặt (pip/apt) bị bỏ qua: môi trường chạy phải cài sẵn thư viện.
+Lệnh cài (pip/apt) bị vô hiệu hoá: môi trường chạy phải cài sẵn thư viện.
 Thoát 0 nếu mọi ô chạy xong, khác 0 nếu có ô nào dừng hoặc ném ngoại lệ.
 """
 
@@ -43,9 +43,13 @@ def build_fake_kaggle(sandbox: Path, vivos: Path) -> tuple[Path, Path]:
 
 def prepare_cell(source: str, work: Path, mounts: Path) -> tuple[str, str]:
     """Trả (mã sẵn sàng exec, lý do bỏ qua)."""
-    if "pip install" in source or "apt-get" in source:
-        return "", "ô cài đặt thư viện"
     code = "\n".join(l for l in source.splitlines() if not l.lstrip().startswith("!"))
+    # Ô setup vừa cài thư viện vừa khai báo MODE/DATASET_ID/ngưỡng độ dài. Bỏ cả ô là mọi
+    # ô sau chạy vào NameError, nên chỉ tháo ngòi đúng lệnh cài rồi chạy phần còn lại —
+    # môi trường sandbox phải có sẵn thư viện.
+    code = code.replace(
+        'if subprocess.run([sys.executable, "-m", "pip", "install", "-q", *args]).returncode:',
+        "if False:   # [harness] sandbox không cài gì")
     code = code.replace("/kaggle/working", str(work)).replace("/kaggle/input", str(mounts))
     return (code, "") if code.strip() else ("", "ô rỗng sau khi bỏ lệnh shell")
 

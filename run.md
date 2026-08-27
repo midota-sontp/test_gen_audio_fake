@@ -303,8 +303,8 @@ repo hay thêm dataset chứa code:
 
 | Notebook | Làm gì | Input cần add |
 |---|---|---|
-| [notebooks/aidetector_dataset.ipynb](notebooks/aidetector_dataset.ipynb) | ingest → generate → validate → **nghe thử + xem phổ** → đẩy lên Kaggle Dataset | một bộ giọng thật (VIVOS…) |
-| [notebooks/aidetector_train.ipynb](notebooks/aidetector_train.ipynb) | split → augment → features → train → evaluate | corpus do file trên đẩy lên |
+| [notebooks/aidetector_dataset.ipynb](notebooks/aidetector_dataset.ipynb) | ingest → generate → validate → **nghe thử + xem phổ** → đẩy lên Kaggle Dataset | một bộ giọng thật (VIVOS…) + kho của chính bộ đó |
+| [notebooks/aidetector_train.ipynb](notebooks/aidetector_train.ipynb) | split → augment → features → train → evaluate | **mọi** kho corpus muốn huấn luyện chung |
 
 **Trong panel bên phải phải bật:** Accelerator = `GPU T4 x2`/`P100`, Internet = `On`.
 Rồi Add Input → Datasets một bộ giọng thật tiếng Việt. Không có GPU thì OmniVoice
@@ -316,6 +316,65 @@ Dataset, nên bạn kiểm tra được dữ liệu **trước khi** tốn giờ
 bằng real/fake, số lượng theo từng engine, tỉ lệ fake có real đối chứng, và nghe trực tiếp
 từng cặp real/fake cùng câu cùng giọng. Có công tắc `SMOKE = True` chạy thử ~40 mẫu trong
 vài phút. Xong rồi mới mở file train, add đúng dataset đó vào Input và Save & Run All.
+
+#### Một Kaggle Dataset = một bộ dữ liệu
+
+Gốc mỗi kho đúng bằng **một thư mục bộ** của corpus:
+
+```
+sonpham12/vivos-fake-v2          ← kho của bộ `vivos`
+└── vivos/
+    ├── metadata.csv             ← chỉ kể bản ghi của vivos
+    ├── real/<speaker>/0001.wav
+    └── fake/<engine>/<speaker>/0001.wav
+   (+ progress.json ở gốc kho — tiến độ của riêng bộ này)
+```
+
+Nhờ vậy **gộp nhiều bộ chỉ là Add Input nhiều dataset**: cột `path` bắt đầu bằng tên bộ
+nên mỗi mount đóng góp một thư mục và không mount nào giẫm lên đường dẫn của mount nào.
+Phiên train mount ba kho là có corpus ba nhánh, y như chạy trên một máy.
+
+| Phiên | A1b nạp gì | Vì sao |
+|---|---|---|
+| tạo dataset | **chỉ** kho khớp `DATASET_ID` | mọi thứ trong corpus lúc đó sẽ được đẩy lên kho này ở mốc kế tiếp — kéo bộ khác vào là bơm bộ lạ vào kho của bộ này |
+| huấn luyện | **mọi** mount là corpus | càng nhiều bộ càng đúng thứ tập test đo: tổng quát sang giọng mới |
+
+Ba rào giữ cho bất biến này không vỡ, cả ba đều **dừng phiên** chứ không cảnh báo suông:
+
+* **Một bộ ở hai Input** ⇒ A1b dừng. Hai bản của cùng một bộ đánh số `0001.wav` độc lập
+  nhau, mà `unpack` lẫn symlink đều bỏ qua đường dẫn đã tồn tại — gộp lại là bản ghi của
+  kho sau trỏ vào audio của kho trước, sai nội dung mà không phép kiểm nào bắt được.
+* **`SOURCE` (ô A1c) khác bộ đã nạp** ⇒ ô convert dừng: `DATASET_ID` và `SOURCE` đang nói
+  về hai bộ khác nhau.
+* **Corpus có nhiều hơn một bộ lúc đẩy** ⇒ `TỪ CHỐI ĐẨY`, không gói cả đám lên kho.
+
+Thêm bộ thứ hai là mở **một phiên khác** với cặp `SOURCE`/`DATASET_ID` khác — cũng chính
+là cách chạy nhiều phiên sinh song song mà không phiên nào đè lên phiên nào, vì mỗi phiên
+ghi vào kho của riêng nó.
+
+#### Đưa một kho cũ về cấu trúc này
+
+Kho đẩy lên trước đây còn ở cấu trúc gộp (`metadata.csv`/`manifest.csv` ở gốc, cây
+`real/<bộ>/<speaker>/` hoặc `audio/<label>/…`). Không đổi tên file tại chỗ trên Kaggle
+được, nên đường duy nhất là **đẩy một version mới** — và pipeline làm sẵn việc đó, không
+tốn một giây GPU nào:
+
+1. **Add Input**: kho cần chuyển + một bộ giọng thật. Ô A1 vẫn đòi một nguồn REAL để dò
+   (kho corpus bị nó bỏ qua có chủ ý), còn `convert`/`ingest` thì tự bỏ qua vì kho đã có
+   bộ đó rồi — mount VIVOS vào chỉ để ô A1 có cái để chọn.
+2. Chạy tới **A1d**: A1b nạp kho cũ (symlink, đọc được cả hai cấu trúc), `run("migrate")`
+   dời bản ghi về `<bộ>/real|fake/<speaker>/0001.wav` và giữ nguyên `utt_id`.
+3. Chạy ô **A2b** (ghi `sync_corpus.py`) rồi gọi `sync_now()`. **Bỏ qua toàn bộ A3** —
+   không sinh thêm gì.
+
+Version mới là ảnh chụp toàn bộ nên nó chỉ chứa cây mới; bản cũ vẫn nằm ở version cũ
+(`KEEP_OLD_VERSIONS = True`). Manifest gộp cũ được đổi tên thành `metadata.goc-cu.csv`
+trong thư mục làm việc và **không** được đẩy lên. Giá phải trả là gói + upload lại toàn
+bộ corpus một lần (~1 GB), tức vài phút mạng.
+
+Có test chạy đúng đường này: nạp kho cấu trúc cũ → `migrate` → `pack`, rồi soi tên mục
+trong zip — `migrate` dời symlink trỏ vào mount chỉ-đọc và `pack` phải đi theo symlink,
+hai chỗ chỉ ca này chạm tới.
 
 #### Vì sao hai file chứ không một file với công tắc
 
@@ -550,7 +609,7 @@ công của nó.**
 
 | | Ô | Làm gì | Dừng phiên khi |
 |---|---|---|---|
-| 1 | — | **Add Input**: kho lưu trữ + bộ dữ liệu nguồn | — |
+| 1 | — | **Add Input**: kho của bộ này + bộ dữ liệu nguồn (phiên train: **mọi** kho corpus) | một bộ có ở hai Input |
 | 2 | setup | `TTS_ENGINES` · `DATASET_ID` · `MIN_SECONDS` (`MODE` đã chốt theo file) | `MODE` bị sửa tay thành giá trị lạ |
 | 3 | A1 | quy mô (`None` = toàn bộ nguồn) | không dataset nào đọc được |
 | 4 | **A1b** | nạp kho → `migrate` → in trạng thái, cả tổng lẫn **theo từng nguồn** | kho có dữ liệu mà **không mount được**; file train mà không có corpus; corpus chỉ một lớp |
@@ -594,6 +653,9 @@ một phiên lỡ bắt đầu từ đầu mà đẩy lên là xoá công của 
    sinh nhiều giờ.
 3. **`KEEP_OLD_VERSIONS = True`**: version cũ vẫn nằm trên Kaggle, lấy lại được từ tab
    Data. Đặt `False` chỉ khi dung lượng thành vấn đề.
+4. **Kho là của đúng một bộ**: corpus trong phiên có nhiều hơn một bộ thì lượt đẩy
+   `TỪ CHỐI ĐẨY` — kho của bộ này mà chứa bộ khác là phiên train mount về sẽ thấy hai bộ
+   trong một Input, và bộ đó còn có thể trùng với một Input khác.
 
 Còn giữa các **nguồn** với nhau thì cách ly sẵn: `utt_id` mang tên nguồn, đường dẫn tách
 theo nguồn (`real/dataset_a/…`), và `ingest` chỉ thêm chứ không ghi đè.
@@ -608,10 +670,11 @@ python -m aidetector validate --fix        # chỉ soi phần mới
 python -m aidetector generate --engines omnivoice
 ```
 
-Trong notebook, ô A1 tự dò và chọn **một** dataset có điểm cao nhất. Muốn nạp bộ thứ hai
-thì đặt tay `RAW = "/kaggle/input/<tên>"` rồi chạy lại A2 — notebook chưa nạp nhiều nguồn
-trong một lượt. Tên nguồn mặc định lấy theo tên thư mục, nên đặt tên thư mục cho gọn hoặc
-truyền `--name`.
+Trong notebook thì **một phiên tạo dataset làm đúng một bộ**: đặt `SOURCE` (ô A1c) và
+`DATASET_ID` (ô setup) cho bộ mới rồi chạy — bộ cũ nằm ở kho của nó, không bị đụng tới.
+Tới lượt huấn luyện thì add mọi kho vào Input, A1b gộp lại. Ô A1 tự dò nguồn REAL và **bỏ
+qua các mount là corpus của chính ta** (cây corpus được chấm 0.95 điểm, cao hơn cả Common
+Voice 0.9 — không loại ra thì phiên đi ingest lại chính corpus của mình).
 
 `progress.json` tách theo nguồn, nên phiên sau nhìn một dòng là biết bộ nào đã tới đâu:
 

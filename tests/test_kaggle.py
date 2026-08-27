@@ -570,12 +570,14 @@ def test_training_stages_only_run_when_training(notebook, stage):
 
 
 def test_corpus_restore_runs_in_every_mode(notebook):
-    """Ô A1b là đường DUY NHẤT mang corpus vào phiên — gate nó thì MODE='train' chết."""
+    """Ô A1b là đường DUY NHẤT mang corpus vào phiên — bỏ qua nó thì MODE='train' chết."""
     src = _cell_src(notebook, 'run("unpack"')
-    # Không cổng MODE nào được mở TRƯỚC lệnh bung — sau đó thì có (kiểm tra riêng cho
-    # chế độ chỉ-huấn-luyện), nên so theo vị trí chứ không phải cả ô.
     before = src[:src.index('run("unpack"')]
-    assert "MAKE_DATASET" not in before and "DO_TRAIN" not in before, before
+    assert "DO_TRAIN" not in before, before
+    # MODE chỉ được quyết định NẠP TỪ ĐÂU, không được quyết định CÓ NẠP HAY KHÔNG: mọi
+    # nhánh đều dẫn tới lệnh bung, và phiên train là phía RỘNG hơn (gộp mọi kho).
+    assert "skipped(" not in before, before
+    assert before.count("MAKE_DATASET") == 1, before
 
 
 def test_train_only_refuses_an_empty_or_one_sided_corpus(notebook):
@@ -760,6 +762,9 @@ def test_restore_prefers_the_dataset_it_pushes_to(notebook):
     src = _cell_src(notebook, 'run("unpack"')
     assert 'DATASET_ID.split("/")[-1]' in src
     assert src.index('f"/kaggle/input/{slug}/**/{name}"') < src.index('f"/kaggle/input/**/{name}"')
+    # Phiên tạo dataset dừng lại ở kho của chính nó: mọi thứ trong corpus lúc đó sẽ được
+    # đẩy lên `DATASET_ID`, nên kéo bộ khác vào là bơm bộ lạ vào kho của bộ này.
+    assert "if MAKE_DATASET:\n        return rieng" in src
 
 
 def test_ingest_is_checkpointed_only_when_it_added_something(notebook):
@@ -997,6 +1002,205 @@ def test_an_already_extracted_corpus_is_adopted_by_symlink(notebook):
     assert "shutil.copy(meta, dich_meta)" in src
     # Manifest luôn mới hơn ảnh chụp một nhịp — bản ghi chưa có file phải bị loại.
     assert "prune_missing()" in src
+
+
+# ------------------------------------------- một Kaggle Dataset = một bộ, gộp là add Input
+def _kho_mot_bo(mount, ten_bo, n=3):
+    """Dựng một Kaggle Dataset đã giải nén: đúng MỘT thư mục bộ, có cả real lẫn fake."""
+    import numpy as np
+
+    from aidetector.corpus.schema import LABEL_FAKE, LABEL_REAL, Record, make_utt_id
+
+    cau = "hôm nay trời rất đẹp và mát mẻ nên cả nhà cùng nhau đi dạo phố"
+    m = Manifest(mount)
+    for i in range(n):
+        for nhan, gen in ((LABEL_REAL, ""), (LABEL_FAKE, "dummy_tts:voice_a")):
+            m.write_audio(
+                Record(utt_id=make_utt_id(ten_bo, f"spk-{ten_bo}", f"{nhan}{i}"), path="",
+                       label=nhan, source=ten_bo, speaker=f"spk-{ten_bo}", text=cau,
+                       generator=gen),
+                np.zeros(4 * SPEC.sample_rate, np.float32), SPEC)
+    m.save()
+    return m
+
+
+def _run_a1b(notebook, tmp_path, mounts, make_dataset, dataset_id="ai/kho-vivos"):
+    """Chạy ô A1b thật, với /kaggle/input và /kaggle/working trỏ vào tmp_path."""
+    work = tmp_path / "working"
+    work.mkdir(parents=True, exist_ok=True)
+    cell = _cell_src(notebook, 'run("unpack"')
+    cell = cell.replace("/kaggle/working", str(work)).replace("/kaggle/input", str(mounts))
+    ns = {"DATASET_ID": dataset_id, "MAKE_DATASET": make_dataset,
+          "CFG": "configs/kaggle.yaml", "run": lambda *a: None}
+    exec(compile(cell, "a1b", "exec"), ns)
+    return ns
+
+
+def test_training_merges_every_mounted_store(notebook, tmp_path):
+    """Một dataset một bộ ⇒ huấn luyện trên nhiều bộ là add nhiều Input, không phải sửa gì.
+
+    Lấy đúng MỘT kho như trước là im lặng bỏ nửa dữ liệu: phiên vẫn chạy, số vẫn đẹp,
+    và không dòng log nào nói rằng bộ thứ hai chưa bao giờ được nhìn tới.
+    """
+    mounts = tmp_path / "input"
+    _kho_mot_bo(mounts / "kho-vivos", "vivos")
+    _kho_mot_bo(mounts / "kho-abc", "abc")
+
+    ns = _run_a1b(notebook, tmp_path, mounts, make_dataset=False)
+
+    m = Manifest.load(ns["CORPUS"], required=True)
+    assert {r.source for r in m} == {"vivos", "abc"}
+    assert sorted(p.parent.name for p in find_shards(ns["CORPUS"])) == ["abc", "vivos"]
+    assert ns["NGUON_DA_CO"] == {"vivos": 3, "abc": 3}
+    # Mount chỉ-đọc: audio là symlink, manifest là bản copy ghi được.
+    assert all(m.abs_path(r).exists() for r in m)
+    assert all(m.abs_path(r).is_symlink() for r in m)
+    assert not (ns["CORPUS"] / "vivos" / MANIFEST_NAME).is_symlink()
+
+
+def _kho_cau_truc_cu(mount, ten_bo="vivos"):
+    """Kho đẩy lên TRƯỚC khi corpus tách theo bộ: manifest gộp ở gốc, cây `real/<bộ>/…`."""
+    import numpy as np
+
+    from aidetector.corpus.manifest import manifest_csv
+    from aidetector.corpus.schema import LABEL_REAL, Record, make_utt_id
+    from aidetector.corpus.spec import save_audio
+
+    recs = []
+    for speaker in (f"{ten_bo}spk01", f"{ten_bo}spk02"):
+        for i in range(2):
+            duong = f"real/{ten_bo}/{speaker}/{i + 1:04d}.wav"
+            (mount / duong).parent.mkdir(parents=True, exist_ok=True)
+            save_audio(mount / duong, np.zeros(4 * SPEC.sample_rate, np.float32), SPEC)
+            recs.append(Record(utt_id=make_utt_id(ten_bo, speaker, f"cu-{i}"), path=duong,
+                               label=LABEL_REAL, source=ten_bo, speaker=speaker,
+                               text="câu cũ", duration=4.0))
+    (mount / MANIFEST_NAME).write_text(manifest_csv(recs), newline="", encoding="utf-8")
+    return recs
+
+
+def test_a_legacy_store_migrates_to_one_folder_per_set(notebook, tmp_path):
+    """Đưa kho cũ về cấu trúc mới: nạp (symlink) → `migrate` → gói lại là đúng cây mới.
+
+    Đây là đường duy nhất đổi được cấu trúc một Kaggle Dataset — không đổi tên file tại
+    chỗ được, phải đẩy một version mới. Hai chỗ dễ vỡ mà chỉ ca này chạm tới: `migrate`
+    dời SYMLINK trỏ vào mount chỉ-đọc, và `pack` phải đi theo symlink để zip có nội dung
+    thật chứ không phải một liên kết gãy.
+    """
+    mounts = tmp_path / "input"
+    cu = _kho_cau_truc_cu(mounts / "kho-vivos")
+
+    ns = _run_a1b(notebook, tmp_path, mounts, make_dataset=True)
+
+    corpus = ns["CORPUS"]
+    m = Manifest.load(corpus, required=True)
+    assert len(m) == len(cu)
+    assert all(m.abs_path(r).is_symlink() for r in m), "mount chỉ-đọc ⇒ phải là symlink"
+
+    m.migrate_layout()
+    m.save()
+
+    assert [p.parent.name for p in find_shards(corpus)] == ["vivos"]
+    assert not (corpus / MANIFEST_NAME).exists(), "bảng gộp cũ phải được tách đi"
+    for rec in m:
+        assert rec.path.startswith("vivos/real/")
+        assert m.abs_path(rec).exists()
+
+    archive = pack_corpus(corpus, tmp_path / "corpus.zip")
+    with zipfile.ZipFile(archive) as zf:
+        names = zf.namelist()
+        assert all(zf.read(n) for n in names), "zip phải mang nội dung thật, không phải symlink gãy"
+    assert f"vivos/{MANIFEST_NAME}" in names
+    assert all(n.startswith("vivos/") for n in names), names
+
+
+def test_a_dataset_session_loads_only_its_own_store(notebook, tmp_path):
+    """Phiên sinh đẩy nguyên corpus lên `DATASET_ID` — bộ lạ trong đó là bơm nhầm kho."""
+    mounts = tmp_path / "input"
+    _kho_mot_bo(mounts / "kho-vivos", "vivos")
+    _kho_mot_bo(mounts / "kho-abc", "abc")
+
+    ns = _run_a1b(notebook, tmp_path, mounts, make_dataset=True, dataset_id="ai/kho-vivos")
+    assert ns["NGUON_DA_CO"] == {"vivos": 3}
+
+
+def test_a_source_that_lives_in_two_inputs_stops_the_session(notebook, tmp_path):
+    """Hai bản của cùng một bộ đánh số `0001.wav` độc lập nhau.
+
+    `unpack` và symlink đều bỏ qua đường dẫn đã tồn tại, nên gộp lại là bản ghi của kho
+    sau trỏ vào audio của kho trước — sai nội dung mà không phép kiểm nào ở dưới bắt được.
+    """
+    mounts = tmp_path / "input"
+    _kho_mot_bo(mounts / "kho-a", "vivos")
+    _kho_mot_bo(mounts / "kho-b", "vivos")
+
+    with pytest.raises(SystemExit) as err:
+        _run_a1b(notebook, tmp_path, mounts, make_dataset=False)
+    assert "vivos" in str(err.value) and "HAI Input" in str(err.value)
+    assert "kho-a" in str(err.value) and "kho-b" in str(err.value)
+
+
+def test_the_real_picker_skips_our_own_corpus(notebook, tmp_path):
+    """Cây corpus được chấm 0.95 — trên cả Common Voice (0.9) và VIVOS thiếu split (0.7).
+
+    Không loại nó ra thì phiên đi ingest lại chính corpus của mình thành một nguồn mới.
+    """
+    _kho_mot_bo(tmp_path / "aaa-kho-vivos", "vivos")
+    that = tmp_path / "zzz-vivos"
+    (that / "train" / "waves" / "SPK1").mkdir(parents=True)
+    (that / "train" / "prompts.txt").write_text("SPK1_R001 xin chào", encoding="utf-8")
+
+    ns = _run_picker(notebook, tmp_path, {"MAKE_DATASET": True, "DATASET_ID": "ai/kho-vivos"})
+    assert ns["RAW"] == str(that)
+
+
+def test_the_push_refuses_a_store_with_more_than_one_source(notebook, tmp_path):
+    """Kho của bộ này mà chứa bộ khác thì phiên train mount về sẽ thấy hai bộ một Input.
+
+    Chạy thật script đã dựng: rào phải nằm TRƯỚC mọi lệnh `kaggle`, nên nó dừng được cả
+    khi máy không có CLI lẫn token — đúng tình huống của một sandbox.
+    """
+    import subprocess
+
+    script = _sync_script(notebook)
+    assert script.index("len(theo_bo) > 1") < script.index('"datasets", "version"')
+
+    _kho_mot_bo(tmp_path / "corpus", "vivos")
+    _kho_mot_bo(tmp_path / "corpus", "abc")
+    tep = tmp_path / "sync.py"
+    tep.write_text(script.replace("/kaggle/working", str(tmp_path)), encoding="utf-8")
+
+    ket = subprocess.run([sys.executable, str(tep)], capture_output=True, text=True)
+    assert ket.returncode == 4, ket.stdout + ket.stderr
+    assert "TỪ CHỐI ĐẨY" in ket.stdout and "abc, vivos" in ket.stdout
+
+
+def test_the_push_tolerates_the_legacy_merged_manifest(notebook, tmp_path):
+    """Corpus bung từ version cũ còn bảng gộp ở gốc BÊN CẠNH shard mới — vẫn là một bộ.
+
+    Đếm số file manifest thay vì số thư mục bộ là từ chối đẩy đúng những phiên đang nối
+    tiếp corpus cũ nhất.
+    """
+    import subprocess
+
+    _kho_mot_bo(tmp_path / "corpus", "vivos")
+    (tmp_path / "corpus" / MANIFEST_NAME).write_text(
+        (tmp_path / "corpus" / "vivos" / MANIFEST_NAME).read_text(encoding="utf-8"),
+        encoding="utf-8")
+    tep = tmp_path / "sync.py"
+    tep.write_text(_sync_script(notebook).replace("/kaggle/working", str(tmp_path)),
+                   encoding="utf-8")
+
+    ket = subprocess.run([sys.executable, str(tep)], capture_output=True, text=True)
+    assert "TỪ CHỐI ĐẨY" not in ket.stdout, ket.stdout
+
+
+def test_the_source_and_the_store_must_name_the_same_set(notebook):
+    """SOURCE nói bộ này, DATASET_ID nói kho của bộ kia — đi tiếp là đẩy nhầm chỗ."""
+    src = _cell_src(notebook, "CONVERT = None")
+    assert "_bo_la = sorted(set(NGUON_DA_CO) - {SOURCE})" in src
+    assert "if MAKE_DATASET and _bo_la:" in src
+    assert src.index("_bo_la") < src.index("convert_and_verify(")
 
 
 def test_the_push_refuses_to_shrink_the_dataset(notebook):
