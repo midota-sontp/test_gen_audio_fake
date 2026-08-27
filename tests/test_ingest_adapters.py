@@ -343,11 +343,13 @@ def test_canonical_import_leaves_fake_to_the_pipeline(tmp_path, vivos_like):
     from aidetector.ingest.canonical import CanonicalAdapter
 
     corpus, _ = _canonical_tree(tmp_path, vivos_like)
-    (corpus / "fake" / "engine_la" / "spk").mkdir(parents=True)
     import shutil
 
-    nguon = next((corpus / "real").glob("*/*/*.wav"))
-    shutil.copy(nguon, corpus / "fake" / "engine_la" / "spk" / "0001.wav")
+    nguon = next(corpus.glob("*/real/*/*.wav"))
+    # Đặt fake đúng chỗ nó nằm trong corpus thật: <bộ>/fake/<engine>/<speaker>/
+    fake_dir = nguon.parent.parent.parent / "fake" / "engine_la" / "spk"
+    fake_dir.mkdir(parents=True)
+    shutil.copy(nguon, fake_dir / "0001.wav")
 
     moi = Manifest(tmp_path / "corpus_moi")
     ingest_source(moi, CanonicalAdapter(), corpus, "phat_hanh", AudioSpec())
@@ -407,7 +409,7 @@ def test_the_documented_convert_example_actually_works(tmp_path):
     assert {r.speaker for r in m.reals} == {"001_nguyen_van_a", "002_tran_thi_b",
                                             "003_le_van_c"}
     assert all(r.text for r in m.reals), "transcript phải khớp theo từng đường dẫn"
-    assert all(r.path.startswith(f"real/{SOURCE}/") for r in m.reals)
+    assert all(r.path.startswith(f"{SOURCE}/real/") for r in m.reals)
 
 
 # --------------------------- convert + đánh giá đầu vào trong MỘT bước

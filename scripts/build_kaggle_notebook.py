@@ -518,18 +518,23 @@ huấn luyện trên tay không là bỏ cả phiên GPU.
 #### `corpus.zip` không còn trên dataset là chuyện BÌNH THƯỜNG
 
 Kaggle **tự giải nén** mọi `.zip` đưa lên dataset và không giữ lại bản nén. Nên
-`corpus.zip` mà A2b đẩy lên biến thành cây `real/ fake/ metadata.csv` nằm thẳng trong
-mount. Ô này nhận cả hai dạng:
+`corpus.zip` mà A2b đẩy lên biến thành cây `<bộ>/real/ <bộ>/fake/ <bộ>/metadata.csv`
+nằm thẳng trong mount. Ô này nhận cả hai dạng:
 
 | Mount có gì | Ô này làm gì |
 |---|---|
 | `corpus.zip` | `unpack` như cũ |
-| cây `real/ fake/` đã bung | **symlink** vào `/kaggle/working/corpus` — không copy |
+| cây `<bộ>/real/ <bộ>/fake/` đã bung | **symlink** vào `/kaggle/working/corpus` — không copy |
 | chỉ `metadata.csv`, không audio | DỪNG, in ra đang mount gì để soi |
 
 Đường symlink còn nhanh hơn zip: khỏi mất vài phút bung và 1 GB đĩa. `/kaggle/input`
 chỉ-đọc, nên chỉ `metadata.csv` được copy thật (split ghi cột `split`, validate ghi
 `checked` vào đó); audio cũ là symlink trỏ vào mount, audio mới ghi thẳng vào cây.
+
+Corpus **tách theo bộ dữ liệu** nên có nhiều `metadata.csv` — mỗi bộ một file. Ô này copy
+tất cả, giữ đúng vị trí tương đối của từng file. Cột `path` tính từ gốc corpus ở cả cấu
+trúc mới và cấu trúc gộp cũ, nên nó tự nhận ra gốc là thư mục chứa manifest hay thư mục
+cha của nó — không phải khai gì.
 """),
 code("""
 import glob
@@ -546,13 +551,22 @@ def _find(name):
     return (sorted(glob.glob(f"/kaggle/input/{slug}/**/{name}", recursive=True))
             or sorted(glob.glob(f"/kaggle/input/**/{name}", recursive=True)))
 
-# Corpus đóng gói ở các phiên trước dùng tên `manifest.csv`; bản mới là `metadata.csv`.
-# Tìm cả hai, ở mọi chỗ — bỏ tên cũ nghĩa là vứt luôn dữ liệu đã đẩy lên Kaggle.
-def _metadata_o(thu_muc):
-    for ten in ("metadata.csv", "manifest.csv"):
-        if (thu_muc / ten).exists():
-            return thu_muc / ten
-    return None
+# Corpus tách theo BỘ DỮ LIỆU: mỗi bộ một thư mục với `metadata.csv` của riêng nó. Nên
+# "corpus có gì chưa" là câu hỏi về một DANH SÁCH file, không phải một file.
+#
+# Vẫn nhận manifest gộp ở gốc (cấu trúc cũ) và tên cũ `manifest.csv`: corpus đã đẩy lên
+# Kaggle ở các phiên trước dùng chúng, bỏ đọc là vứt luôn hàng giờ GPU đã trả.
+def _cac_meta(thu_muc):
+    thu_muc = Path(thu_muc)
+    if not thu_muc.is_dir():
+        return []
+    ra = []
+    for goc in (thu_muc, *sorted(p for p in thu_muc.iterdir() if p.is_dir())):
+        for ten in ("metadata.csv", "manifest.csv"):
+            if (goc / ten).exists():
+                ra.append(goc / ten)
+                break
+    return ra
 
 _mounted = _find("corpus.zip")
 # `or` chứ không phải `+`: có cả hai tên thì phải lấy bản MỚI, mà `_loose[-1]` ở dưới
@@ -560,7 +574,7 @@ _mounted = _find("corpus.zip")
 _loose = _find("metadata.csv") or _find("manifest.csv")
 
 # Kaggle GIẢI NÉN mọi .zip đưa lên dataset và KHÔNG giữ lại bản nén. Nên `corpus.zip`
-# vừa đẩy lên biến thành cây `real/ fake/ metadata.csv` nằm thẳng trong mount, và
+# vừa đẩy lên biến thành cây `<bộ>/real/ <bộ>/fake/ <bộ>/metadata.csv` trong mount, và
 # "không thấy corpus.zip" hầu như chưa bao giờ là mất dữ liệu — dữ liệu ở đó, bung sẵn.
 #
 # Cây bung sẵn còn nạp NHANH HƠN zip: đọc trực tiếp từ /kaggle/input, khỏi mất vài phút
@@ -575,45 +589,60 @@ _loose = _find("metadata.csv") or _find("manifest.csv")
 def _cay_bung_san():
     import csv
 
-    uv = []
+    uv = {}
     for duong in _find("metadata.csv") + _find("manifest.csv"):
-        goc = Path(duong).parent
+        duong = Path(duong)
         with open(duong, encoding="utf-8", newline="") as fh:
             rows = list(csv.DictReader(fh))
         if not rows:
             continue
+        # Cột `path` tính từ GỐC CORPUS ở cả hai cấu trúc, nên gốc là thư mục chứa
+        # manifest (bảng gộp cũ) HOẶC thư mục cha của nó (manifest của một bộ). Thử cả
+        # hai rồi lấy cái khớp hơn — đó là phép duy nhất phân biệt được hai trường hợp.
+        #
         # Đếm trên mẫu 200 dòng: stat 15 nghìn file qua mount là chậm thật, mà tỉ lệ
         # khớp thì mẫu đã nói đủ — cây đúng khớp gần 100%, cây sai khớp gần 0%.
         mau = rows[:: max(1, len(rows) // 200)][:200]
-        khop = sum(1 for r in mau if r.get("path") and (goc / r["path"]).exists())
-        uv.append((khop / len(mau), len(rows), goc, Path(duong)))
-    uv.sort(reverse=True)
-    return uv
+        for goc in (duong.parent, duong.parent.parent):
+            khop = sum(1 for r in mau if r.get("path") and (goc / r["path"]).exists())
+            # Gộp theo GỐC, không theo manifest: một corpus tách bộ có nhiều manifest
+            # nhưng chỉ một gốc, và nó phải được tính là một ứng viên với đủ số dòng.
+            ti, tong = uv.get(str(goc), (0.0, 0))
+            if khop:
+                uv[str(goc)] = (max(ti, khop / len(mau)), tong + len(rows))
+    ra = [(ti, tong, Path(goc)) for goc, (ti, tong) in uv.items()]
+    ra.sort(reverse=True)
+    return ra
 
 # Dựng corpus ghi được từ cây chỉ-đọc: manifest copy, audio symlink.
-def _muon_cay(goc, meta):
+def _muon_cay(goc):
     import csv
     import os
     import shutil
 
     CORPUS.mkdir(parents=True, exist_ok=True)
-    # Manifest phải là bản COPY: split ghi cột `split` vào nó, validate ghi `checked`.
-    shutil.copy(meta, CORPUS / "metadata.csv")
     xong = thieu = 0
-    with open(meta, encoding="utf-8", newline="") as fh:
-        for row in csv.DictReader(fh):
-            if not row.get("path"):
-                thieu += 1
-                continue
-            nguon, dich = goc / row["path"], CORPUS / row["path"]
-            if dich.exists():
-                continue
-            if not nguon.exists():
-                thieu += 1
-                continue
-            dich.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(nguon, dich)
-            xong += 1
+    # MỌI manifest của gốc đó — corpus tách theo bộ thì mỗi bộ một file. Mỗi file được
+    # copy về đúng vị trí tương đối của nó, vì đó là chỗ `Manifest` sẽ tìm.
+    for meta in _cac_meta(goc):
+        # Manifest phải là bản COPY: split ghi cột `split` vào nó, validate ghi `checked`.
+        dich_meta = CORPUS / meta.relative_to(goc)
+        dich_meta.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(meta, dich_meta)
+        with open(meta, encoding="utf-8", newline="") as fh:
+            for row in csv.DictReader(fh):
+                if not row.get("path"):
+                    thieu += 1
+                    continue
+                nguon, dich = goc / row["path"], CORPUS / row["path"]
+                if dich.exists():
+                    continue
+                if not nguon.exists():
+                    thieu += 1
+                    continue
+                dich.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(nguon, dich)
+                xong += 1
     return xong, thieu
 
 # Trạng thái tường minh do phiên trước ghi lại: xong tới speaker nào. Vài KB, đọc được
@@ -634,7 +663,7 @@ if _tt:
         print(f"  nguồn {_ten:<22} real {_o['real']:>6} · fake {_o['fake']:>6}"
               f" · đã duyệt {_o['approved']:>6}")
 
-if _metadata_o(CORPUS):
+if _cac_meta(CORPUS):
     print("Corpus đã có sẵn trong /kaggle/working — không bung đè lên.")
     run("info")
 elif _mounted:
@@ -643,9 +672,9 @@ elif _mounted:
 elif _cay := next((u for u in _cay_bung_san() if u[0] >= 0.9), None):
     # Ngưỡng 0.9 chứ không phải 1.0: manifest luôn mới hơn ảnh chụp một nhịp, nên vài
     # bản ghi cuối chưa kịp có file là chuyện thường — `prune_missing` loại chúng ở dưới.
-    _ti, _tong, _goc, _meta = _cay
+    _ti, _tong, _goc = _cay
     print(f"Không có corpus.zip — Kaggle đã giải nén nó. Dùng cây bung sẵn: {_goc}")
-    _xong, _thieu = _muon_cay(_goc, _meta)
+    _xong, _thieu = _muon_cay(_goc)
     print(f"Đã trỏ {_xong} audio vào {CORPUS} bằng symlink (không copy, không tốn đĩa)"
           + (f" · {_thieu} bản ghi chưa có file" if _thieu else ""))
 
@@ -673,7 +702,7 @@ else:
         _goc_in = Path("/kaggle/input")
         _cac = sorted(d.name for d in _goc_in.iterdir()) if _goc_in.is_dir() else []
         print(f"Đang mount: {', '.join(_cac) or '(chưa add Input nào)'}")
-        for _t, _n, _g, _ in _cay_bung_san()[:3]:
+        for _t, _n, _g in _cay_bung_san()[:3]:
             print(f"  {_g}: {_n} bản ghi · {100 * _t:.0f}% audio có mặt cạnh manifest")
         _co_du_lieu = (f"{len(rows)} bản ghi ({len(fakes)} fake), nhưng mount KHÔNG có"
                        " corpus.zip lẫn cây audio bung sẵn")
@@ -706,7 +735,7 @@ NGUON_DA_CO = {}
 
 # Đã tới đâu rồi — con số này là mốc của cả phiên: phần A biết còn phải sinh bao nhiêu,
 # phần B biết mình sắp huấn luyện trên cái gì.
-if _metadata_o(CORPUS):
+if _cac_meta(CORPUS):
     from aidetector.corpus.manifest import Manifest
 
     _m = Manifest.load(CORPUS, required=True)
@@ -954,6 +983,30 @@ chia sẵn) rồi ép mọi file về đúng một chuẩn:
 | Mức âm lượng | RMS −23 dBFS, trần peak −1 dBFS |
 | Im lặng · clipping · NaN | cắt bớt · không được có · không được có |
 
+#### Mỗi bộ dữ liệu một thư mục tự chứa
+
+```
+/kaggle/working/corpus/
+├── vivos/
+│   ├── metadata.csv                    ← chỉ kể bản ghi của vivos
+│   ├── real/<speaker>/0001.wav
+│   └── fake/<engine>/<speaker>/0001.wav
+└── abc/
+    ├── metadata.csv
+    └── real/<speaker>/0001.wav
+```
+
+Thêm bộ mới là thêm một thư mục: đặt `SOURCE` khác ở ô A1c rồi chạy lại A2 — bộ cũ không
+bị ghi lại một byte nào. Bỏ một bộ là xoá một thư mục.
+
+Fake nằm trong thư mục của **chính bộ đã sinh ra nó** (`source` thừa hưởng từ real gốc),
+rồi mới tách theo engine. Tầng cuối luôn là speaker, nên đứng ở một giọng là thấy cả hai
+lớp của giọng đó cạnh nhau.
+
+Còn trong bộ nhớ thì vẫn là **một bảng hợp nhất**: chia tập speaker-disjoint, cân bằng
+lớp và huấn luyện đều phải nhìn toàn bộ dữ liệu cùng lúc. Nên `--limit` vẫn đếm riêng
+theo từng nguồn, mà `split`/`train` vẫn thấy đủ mọi bộ.
+
 Real và fake dùng **chung** chuỗi chuẩn hoá này, nên mô hình không thể phân biệt hai
 lớp bằng định dạng hay độ to.
 
@@ -968,9 +1021,9 @@ chạy lại đúng lệnh đó thì ingest không làm gì (và đó không ph�
 hoặc thêm câu thì nâng `N_REAL` — vòng tròn tự dồn phần thêm vào những giọng còn ít.
 """),
 code("""
+# Tổng bản ghi của CẢ corpus — cộng qua manifest của từng bộ.
 def _n_records():
-    f = _metadata_o(CORPUS)
-    return sum(1 for _ in f.open(encoding="utf-8")) - 1 if f else 0
+    return sum(sum(1 for _ in f.open(encoding="utf-8")) - 1 for f in _cac_meta(CORPUS))
 
 # Cờ nào có trần thì truyền, không thì để trống — `--limit` vắng mặt nghĩa là lấy hết.
 _tran = [*(["--limit", N_REAL] if N_REAL else []),
@@ -1055,9 +1108,9 @@ md("""
 
 Đích là `DATASET_ID` ở ô setup — **cùng một biến** mà ô A1b nạp về, nên không bao giờ có
 chuyện đẩy lên một chỗ rồi phiên sau nạp từ chỗ khác. Mỗi lần đẩy gồm **toàn bộ**:
-`corpus.zip` (real + fake + manifest) cộng một bản `metadata.csv` để rời bên ngoài — nhờ
-đó A1b đọc được tiến độ mà không phải tải cả GB. Kaggle giải nén `corpus.zip` ngay khi
-nhận, nên trên trang dataset nó hiện ra dưới dạng cây `real/ fake/`; A1b nạp được cả hai
+`corpus.zip` (real + fake + manifest của mọi bộ) cộng một bản `<bộ>/metadata.csv` để rời
+bên ngoài — nhờ đó A1b đọc được tiến độ mà không phải tải cả GB. Kaggle giải nén `corpus.zip` ngay khi
+nhận, nên trên trang dataset nó hiện ra dưới dạng cây `<bộ>/real/ <bộ>/fake/`; A1b nạp được cả hai
 dạng nên không phải chống lại chuyện đó.
 
 Mục này đặt **trước** bước sinh vì bước sinh gọi `sync_corpus.py`, file đó phải có sẵn.
@@ -1218,6 +1271,19 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
         with open(f, encoding="utf-8") as fh:
             return sum(1 for _ in fh) - 1        # trừ dòng tiêu đề
 
+    # Corpus tách theo BỘ: mỗi bộ một `metadata.csv`. Soi gốc và một tầng con, nhận cả
+    # manifest gộp ở gốc (cấu trúc cũ) và tên cũ `manifest.csv`.
+    def cac_meta(thu_muc):
+        if not thu_muc.is_dir():
+            return []
+        ra = []
+        for goc in (thu_muc, *sorted(p for p in thu_muc.iterdir() if p.is_dir())):
+            for ten in ("metadata.csv", "manifest.csv"):
+                if (goc / ten).exists():
+                    ra.append(goc / ten)
+                    break
+        return ra
+
     # Số bản ghi ĐANG có trên dataset. Tải mỗi manifest.csv (vài MB) chứ không cả GB.
     # None = không đọc được; lúc đó không chặn, vì trục trặc mạng không được làm đứng
     # một lượt sinh nhiều giờ — rào chính nằm ở ô A1b.
@@ -1245,6 +1311,9 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
                 return int(json.loads(f.read_text(encoding="utf-8"))["dataset_records"])
             except Exception:
                 pass
+        # Đường lùi cho những version đẩy lên TRƯỚC khi có progress.json — chúng còn ở
+        # cấu trúc gộp nên manifest nằm ngay gốc. Version tách theo bộ thì không đoán
+        # được tên thư mục để tải, và cũng không cần: progress.json luôn có.
         for ten in ("metadata.csv", "manifest.csv"):
             f = tai_ve(ten)
             if f is not None:
@@ -1284,12 +1353,11 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
     # `datasets version` là ảnh chụp TOÀN BỘ thư mục staging: đẩy corpus nhỏ hơn là
     # xoá phần chênh khỏi bản mới nhất. Phiên nào lỡ bắt đầu từ đầu mà đẩy lên thì công
     # của mọi phiên trước biến mất khỏi version hiện hành.
-    goc_local = next((p for p in (CORPUS / "metadata.csv", CORPUS / "manifest.csv")
-                      if p.exists()), None)
-    if goc_local is None:
+    meta_local = cac_meta(CORPUS)
+    if not meta_local:
         print("Chưa có corpus để đẩy — bỏ lượt.")
         raise SystemExit(0)
-    local = dem(goc_local)
+    local = sum(dem(f) for f in meta_local)
     remote = dem_tren_dataset()
     if remote is not None and local < remote and not CHO_PHEP_NHO_HON:
         print(f"TỪ CHỐI ĐẨY: corpus ở đây {{local}} bản ghi < {{remote}} đang có trên dataset.")
@@ -1315,7 +1383,12 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
                         "--out", str(STAGE / "corpus.zip"), "-c", "configs/kaggle.yaml"],
                        check=True, cwd="/kaggle/working/ai-detector")
         # metadata để rời ngoài zip: A1b đọc tiến độ khỏi phải tải và giải nén cả GB.
-        shutil.copy(goc_local, STAGE / "metadata.csv")
+        # Mỗi bộ một file, đặt đúng vị trí tương đối của nó — trùng path với bản trong
+        # zip là đúng ý: Kaggle giải nén zip vào cùng cây, nội dung hai bản y nhau.
+        for f in meta_local:
+            dich = STAGE / f.relative_to(CORPUS)
+            dich.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(f, dich)
         # progress.json vài KB: xong tới speaker nào, đọc được ngay trên trang dataset
         # và là thứ phiên sau so trước khi quyết định có được đẩy đè hay không.
         subprocess.run([sys.executable, "-m", "aidetector", "progress",

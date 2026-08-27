@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from aidetector.config import Config
-from aidetector.corpus.manifest import MANIFEST_NAME, Manifest
+from aidetector.corpus.manifest import MANIFEST_NAME, Manifest, find_shards
 from aidetector.corpus.spec import AudioSpec
 from aidetector.env import KAGGLE, LOCAL, detect_platform, find_kaggle_datasets, free_space_gb
 from aidetector.generate import generate_fakes
@@ -116,20 +116,48 @@ def test_pack_then_unpack_round_trips(corpus, tmp_path):
         assert restored.abs_path(other).exists()
 
 
-def test_pack_writes_manifest_at_archive_root(corpus, tmp_path):
+def test_pack_writes_one_manifest_per_dataset(corpus, tmp_path):
+    """Zip phải giữ nguyên cấu trúc tách theo bộ: bung ra là lại thành thư mục tự chứa."""
     archive = pack_corpus(corpus.root, tmp_path / "corpus.zip")
     with zipfile.ZipFile(archive) as zf:
         names = zf.namelist()
-    assert MANIFEST_NAME in names
-    assert len(names) == len(corpus) + 1
-    assert all(n == MANIFEST_NAME or n.split("/")[0] in ("real", "fake", "augment")
-               for n in names)
+    bo = sorted(corpus.by_shard())
+    assert [f"{ten}/{MANIFEST_NAME}" for ten in bo] == [n for n in names
+                                                        if n.endswith(MANIFEST_NAME)]
+    assert len(names) == len(corpus) + len(bo)
+    assert all(n.split("/")[1] in (MANIFEST_NAME, "real", "fake", "augment")
+               for n in names), names
 
 
 def test_pack_can_skip_audio_for_a_metadata_only_archive(corpus, tmp_path):
     archive = pack_corpus(corpus.root, tmp_path / "meta.zip", include_audio=False)
     with zipfile.ZipFile(archive) as zf:
-        assert zf.namelist() == [MANIFEST_NAME]
+        assert zf.namelist() == [f"{ten}/{MANIFEST_NAME}" for ten in sorted(corpus.by_shard())]
+
+
+def test_pack_round_trips_a_corpus_with_two_datasets(tmp_path, vivos_like):
+    """Zip phải mang được nhiều bộ và bung ra đúng từng thư mục tự chứa của chúng."""
+    import numpy as np
+
+    from aidetector.corpus.schema import LABEL_REAL, Record, make_utt_id
+
+    m = Manifest(tmp_path / "corpus")
+    ingest_source(m, VivosAdapter(), vivos_like, "vivos", SPEC)
+    for i in range(3):
+        m.write_audio(
+            Record(utt_id=make_utt_id("abc", "spk_abc", str(i)), path="", label=LABEL_REAL,
+                   source="abc", speaker="spk_abc", text="câu của bộ abc"),
+            np.zeros(4 * SPEC.sample_rate, np.float32), SPEC)
+    m.save()
+
+    archive = pack_corpus(m.root, tmp_path / "corpus.zip")
+    lai = unpack_corpus(archive, tmp_path / "restored")
+
+    assert len(lai) == len(m)
+    assert {r.source for r in lai} == {"vivos", "abc"}
+    for rec in m:
+        assert lai.abs_path(lai.get(rec.utt_id)).exists()
+    assert sorted(p.parent.name for p in find_shards(tmp_path / "restored")) == ["abc", "vivos"]
 
 
 def test_unpack_rejects_an_unrelated_zip(tmp_path):
@@ -589,7 +617,8 @@ def _stages_that_run(notebook, notebook_code, mode) -> set[str]:
         # Ô A1c công bố: nguồn đã có trong kho chưa, và tên nó là gì.
         "_da_co": 0, "SOURCE": "nguon_test", "NGUON_DA_CO": {},
         # Helper do ô A1b định nghĩa; ở notebook nó là biến toàn cục, ở đây phải cấp.
-        "_metadata_o": lambda thu_muc: None,
+        # Corpus tách theo bộ ⇒ nó trả về DANH SÁCH manifest, rỗng = chưa có corpus.
+        "_cac_meta": lambda thu_muc: [],
         "run": lambda *args, **kw: called.append(str(args[0])),
         "pip": lambda *args, **kw: None,
         "skipped": lambda what: None,
@@ -962,7 +991,10 @@ def test_an_already_extracted_corpus_is_adopted_by_symlink(notebook):
     # /kaggle/input chỉ-đọc: audio phải là symlink, manifest phải là bản copy ghi được,
     # vì split ghi cột `split` và validate ghi `checked` vào chính file đó.
     assert "os.symlink(nguon, dich)" in src
-    assert 'shutil.copy(meta, CORPUS / "metadata.csv")' in src
+    # Corpus tách theo bộ ⇒ copy MỌI manifest, mỗi cái về đúng vị trí tương đối của nó.
+    assert "for meta in _cac_meta(goc):" in src
+    assert "dich_meta = CORPUS / meta.relative_to(goc)" in src
+    assert "shutil.copy(meta, dich_meta)" in src
     # Manifest luôn mới hơn ảnh chụp một nhịp — bản ghi chưa có file phải bị loại.
     assert "prune_missing()" in src
 
@@ -990,9 +1022,8 @@ def test_progress_state_is_uploaded_with_every_version(notebook):
     assert '"progress"' in script and '"progress.json"' in script
     # Sinh TRƯỚC khi đẩy, để nó luôn khớp với corpus.zip cùng version.
     assert script.index('"progress.json"') < script.index('"datasets", "version"')
-    # Rào chặn đọc nó trước, manifest.csv chỉ là đường lùi cho version cũ.
     # progress.json thử trước; metadata/manifest chỉ là đường lùi cho version cũ.
-    assert script.index('tai_ve("progress.json")') < script.index('"metadata.csv", "manifest.csv"')
+    assert script.index('tai_ve("progress.json")') < script.index("f = tai_ve(ten)")
 
 
 def test_the_resume_cell_reads_the_recorded_speaker_progress(notebook):
@@ -1044,14 +1075,15 @@ def test_sync_prefers_the_current_metadata_name(notebook):
 
     script = _sync_script(notebook)
     assert script.index('"metadata.csv"') < script.index('"manifest.csv"')
-    assert 'STAGE / "metadata.csv"' in script
+    # Manifest của từng bộ được copy ra STAGE, giữ đúng vị trí tương đối trong corpus.
+    assert "dich = STAGE / f.relative_to(CORPUS)" in script
 
 
 def test_an_empty_corpus_is_skipped_not_crashed(notebook):
     """Đẩy khi chưa có corpus phải là bỏ lượt, không phải StopIteration trần trụi."""
     script = _sync_script(notebook)
-    assert "goc_local is None" in script
-    assert script.index("goc_local is None") < script.index('"pack"')
+    assert "if not meta_local:" in script
+    assert script.index("if not meta_local:") < script.index('"pack"')
 
 
 def test_the_resumed_corpus_is_migrated_to_the_current_layout(notebook):

@@ -104,8 +104,8 @@ def test_resamples_and_downmixes_any_input(tmp_path):
 
 
 # --------------------------------------------------- cấu trúc thư mục chuẩn của corpus
-def test_layout_is_label_source_speaker_index(tmp_path, vivos_like, monkeypatch):
-    """real|fake / <nguồn|engine> / <speaker> / NNNN.wav — ba tầng, giống nhau hai lớp."""
+def test_layout_puts_every_dataset_in_its_own_folder(tmp_path, vivos_like, monkeypatch):
+    """<bộ> / real|fake / [engine /] <speaker> / NNNN.wav — mỗi bộ dữ liệu một thư mục."""
     import numpy as np
 
     from aidetector.corpus.manifest import Manifest
@@ -132,14 +132,16 @@ def test_layout_is_label_source_speaker_index(tmp_path, vivos_like, monkeypatch)
 
     for rec in manifest.reals:
         tang = rec.path.split("/")
-        assert tang[0] == "real" and tang[1] == "vivos" and tang[2] == rec.speaker
+        assert tang[0] == "vivos" and tang[1] == "real" and tang[2] == rec.speaker
         assert len(tang) == 4 and tang[3].endswith(".wav") and tang[3][:-4].isdigit()
 
     for rec in manifest.fakes:
         tang = rec.path.split("/")
-        # Tầng giữa là ENGINE, tầng ba vẫn là speaker của real gốc — nhờ vậy đứng ở một
-        # giọng là thấy cả hai lớp của giọng đó cạnh nhau.
-        assert tang[0] == "fake" and tang[1] == Clone.id and tang[2] == rec.speaker
+        # Fake nằm trong thư mục của CHÍNH BỘ đã sinh ra nó (`source` thừa hưởng từ real
+        # gốc), rồi mới tách theo engine. Tầng cuối vẫn là speaker của real gốc — nhờ vậy
+        # đứng ở một giọng là thấy cả hai lớp của giọng đó cạnh nhau.
+        assert tang[0] == "vivos" and tang[1] == "fake"
+        assert tang[2] == Clone.id and tang[3] == rec.speaker
 
 
 def test_index_is_assigned_once_and_never_reshuffled(tmp_path, vivos_like):
@@ -207,7 +209,7 @@ def test_migrate_moves_an_old_layout_and_is_idempotent(tmp_path, vivos_like):
     r1 = ket_qua.migrate_layout()
     assert r1["moved"] == len(ket_qua) and r1["missing"] == 0
     for rec in ket_qua:
-        assert rec.path.startswith("real/vivos/")
+        assert rec.path.startswith("vivos/real/")
         assert ket_qua.abs_path(rec).exists()
 
     r2 = ket_qua.migrate_layout()

@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import Config
-from .corpus.manifest import Manifest
+from .corpus.manifest import Manifest, find_manifest, find_shards
 from .corpus.spec import AudioSpec
 from .env import detect_platform, find_kaggle_datasets, free_space_gb, warn_if_constrained
 from .utils import get_logger, resolve_device, set_seed, setup_logging, timed
@@ -627,7 +627,8 @@ def cmd_info(args) -> int:
         print(f"  {name:<16} {cls.description}")
 
     root = args.corpus or cfg.get("paths.corpus", "corpus")
-    if (Path(root) / "manifest.csv").exists():
+    # Nhận cả corpus tách theo bộ (`<bộ>/metadata.csv`) và cấu trúc gộp cũ ở gốc.
+    if find_shards(Path(root)) or find_manifest(Path(root)):
         print()
         print(Manifest.load(root).summary())
     return 0

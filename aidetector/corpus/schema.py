@@ -97,25 +97,43 @@ def make_utt_id(source: str, speaker: str, key: str, chunk: int = 0) -> str:
     return f"{slugify(source, 20)}-{stable_id(source, speaker, key)}{suffix}"
 
 
+def shard_name(source: str) -> str:
+    """Tên thư mục của một BỘ DỮ LIỆU trong corpus — tầng ngoài cùng của cây.
+
+    Cùng phép chuẩn hoá tên với `audio_folder`, và `Manifest` dùng nó để biết bản ghi
+    này thuộc `metadata.csv` nào. Fake thừa hưởng `source` của real gốc nên nó tự về
+    đúng thư mục bộ dữ liệu đã sinh ra nó.
+    """
+    return slugify(source or "unknown")
+
+
 def audio_folder(rec: Record) -> str:
-    """Thư mục chuẩn của một bản ghi — ba tầng, giống nhau cho mọi nhãn.
+    """Thư mục chuẩn của một bản ghi, tính từ gốc corpus.
 
-        real/<source>/<speaker>/
-        fake/<engine>/<speaker>/
-        augment/<engine|source>/<speaker>/
+        <bộ>/real/<speaker>/
+        <bộ>/fake/<engine>/<speaker>/
+        <bộ>/augment/[<engine>/]<speaker>/
 
-    Tầng giữa là NGUỒN của audio: bộ dữ liệu với real, engine với fake. Tầng ba luôn là
-    speaker — kể cả fake, vì fake mang đúng speaker của real gốc. Nhờ vậy đứng ở một
-    giọng là thấy ngay cả hai lớp của giọng đó cạnh nhau.
+    Tầng ngoài cùng là BỘ DỮ LIỆU, để mỗi bộ là một thư mục tự chứa: `real/`, `fake/`
+    và `metadata.csv` của riêng nó. Thêm hay bỏ một bộ là thêm hay bỏ một thư mục.
+
+    Tầng cuối luôn là speaker — kể cả fake, vì fake mang đúng speaker của real gốc. Nhờ
+    vậy đứng ở một giọng là thấy ngay cả hai lớp của giọng đó cạnh nhau.
+
+    Đường dẫn tính từ gốc corpus (không phải từ thư mục bộ) nên `path` là khoá tra cứu
+    duy nhất, dùng được ở mọi chỗ mà không cần biết bản ghi thuộc bộ nào — mà thư mục bộ
+    vẫn dời được sang corpus khác miễn giữ nguyên tên.
 
     Tên voice KHÔNG vào path (`piper:vi_VN-vais1000` chỉ lấy `piper`): một engine nhiều
     giọng mà tách thư mục thì cây phình ra mà không ai duyệt theo chiều đó — voice vẫn
     nằm đủ trong cột `generator`.
     """
-    nguon = rec.generator.partition(":")[0] if rec.generator else rec.source
-    tang1 = "augment" if rec.augment else rec.label
-    return "/".join((tang1, slugify(nguon or "unknown"),
-                     slugify(rec.speaker or "unknown")))
+    engine = rec.generator.partition(":")[0] if rec.generator else ""
+    tang = [shard_name(rec.source), "augment" if rec.augment else rec.label]
+    if engine:
+        tang.append(slugify(engine))
+    tang.append(slugify(rec.speaker or "unknown"))
+    return "/".join(tang)
 
 
 def audio_name(index: int) -> str:

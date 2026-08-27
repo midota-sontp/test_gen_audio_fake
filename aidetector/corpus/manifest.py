@@ -11,7 +11,9 @@ from typing import Iterable, Iterator
 import numpy as np
 
 from ..utils import ensure_dir, get_logger
-from .schema import COLUMNS, LABEL_FAKE, LABEL_REAL, Record, audio_folder, audio_name
+from .schema import (
+    COLUMNS, LABEL_FAKE, LABEL_REAL, Record, audio_folder, audio_name, shard_name,
+)
 from .spec import AudioSpec, DEFAULT_SPEC, save_audio
 
 log = get_logger("aidetector.corpus.manifest")
@@ -20,14 +22,55 @@ MANIFEST_NAME = "metadata.csv"
 #: Tên cũ, vẫn đọc được. Corpus đã đóng gói ở các phiên trước dùng tên này, và bỏ đọc nó
 #: nghĩa là mọi corpus.zip đang có trên Kaggle thành rác.
 LEGACY_MANIFEST_NAME = "manifest.csv"
+#: Manifest GỘP ở gốc corpus là cấu trúc cũ (một bảng cho mọi bộ dữ liệu). Vẫn đọc được,
+#: nhưng `save()` chuyển nó sang tên này vì nội dung đã nằm đủ trong từng shard — để lại
+#: dưới tên cũ thì mỗi lượt `load` lại dựng ngược cả những bản ghi vừa bị loại.
+SUPERSEDED_NAME = "metadata.goc-cu.csv"
 
 
 def find_manifest(root: Path) -> Path | None:
-    """File metadata của corpus, ưu tiên tên mới."""
+    """Manifest GỘP ở gốc corpus — cấu trúc cũ. `None` khi corpus đã tách theo bộ."""
+    root = Path(root)
     for name in (MANIFEST_NAME, LEGACY_MANIFEST_NAME):
         if (root / name).exists():
             return root / name
     return None
+
+
+def find_shards(root: Path) -> list[Path]:
+    """`metadata.csv` của từng bộ dữ liệu: `<root>/<bộ>/metadata.csv`.
+
+    Chỉ soi một tầng: thư mục con của gốc corpus là thư mục bộ dữ liệu, không sâu hơn.
+    Cây cũ (`real/`, `fake/` nằm thẳng ở gốc) không có manifest trong đó nên trả rỗng —
+    đúng thứ để `load` biết corpus này chưa tách.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    ra: list[Path] = []
+    for thu_muc in sorted(p for p in root.iterdir() if p.is_dir()):
+        for name in (MANIFEST_NAME, LEGACY_MANIFEST_NAME):
+            if (thu_muc / name).exists():
+                ra.append(thu_muc / name)
+                break
+    return ra
+
+
+def _doc_csv(path: Path) -> list[Record]:
+    with path.open(newline="", encoding="utf-8") as fh:
+        return [Record.from_row(row) for row in csv.DictReader(fh)]
+
+
+def manifest_csv(records: Iterable[Record]) -> str:
+    """Nội dung CSV của một nhóm bản ghi — dùng cho cả ghi đĩa và đóng gói zip."""
+    import io
+
+    buf = io.StringIO(newline="")
+    writer = csv.DictWriter(buf, fieldnames=list(COLUMNS))
+    writer.writeheader()
+    for rec in records:
+        writer.writerow(rec.to_row())
+    return buf.getvalue()
 
 
 class Manifest:
@@ -35,6 +78,15 @@ class Manifest:
 
     Khoá chính là `utt_id`: thêm lại cùng id sẽ ghi đè chứ không nhân bản, nên
     mọi stage đều chạy lại được mà không sinh rác.
+
+    Trên đĩa, bảng này được **tách theo bộ dữ liệu**: mỗi bộ một thư mục tự chứa
+    `<bộ>/real/`, `<bộ>/fake/` và `<bộ>/metadata.csv` của riêng nó. Trong bộ nhớ vẫn là
+    MỘT bảng hợp nhất, vì chia tập speaker-disjoint, cân bằng lớp và huấn luyện đều phải
+    nhìn toàn bộ dữ liệu cùng lúc.
+
+    Cột `path` tính từ gốc corpus ở cả hai cấu trúc, nên corpus cũ (một manifest gộp ở
+    gốc) vẫn đọc và tra cứu được nguyên vẹn; `save()` là lúc nó được tách ra, `migrate`
+    là lúc file audio được dời về cây mới.
     """
 
     def __init__(self, root: str | Path, records: Iterable[Record] = ()) -> None:
@@ -43,39 +95,86 @@ class Manifest:
         # Số cuối đã cấp cho mỗi thư mục. Dựng lười vì corpus lớn thì quét toàn bộ chỉ
         # để ghi một file là phí; cấp xong thì số nằm trong `path`, không tính lại.
         self._so_cuoi: dict[str, int] = {}
+        #: Bộ nào ĐÃ có file manifest trên đĩa lúc nạp. Cần nhớ để `save()` còn ghi lại
+        #: cả bộ vừa mất hết bản ghi (`validate --fix` loại sạch chẳng hạn): bỏ qua nó
+        #: là để file cũ nằm lại và lượt nạp sau dựng ngược đúng những bản ghi đã loại.
+        self._bo_tren_dia: set[str] = set()
+        #: Manifest gộp ở gốc, nếu corpus này còn ở cấu trúc cũ.
+        self._goc_cu: Path | None = None
 
     # -------------------------------------------------------------- vào/ra đĩa
-    @property
-    def csv_path(self) -> Path:
-        return self.root / MANIFEST_NAME
+    def shard_path(self, source: str) -> Path:
+        """`metadata.csv` của một bộ dữ liệu."""
+        return self.root / shard_name(source) / MANIFEST_NAME
+
+    def by_shard(self) -> dict[str, list[Record]]:
+        """Bản ghi gom theo bộ dữ liệu, đúng cách chúng được ghi ra đĩa."""
+        ra: dict[str, list[Record]] = defaultdict(list)
+        for rec in self.sorted():
+            ra[shard_name(rec.source)].append(rec)
+        # Bộ từng có mặt trên đĩa mà giờ rỗng vẫn phải xuất hiện, để `save` ghi lại một
+        # file rỗng thay vì để bản cũ nằm lại.
+        for ten in self._bo_tren_dia:
+            ra.setdefault(ten, [])
+        return dict(ra)
 
     @classmethod
     def load(cls, root: str | Path, required: bool = False) -> "Manifest":
         root = Path(root)
-        path = find_manifest(root)
-        if path is None:
-            path = root / MANIFEST_NAME
+        shards = find_shards(root)
+        goc_cu = find_manifest(root)
+
+        if not shards and goc_cu is None:
             if required:
                 raise FileNotFoundError(
-                    f"Chưa có {path}. Hãy chạy `python -m aidetector ingest ...` trước."
+                    f"Chưa có {root / '<bộ>' / MANIFEST_NAME}. "
+                    f"Hãy chạy `python -m aidetector ingest ...` trước."
                 )
             return cls(root)
-        with path.open(newline="", encoding="utf-8") as fh:
-            records = [Record.from_row(row) for row in csv.DictReader(fh)]
-        log.debug("Đã nạp %d bản ghi từ %s", len(records), path)
-        return cls(root, records)
+
+        records: dict[str, Record] = {}
+        for path in shards:
+            for rec in _doc_csv(path):
+                records[rec.utt_id] = rec
+        log.debug("Đã nạp %d bản ghi từ %d bộ", len(records), len(shards))
+
+        if goc_cu is not None:
+            # Cấu trúc cũ. Bản ghi đã có trong shard thì SHARD thắng: shard là bản mới,
+            # manifest gộp chỉ còn là di sản chờ `save()` chuyển đi.
+            them = 0
+            for rec in _doc_csv(goc_cu):
+                if rec.utt_id not in records:
+                    records[rec.utt_id] = rec
+                    them += 1
+            if them:
+                log.info("Nạp thêm %d bản ghi từ manifest gộp cũ %s — lượt `save` tới sẽ"
+                         " tách chúng về từng bộ (`migrate` dời file audio)", them, goc_cu)
+
+        m = cls(root, records.values())
+        m._bo_tren_dia = {p.parent.name for p in shards}
+        m._goc_cu = goc_cu
+        return m
 
     def save(self) -> Path:
         ensure_dir(self.root)
-        tmp = self.csv_path.with_suffix(".csv.tmp")
-        with tmp.open("w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(COLUMNS))
-            writer.writeheader()
-            for rec in self.sorted():
-                writer.writerow(rec.to_row())
-        os.replace(tmp, self.csv_path)
-        log.info("Đã ghi %s (%d bản ghi)", self.csv_path, len(self._records))
-        return self.csv_path
+        theo_bo = self.by_shard()
+        for ten, recs in sorted(theo_bo.items()):
+            dich = ensure_dir(self.root / ten) / MANIFEST_NAME
+            tmp = dich.with_suffix(".csv.tmp")
+            tmp.write_text(manifest_csv(recs), newline="", encoding="utf-8")
+            os.replace(tmp, dich)
+        self._bo_tren_dia = set(theo_bo)
+        log.info("Đã ghi %d bản ghi vào %d bộ: %s", len(self._records), len(theo_bo),
+                 ", ".join(f"{k}={len(v)}" for k, v in sorted(theo_bo.items())))
+
+        # Nội dung manifest gộp cũ giờ đã nằm đủ trong các shard. Đổi tên chứ không xoá:
+        # mất dữ liệu vì một lượt ghi hỏng là không lấy lại được, còn file này thì rẻ.
+        if self._goc_cu is not None and self._goc_cu.exists():
+            giu = self.root / SUPERSEDED_NAME
+            os.replace(self._goc_cu, giu)
+            log.info("Manifest gộp cũ đã được tách theo bộ — giữ bản gốc ở %s", giu)
+            self._goc_cu = None
+        return self.root
 
     # ------------------------------------------------------------------ thao tác
     def __len__(self) -> int:
@@ -185,6 +284,7 @@ class Manifest:
         # ĐÚNG những đường dẫn cũ, và nhánh "nguồn mất nhưng đích đã có" nhận ra phần đã
         # dời để bỏ qua. Lưu dở giữa chừng mới là thứ phá được tính tất định đó.
         chuyen = thieu = tiep_tuc = 0
+        bo_lai: set[Path] = set()      # thư mục vừa bị lấy hết file — dọn ở cuối
         for rec in dung_cho:
             cu = self.root / rec.path
             moi = self.allocate_path(rec)
@@ -200,15 +300,40 @@ class Manifest:
             if not dry_run:
                 dich.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(cu, dich)
+                bo_lai.add(cu.parent)
             rec.path = moi
             chuyen += 1
         if tiep_tuc:
             log.info("Nhận lại %d file đã dời ở lượt bị ngắt trước", tiep_tuc)
+        if not dry_run:
+            self._don_thu_muc_rong(bo_lai)
 
         log.info("Chuyển cấu trúc: %d bản ghi đã đúng chỗ · %d chuyển · %d thiếu file",
                  len(self._records) - len(dung_cho), chuyen, thieu)
         return {"kept": len(self._records) - len(dung_cho), "moved": chuyen,
                 "resumed": tiep_tuc, "missing": thieu}
+
+    def _don_thu_muc_rong(self, thu_muc: Iterable[Path]) -> int:
+        """Xoá những thư mục vừa trở nên RỖNG sau khi dời file, leo dần lên tới gốc.
+
+        Không dọn thì cây cũ nằm lại dưới dạng thư mục trống cạnh các thư mục bộ dữ liệu —
+        `ls corpus/` không còn đọc được là "mỗi bộ một thư mục" nữa. Chỉ `rmdir`, không
+        `rmtree`: thư mục còn bất cứ thứ gì thì lệnh này thất bại và ta dừng ngay ở đó,
+        nên một bản ghi chưa được dời không bao giờ bị xoá theo.
+        """
+        xoa = 0
+        for goc in sorted(thu_muc, key=lambda p: len(p.parts), reverse=True):
+            hien = goc
+            while hien != self.root and hien.is_relative_to(self.root):
+                try:
+                    hien.rmdir()
+                except OSError:
+                    break              # còn file/thư mục con ⇒ dừng, và dừng luôn nhánh
+                xoa += 1
+                hien = hien.parent
+        if xoa:
+            log.info("Đã dọn %d thư mục rỗng của cây cũ", xoa)
+        return xoa
 
     def prune_missing(self) -> int:
         """Bỏ các bản ghi trỏ tới file không còn tồn tại."""
@@ -252,6 +377,12 @@ class Manifest:
         ]
         if s["by_source"]:
             lines.append("  Nguồn real: " + ", ".join(f"{k}={v}" for k, v in sorted(s["by_source"].items())))
+        # Corpus tách theo bộ: in ra từng thư mục kèm số bản ghi của nó, vì đó là đơn vị
+        # thêm/bỏ/đẩy đi được — cột `by_source` chỉ đếm real nên không thay được chỗ này.
+        theo_bo = self.by_shard()
+        if theo_bo:
+            lines.append("  Bộ dữ liệu: " + ", ".join(
+                f"{k}/={len(v)}" for k, v in sorted(theo_bo.items())))
         if s["by_generator"]:
             lines.append("  Generator : " + ", ".join(f"{k}={v}" for k, v in sorted(s["by_generator"].items())))
         for split, counts in s["by_split"].items():

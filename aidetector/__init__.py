@@ -15,4 +15,6 @@ Luồng:
 __version__ = "2.0.0"
 
 # Phiên bản của CHUẨN corpus. Tăng lên khi schema manifest đổi.
-CORPUS_SCHEMA_VERSION = 1
+#   1 — một `metadata.csv` gộp ở gốc, cây `<label>/<nguồn|engine>/<speaker>/`
+#   2 — mỗi bộ dữ liệu một thư mục tự chứa: `<bộ>/metadata.csv` + `<bộ>/real|fake/…`
+CORPUS_SCHEMA_VERSION = 2

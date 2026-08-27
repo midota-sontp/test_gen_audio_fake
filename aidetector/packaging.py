@@ -14,7 +14,9 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from .corpus.manifest import LEGACY_MANIFEST_NAME, MANIFEST_NAME, Manifest, find_manifest
+from .corpus.manifest import (
+    LEGACY_MANIFEST_NAME, MANIFEST_NAME, Manifest, find_manifest, find_shards,
+)
 from .utils import ensure_dir, get_logger, progress
 
 log = get_logger("aidetector.packaging")
@@ -39,8 +41,16 @@ def pack_corpus(
     mode = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
     missing = 0
     with zipfile.ZipFile(out_path, "w", mode, allowZip64=True) as zf:
-        # Gói luôn dùng tên mới, kể cả khi corpus trên đĩa còn tên cũ.
-        zf.write(find_manifest(corpus_root), MANIFEST_NAME)
+        # Mỗi bộ dữ liệu vào zip kèm `metadata.csv` của riêng nó, đúng như trên đĩa —
+        # bung ra là lại thành từng thư mục tự chứa. Gói luôn dùng tên mới, kể cả khi
+        # corpus trên đĩa còn tên cũ.
+        shards = find_shards(corpus_root)
+        for path in shards:
+            zf.write(path, f"{path.parent.name}/{MANIFEST_NAME}")
+        if not shards:
+            # Corpus còn ở cấu trúc cũ (một manifest gộp ở gốc) và chưa `save()` lần nào
+            # từ khi đổi cấu trúc. Gói y nguyên: `unpack` đọc được cả hai dạng.
+            zf.write(find_manifest(corpus_root), MANIFEST_NAME)
         if include_audio:
             for rec in progress(list(manifest), total=len(manifest), label="pack"):
                 src = corpus_root / rec.path
@@ -63,9 +73,14 @@ def unpack_corpus(zip_path: str | Path, corpus_root: str | Path, overwrite: bool
 
     with zipfile.ZipFile(zip_path) as zf:
         names = zf.namelist()
-        # Chấp cả tên cũ: mọi corpus.zip đã đẩy lên Kaggle ở các phiên trước dùng nó,
-        # và từ chối đọc chúng nghĩa là vứt bỏ hàng giờ GPU đã trả.
-        if not ({MANIFEST_NAME, LEGACY_MANIFEST_NAME} & set(names)):
+        # Nhận cả hai cấu trúc: `<bộ>/metadata.csv` (tách theo bộ) và `metadata.csv` ở
+        # gốc (cũ). Chấp cả tên `manifest.csv`: mọi corpus.zip đã đẩy lên Kaggle ở các
+        # phiên trước dùng nó, và từ chối đọc chúng nghĩa là vứt bỏ hàng giờ GPU đã trả.
+        if not any(
+            n.split("/")[-1] in (MANIFEST_NAME, LEGACY_MANIFEST_NAME)
+            and n.count("/") <= 1
+            for n in names
+        ):
             raise ValueError(
                 f"{zip_path} không phải gói corpus: thiếu {MANIFEST_NAME}"
             )

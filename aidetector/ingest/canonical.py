@@ -37,6 +37,37 @@ def _metadata(root: Path) -> Path | None:
     return None
 
 
+#: Hai cây cùng được nhận, và chúng khác nhau ở chỗ tầng `real/` nằm đâu:
+#:
+#:   real/<nguồn>/<speaker>/*.wav     cây NHẬP TỪ NGOÀI — đúng thứ `CONVERT` phải dựng
+#:   <bộ>/real/<speaker>/*.wav        cây CORPUS của pipeline này (mỗi bộ một thư mục)
+#:
+#: Nhận cả hai vì cả hai đều xuất hiện thật: cái trước là hợp đồng của bước convert, cái
+#: sau là thứ `pack`/`migrate` sinh ra và người ta hay mount lại để nhập vào corpus khác.
+_MAU_CAY = ("real/*/*/*", "*/real/*/*")
+
+
+def _audio_real(root: Path) -> list[Path]:
+    """Mọi file audio thuộc lớp real trong cây, không quan tâm cây thuộc dạng nào."""
+    ra: list[Path] = []
+    for mau in _MAU_CAY:
+        ra += [p for p in root.glob(mau) if p.suffix.lower() in AUDIO_EXTENSIONS]
+    return sorted(set(ra))
+
+
+def _cac_metadata(root: Path) -> list[Path]:
+    """`metadata.csv` ở gốc (cây nhập) và/hoặc của từng bộ (cây corpus)."""
+    ra = []
+    goc = _metadata(root)
+    if goc is not None:
+        ra.append(goc)
+    for thu_muc in sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []:
+        con = _metadata(thu_muc)
+        if con is not None:
+            ra.append(con)
+    return ra
+
+
 @register
 class CanonicalAdapter(SourceAdapter):
     name = "canonical"
@@ -44,19 +75,14 @@ class CanonicalAdapter(SourceAdapter):
 
     @classmethod
     def probe(cls, root: Path) -> float:
-        real = root / "real"
-        if not real.is_dir():
-            return 0.0
-        # Đúng ba tầng real/<nguồn>/<speaker>/<file> mới là cây này; hai tầng thì
+        # Đúng số tầng mới là cây này (xem `_MAU_CAY`); thiếu một tầng thì
         # `FolderAdapter` xử lý hợp hơn, đừng giành.
-        sau = [p for p in real.glob("*/*/*") if p.suffix.lower() in AUDIO_EXTENSIONS]
-        if not sau:
+        if not _audio_real(root):
             return 0.0
-        return 0.95 if _metadata(root) else 0.7
+        return 0.95 if _cac_metadata(root) else 0.7
 
     def count_hint(self, root: Path) -> int | None:
-        return sum(1 for p in (root / "real").glob("*/*/*")
-                   if p.suffix.lower() in AUDIO_EXTENSIONS) or None
+        return len(_audio_real(root)) or None
 
     @staticmethod
     def _transcripts(root: Path) -> dict[str, str]:
@@ -66,22 +92,25 @@ class CanonicalAdapter(SourceAdapter):
         mọi speaker; khoá theo stem như các adapter khác là trộn lẫn transcript giữa
         các giọng.
         """
-        path = _metadata(root)
-        if path is None:
-            return {}
         table: dict[str, str] = {}
-        with path.open(newline="", encoding="utf-8") as fh:
-            for row in csv.DictReader(fh):
-                if (row.get("path") or "").startswith("real/") and row.get("text"):
-                    table[row["path"]] = row["text"]
-        log.info("Đọc %d transcript từ %s", len(table), path.name)
+        cac = _cac_metadata(root)
+        for path in cac:
+            with path.open(newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    duong = row.get("path") or ""
+                    # Chỉ lấy lớp real, ở cả hai cây: `real/…` (cây nhập) và `<bộ>/real/…`
+                    # (cây corpus). Bỏ fake — nhập lại fake là tạo ra bản ghi không có
+                    # `ref_utt_id`, đúng thứ cả thiết kế corpus tránh.
+                    la_real = duong.startswith("real/") or "/real/" in duong
+                    if la_real and row.get("text"):
+                        table[duong] = row["text"]
+        if cac:
+            log.info("Đọc %d transcript từ %d file metadata", len(table), len(cac))
         return table
 
     def iter_items(self, root: Path) -> Iterator[SourceItem]:
         texts = self._transcripts(root)
-        real = root / "real"
-        for wav in sorted(p for p in real.glob("*/*/*")
-                          if p.suffix.lower() in AUDIO_EXTENSIONS):
+        for wav in _audio_real(root):
             rel = wav.relative_to(root).as_posix()
             yield SourceItem(
                 # `key` là đường dẫn tương đối nên utt_id ổn định giữa các lần nhập:

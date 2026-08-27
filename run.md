@@ -48,8 +48,8 @@ Kết quả nằm ở `corpus/`:
 
 ```
 corpus/
-  manifest.csv                    ← nguồn sự thật duy nhất về dữ liệu
-  audio/real/<nguồn>/<speaker>/<utt_id>.wav
+  <bộ>/metadata.csv               ← nguồn sự thật về dữ liệu CỦA BỘ ĐÓ
+  <bộ>/real/<speaker>/0001.wav
 ```
 
 Chạy lại `ingest` là **idempotent**: `utt_id` suy ra từ (nguồn, speaker, khoá) nên
@@ -148,7 +148,8 @@ Manifest còn được lưu sau mỗi `SAVE_EVERY = 50` mẫu, nên bị ngắt 
 giữ được phần đã sinh. Nếu chỉ lưu lúc engine chạy xong thì mất vài giờ GPU là chuyện
 thường.
 
-Fake được ghi vào `corpus/audio/fake/<engine>/<voice>/`, mỗi bản ghi mang:
+Fake được ghi vào `corpus/<bộ>/fake/<engine>/<speaker>/` — thư mục của **chính bộ dữ
+liệu đã sinh ra nó**, vì `source` thừa hưởng từ real gốc. Mỗi bản ghi mang:
 `generator` (vd `piper:vi_VN-vais1000-medium`), `ref_utt_id` (utterance real gốc)
 và **cùng `speaker` + cùng `text` với real** — nhờ vậy mô hình không thể phân loại
 dựa vào nội dung câu nói hay danh tính người nói.
@@ -411,22 +412,36 @@ bản ghi thiếu audio.
 
 ```
 corpus/
-├── metadata.csv                    ← nguồn sự thật; `manifest.csv` (tên cũ) vẫn đọc được
-├── real/<nguồn>/<speaker>/0001.wav
-├── fake/<engine>/<speaker>/0001.wav
-└── augment/<engine|nguồn>/<speaker>/0001.wav
+├── vivos/
+│   ├── metadata.csv                ← nguồn sự thật về dữ liệu của bộ này
+│   ├── real/<speaker>/0001.wav
+│   ├── fake/<engine>/<speaker>/0001.wav
+│   └── augment/[<engine>/]<speaker>/0001.wav
+└── abc/
+    ├── metadata.csv
+    └── real/<speaker>/0001.wav
 ```
 
-Ba tầng, giống nhau cho mọi nhãn. Tầng giữa là **nguồn** của audio (bộ dữ liệu với real,
-engine với fake); tầng ba luôn là **speaker** — kể cả fake, vì fake mang đúng speaker của
-real gốc, nên đứng ở một giọng là thấy cả hai lớp cạnh nhau.
+**Mỗi bộ dữ liệu một thư mục tự chứa.** Thêm hay bỏ một bộ là thêm hay bỏ một thư mục;
+`metadata.csv` của một bộ chỉ kể bản ghi của bộ đó. Fake nằm trong thư mục của chính bộ
+đã sinh ra nó (`source` thừa hưởng từ real gốc), rồi mới tách theo engine. Tầng cuối luôn
+là **speaker** — kể cả fake — nên đứng ở một giọng là thấy cả hai lớp cạnh nhau.
+
+Trong bộ nhớ thì `Manifest` vẫn là **một bảng hợp nhất**: chia tập speaker-disjoint, cân
+bằng lớp và huấn luyện đều phải nhìn toàn bộ dữ liệu cùng lúc.
+
+Cột `path` tính từ **gốc corpus** (`vivos/real/…`), không phải từ thư mục bộ. Nhờ vậy
+`path` là khoá tra cứu duy nhất ở mọi chỗ, mà thư mục bộ vẫn dời được sang corpus khác
+miễn giữ nguyên tên thư mục.
 
 Tên file là số thứ tự trong thư mục, **cấp một lần rồi nằm trong cột `path`**. Suy lại số
 từ thứ tự duyệt sẽ phá idempotency: ingest lần sau có thể gán `0003` cho một utterance
 khác. `utt_id` vẫn là khoá chính và vẫn sinh từ `stable_id`, nên resume không đổi gì.
 
-Corpus cũ (cây `audio/<label>/…/<utt_id>.wav`) vẫn **đọc được** vì cột `path` là nguồn sự
-thật. Dọn về cây hiện hành:
+Corpus cũ vẫn **đọc được** vì cột `path` là nguồn sự thật — cả cây `audio/<label>/…` lẫn
+cây `<label>/<nguồn>/…` với một `metadata.csv` gộp ở gốc. Lượt `save` đầu tiên tách bảng
+gộp ra từng bộ (bản gốc được giữ lại dưới tên `metadata.goc-cu.csv`, không xoá); `migrate`
+dời file audio về cây hiện hành:
 
 ```bash
 python -m aidetector migrate          # idempotent; --dry-run để chỉ đếm
