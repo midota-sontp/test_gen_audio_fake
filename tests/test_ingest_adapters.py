@@ -346,8 +346,8 @@ def test_canonical_import_leaves_fake_to_the_pipeline(tmp_path, vivos_like):
     import shutil
 
     nguon = next(corpus.glob("*/real/*/*.wav"))
-    # Đặt fake đúng chỗ nó nằm trong corpus thật: <bộ>/fake/<engine>/<speaker>/
-    fake_dir = nguon.parent.parent.parent / "fake" / "engine_la" / "spk"
+    # Đặt fake đúng chỗ nó nằm trong corpus thật: <bộ>/fake/<speaker>/
+    fake_dir = nguon.parent.parent.parent / "fake" / "spk"
     fake_dir.mkdir(parents=True)
     shutil.copy(nguon, fake_dir / "0001.wav")
 

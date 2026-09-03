@@ -105,7 +105,7 @@ def test_resamples_and_downmixes_any_input(tmp_path):
 
 # --------------------------------------------------- cấu trúc thư mục chuẩn của corpus
 def test_layout_puts_every_dataset_in_its_own_folder(tmp_path, vivos_like, monkeypatch):
-    """<bộ> / real|fake / [engine /] <speaker> / NNNN.wav — mỗi bộ dữ liệu một thư mục."""
+    """<bộ> / real|fake / <speaker> / NNNN.wav — mỗi bộ dữ liệu một thư mục."""
     import numpy as np
 
     from aidetector.corpus.manifest import Manifest
@@ -138,10 +138,11 @@ def test_layout_puts_every_dataset_in_its_own_folder(tmp_path, vivos_like, monke
     for rec in manifest.fakes:
         tang = rec.path.split("/")
         # Fake nằm trong thư mục của CHÍNH BỘ đã sinh ra nó (`source` thừa hưởng từ real
-        # gốc), rồi mới tách theo engine. Tầng cuối vẫn là speaker của real gốc — nhờ vậy
-        # đứng ở một giọng là thấy cả hai lớp của giọng đó cạnh nhau.
-        assert tang[0] == "vivos" and tang[1] == "fake"
-        assert tang[2] == Clone.id and tang[3] == rec.speaker
+        # gốc), và ĐÚNG BẰNG độ sâu của real: engine không vào path, nó ở cột `generator`.
+        # Tầng cuối là speaker của real gốc — đứng ở một giọng là thấy cả hai lớp cạnh nhau.
+        assert tang[0] == "vivos" and tang[1] == "fake" and tang[2] == rec.speaker
+        assert len(tang) == 4 and tang[3].endswith(".wav") and tang[3][:-4].isdigit()
+        assert rec.generator == Clone.id
 
 
 def test_index_is_assigned_once_and_never_reshuffled(tmp_path, vivos_like):

@@ -214,10 +214,14 @@ Cả hai nhúng **cùng một payload mã nguồn** và dùng **cùng ô A1b** �
 không có chuyện huấn luyện trên một chuẩn dữ liệu khác chuẩn lúc sinh. Mọi ô trong file
 này đều thuộc việc huấn luyện — **Save & Run All** là đúng.
 
-File này **không sinh audio và không đẩy gì lên dataset corpus**: phần B chạy `augment`,
-đẩy sau đó là bơm dữ liệu phái sinh vào dataset, buộc mọi phiên sau tải thêm phần mà một
-lệnh `augment` sinh lại được trong vài phút. Mô hình và báo cáo đi đường Output — ô B4
-gói `model.zip` và `reports_bundle.zip`.
+File này **không sinh audio và không đẩy gì lên kho corpus**: phần B chạy `augment`, đẩy
+sau đó là bơm dữ liệu phái sinh vào kho, buộc mọi phiên sau tải thêm phần mà một lệnh
+`augment` sinh lại được trong vài phút.
+
+Kết quả đi hai đường, cả hai đều KHÔNG chạm vào kho corpus: ô **B4** gói `model.zip` +
+`reports_bundle.zip` cho Output (cần Save Version), ô **B5** đẩy `checkpoints/` +
+`reports/` lên **kho mô hình riêng** (`MODEL_STORE_ID` ở ô setup) để phiên sau chỉ việc
+Add Input.
 
 ## Cần bật trong panel bên phải
 
@@ -346,7 +350,7 @@ MODE = "both"
 
 # MỘT KAGGLE DATASET = MỘT BỘ. Gốc dataset chứa đúng một thư mục bộ:
 #
-#     <bộ>/metadata.csv · <bộ>/real/<speaker>/ · <bộ>/fake/<engine>/<speaker>/
+#     <bộ>/metadata.csv · <bộ>/real/<speaker>/ · <bộ>/fake/<speaker>/
 #
 # Nhờ vậy gộp nhiều bộ chỉ là Add Input nhiều dataset: mỗi mount đóng góp một thư mục,
 # mà cột `path` bắt đầu bằng tên bộ nên không mount nào giẫm lên đường dẫn của mount nào.
@@ -359,6 +363,12 @@ MODE = "both"
 #   phiên TẠO DATASET — kho của đúng bộ `SOURCE` (ô A1c), và CHỈ mount này được nạp.
 #   phiên HUẤN LUYỆN  — điểm khởi đầu; mọi dataset corpus khác đang mount cũng gộp vào.
 DATASET_ID = "sonpham12/vivos-fake-v2"
+
+# Kho MÔ HÌNH — phải KHÁC kho corpus, và ô B5 dừng phiên nếu hai giá trị trùng nhau.
+# Mỗi lượt đẩy là ảnh chụp TOÀN BỘ thư mục staging: nhét mô hình vào kho corpus thì lượt
+# đẩy corpus kế tiếp xoá nó khỏi version mới nhất, mà kho corpus cũng phải lên version
+# lại cả GB chỉ để đổi một file 800 KB. Hai việc khác nhịp thì hai kho.
+MODEL_STORE_ID = "sonpham12/aidetector-model"
 
 # Ngưỡng độ dài tối thiểu của một clip, áp cho CẢ real và fake ở mọi stage (ô `run`
 # ở trên tự dán `--set audio.min_seconds` vào từng lệnh).
@@ -1115,7 +1125,7 @@ chia sẵn) rồi ép mọi file về đúng một chuẩn:
 ├── vivos/
 │   ├── metadata.csv                    ← chỉ kể bản ghi của vivos
 │   ├── real/<speaker>/0001.wav
-│   └── fake/<engine>/<speaker>/0001.wav
+│   └── fake/<speaker>/0001.wav
 └── abc/
     ├── metadata.csv
     └── real/<speaker>/0001.wav
@@ -1233,102 +1243,28 @@ else:
     skipped("kiểm chất lượng REAL — corpus đã kiểm ở phiên sinh")
 """),
 
+phan(CHUNG),
 md("""
-## A2b. Đồng bộ lên Kaggle Dataset
+### Xác thực Kaggle — dùng chung cho cả hai file
 
-Đích là `DATASET_ID` ở ô setup — **cùng một biến** mà ô A1b nạp về, nên không bao giờ có
-chuyện đẩy lên một chỗ rồi phiên sau nạp từ chỗ khác. Mỗi lần đẩy gồm **toàn bộ** những
-gì bộ này có: `corpus.zip` (real + fake + `metadata.csv` của bộ) cộng một bản
-`<bộ>/metadata.csv` để rời bên ngoài — nhờ đó A1b đọc được tiến độ mà không phải tải cả GB.
-Kaggle giải nén `corpus.zip` ngay khi nhận, nên trên trang dataset nó hiện ra dưới dạng cây
-`<bộ>/real/ <bộ>/fake/`; A1b nạp được cả hai dạng nên không phải chống lại chuyện đó.
+Cả hai notebook đều đẩy lên Kaggle Dataset, chỉ khác **đẩy cái gì**: file dataset đẩy
+corpus (A2b), file train đẩy mô hình + báo cáo (B5). Đường xác thực thì đúng một, nên nó
+nằm ở ô dùng chung này.
 
-**Kho này là của đúng MỘT bộ.** Corpus trong phiên có nhiều hơn một bộ thì lượt đẩy
-**từ chối chạy** chứ không gói cả đám: kho của bộ này mà chứa bộ khác thì phiên train
-mount nó về sẽ thấy hai bộ trong một Input, và bộ đó lại còn có thể trùng với một Input
-khác — đúng cái hỏng câm mà A1b dựng rào để chặn.
+Cài token một lần cho cả tài khoản: [kaggle.com/settings](https://www.kaggle.com/settings)
+→ **API Tokens** → Create New Token (chuỗi `KGAT_…`), rồi trong notebook: **Add-ons →
+Secrets** thêm `KAGGLE_API_TOKEN` và **tick attach**. Kiểu legacy (`KAGGLE_USERNAME` +
+`KAGGLE_KEY` trong `kaggle.json`) cũng được — hàm dưới thử lần lượt cả hai.
 
-Mục này đặt **trước** bước sinh vì bước sinh gọi `sync_corpus.py`, file đó phải có sẵn.
-
-#### Chu kỳ đẩy — ba mốc
-
-| Mốc | Ở đâu | Bịt lỗ nào |
-|---|---|---|
-| **sau `ingest`** | ngay ô này, chỉ khi ingest thêm bản ghi | out lúc sinh giọng đầu — đúng lúc chưa có mốc nào được chốt |
-| **xong MỖI speaker** | `generate --after-speaker`, chạy nền | out giữa lượt sinh nhiều giờ |
-| **cuối phiên** | ô A5, `--force` — chặn, đợi lượt nền xong | phần lẻ sau mốc cuối |
-
-Speaker là mốc dày nhất mà corpus có: trước ranh giới đó, phần đã xong chỉ là một nhúm
-mẫu lẻ giữa chừng. 4000 mẫu trên ~46 speaker ⇒ mỗi giọng ~6 phút, nên out bất ngờ thì
-mất tối đa cỡ **6 phút GPU**.
-
-**Lượt đẩy chạy NỀN — đó là điều làm nhịp dày này khả thi.** Gói ~1 GB rồi upload mất cỡ
-1–3 phút. Đẩy mà chặn dòng sinh thì 46 lượt cộng lại là hơn một giờ GPU đứng chờ, tức trả
-hơn một giờ để rút cửa sổ mất mát từ 20 phút xuống 6 phút — lỗ. Chạy nền thì gói và upload
-là việc của CPU với mạng, GPU sinh speaker tiếp, giá gần như bằng không.
-
-Đổi lại phải giữ hai bất biến:
-
-* **Không chồng lượt** — khoá theo PID. Speaker xong sớm hơn thời gian đẩy thì bỏ lượt đó,
-  và không mất gì: mỗi lần đẩy là ảnh chụp **toàn bộ** corpus nên mốc sau gói cả phần vừa
-  bỏ. Hai lượt cùng lúc thì lượt sau gói đè lên đúng file zip lượt trước đang tải.
-* **Ảnh chụp nhất quán** — `pack` đọc manifest rồi zip đúng những file trong đó. Manifest
-  ghi bằng `tmp` + `os.replace` nên bản đọc được luôn nguyên vẹn; audio sinh ra sau thời
-  điểm đó chỉ đơn giản là chưa có trong ảnh này, lượt sau lấy.
-
-`SYNC_EVERY_MINUTES = 0` là không chặn nhịp. Đặt > 0 nếu mạng chậm. `kaggle datasets
-version` bị từ chối khi version trước còn đang xử lý — chuyện thường ở nhịp dày, và vô hại
-vì lượt sau là ảnh chụp đầy đủ. Script chốt nhịp ngay khi bắt đầu chứ không đợi thành công,
-nên hỏng thì chờ lượt sau thay vì gói-và-tải-lại liên tục.
-
-**Số version là thứ duy nhất tăng theo nhịp mà không tự dọn.** Mỗi lượt đẩy là một version
-~1 GB, nhịp theo speaker ⇒ vài chục version mỗi phiên. `KEEP_OLD_VERSIONS = False` thêm
-`--delete-old-versions` để dataset chỉ giữ bản mới nhất — mất mát duy nhất là đường lùi,
-vì bản mới nhất luôn là superset của mọi bản cũ. Mặc định vẫn `True` vì xoá version là
-không lấy lại được; đổi khi dung lượng thành vấn đề.
-
-Lượt đẩy nền không in được vào ô nào — xem bằng `sync_log()`; ô A5 tự in toàn bộ.
-
-#### Hai notebook dùng chung dataset này, nhưng chỉ MỘT chiều đẩy
-
-| Notebook | Nạp về | Đẩy lên |
-|---|---|---|
-| `aidetector_dataset.ipynb` | A1b nạp corpus phiên trước | ba mốc ở trên |
-| `aidetector_train.ipynb` | A1b nạp corpus — **bắt buộc**, không có thì dừng ngay | không đẩy |
-
-Notebook train không đẩy là có chủ ý, không phải bỏ sót: phần B chạy `augment`, nó ghi
-thêm bản nhiễu/nén vào corpus. Đẩy sau đó là bơm dữ liệu phái sinh vào dataset, buộc mọi
-phiên sau tải thêm phần mà một lệnh `augment` sinh lại được trong vài phút. Mô hình và
-báo cáo đi đường Output — ô B4 gói `model.zip` và `reports_bundle.zip`.
-
-Cài token một lần: [kaggle.com/settings](https://www.kaggle.com/settings) → Create New
-Token → mở `kaggle.json`, rồi Add-ons → Secrets thêm `KAGGLE_USERNAME` và `KAGGLE_KEY`.
+Cổng kiểm là **chạy thử đúng lệnh sẽ dùng**, không suy diễn từ biến môi trường: log một
+phiên thật cho thấy `kaggle datasets files` chạy ngon trong khi `UserSecretsClient` ném
+`BackendError` — cổng cũ kiểm Secrets nên nó tắt đồng bộ suốt 4 giờ sinh dù công cụ đẩy
+vốn xác thực được. Kiểm sai chỗ thì càng "an toàn" càng mất dữ liệu.
 """),
 code("""
-# DATASET_ID khai báo ở ô setup — cùng một biến với ô A1b nạp về.
-#
-# 0 = đẩy sau MỌI speaker. Làm được vì lượt đẩy chạy NỀN: gói + upload là việc của CPU và
-# mạng, GPU vẫn sinh tiếp trong lúc đó. Đặt số > 0 nếu muốn thưa hơn — mạng chậm, hoặc
-# muốn ít version trên dataset hơn.
-SYNC_EVERY_MINUTES = 0
-
-# Mỗi lượt đẩy tạo một version mới, và mỗi version là ảnh chụp TOÀN BỘ corpus. Nhịp theo
-# speaker ⇒ vài chục version ~1 GB mỗi phiên. True = giữ hết (còn đường lùi nếu một bản
-# đẩy ra rác); False = thêm `--delete-old-versions`, dataset chỉ giữ bản mới nhất.
-#
-# Giữ mặc định True: xoá version là không lấy lại được. Đổi sang False khi dung lượng
-# dataset thành vấn đề — bản mới nhất luôn là superset của mọi bản cũ nên mất mát duy
-# nhất là đường lùi.
-KEEP_OLD_VERSIONS = True
-
 import os
 import subprocess
-import sys
-import textwrap
 from pathlib import Path
-
-# Lượt đẩy chạy nền nên không in được vào output của ô. Log ra file, xem bằng sync_log().
-SYNC_LOG = Path("/kaggle/working/sync.log")
 
 # Thử ĐÚNG công cụ sẽ dùng để đẩy, thay vì đoán qua biến môi trường.
 #
@@ -1385,6 +1321,103 @@ def kaggle_ready():
     print("  · hoặc Legacy API Key, thêm KAGGLE_USERNAME + KAGGLE_KEY")
     print("Không có thì dùng đường Output: Save Version, rồi phiên sau Add Input.")
     return False
+"""),
+
+phan(DATASET),
+md("""
+## A2b. Đồng bộ lên Kaggle Dataset
+
+Đích là `DATASET_ID` ở ô setup — **cùng một biến** mà ô A1b nạp về, nên không bao giờ có
+chuyện đẩy lên một chỗ rồi phiên sau nạp từ chỗ khác. Mỗi lần đẩy gồm **toàn bộ** những
+gì bộ này có: `corpus.zip` (real + fake + `metadata.csv` của bộ) cộng một bản
+`<bộ>/metadata.csv` để rời bên ngoài — nhờ đó A1b đọc được tiến độ mà không phải tải cả GB.
+Kaggle giải nén `corpus.zip` ngay khi nhận, nên trên trang dataset nó hiện ra dưới dạng cây
+`<bộ>/real/ <bộ>/fake/`; A1b nạp được cả hai dạng nên không phải chống lại chuyện đó.
+
+**Kho này là của đúng MỘT bộ.** Corpus trong phiên có nhiều hơn một bộ thì lượt đẩy
+**từ chối chạy** chứ không gói cả đám: kho của bộ này mà chứa bộ khác thì phiên train
+mount nó về sẽ thấy hai bộ trong một Input, và bộ đó lại còn có thể trùng với một Input
+khác — đúng cái hỏng câm mà A1b dựng rào để chặn.
+
+Mục này đặt **trước** bước sinh vì bước sinh gọi `sync_corpus.py`, file đó phải có sẵn.
+
+#### Chu kỳ đẩy — ba mốc
+
+| Mốc | Ở đâu | Bịt lỗ nào |
+|---|---|---|
+| **sau `ingest`** | ngay ô này, chỉ khi ingest thêm bản ghi | out lúc sinh giọng đầu — đúng lúc chưa có mốc nào được chốt |
+| **xong MỖI speaker** | `generate --after-speaker`, chạy nền | out giữa lượt sinh nhiều giờ |
+| **cuối phiên** | ô A5, `--force` — chặn, đợi lượt nền xong | phần lẻ sau mốc cuối |
+
+Speaker là mốc dày nhất mà corpus có: trước ranh giới đó, phần đã xong chỉ là một nhúm
+mẫu lẻ giữa chừng. 4000 mẫu trên ~46 speaker ⇒ mỗi giọng ~6 phút, nên out bất ngờ thì
+mất tối đa cỡ **6 phút GPU**.
+
+**Lượt đẩy chạy NỀN — đó là điều làm nhịp dày này khả thi.** Gói ~1 GB rồi upload mất cỡ
+1–3 phút. Đẩy mà chặn dòng sinh thì 46 lượt cộng lại là hơn một giờ GPU đứng chờ, tức trả
+hơn một giờ để rút cửa sổ mất mát từ 20 phút xuống 6 phút — lỗ. Chạy nền thì gói và upload
+là việc của CPU với mạng, GPU sinh speaker tiếp, giá gần như bằng không.
+
+Đổi lại phải giữ hai bất biến:
+
+* **Không chồng lượt** — khoá theo PID. Speaker xong sớm hơn thời gian đẩy thì bỏ lượt đó,
+  và không mất gì: mỗi lần đẩy là ảnh chụp **toàn bộ** corpus nên mốc sau gói cả phần vừa
+  bỏ. Hai lượt cùng lúc thì lượt sau gói đè lên đúng file zip lượt trước đang tải.
+* **Ảnh chụp nhất quán** — `pack` đọc manifest rồi zip đúng những file trong đó. Manifest
+  ghi bằng `tmp` + `os.replace` nên bản đọc được luôn nguyên vẹn; audio sinh ra sau thời
+  điểm đó chỉ đơn giản là chưa có trong ảnh này, lượt sau lấy.
+
+`SYNC_EVERY_MINUTES = 0` là không chặn nhịp. Đặt > 0 nếu mạng chậm. `kaggle datasets
+version` bị từ chối khi version trước còn đang xử lý — chuyện thường ở nhịp dày, và vô hại
+vì lượt sau là ảnh chụp đầy đủ. Script chốt nhịp ngay khi bắt đầu chứ không đợi thành công,
+nên hỏng thì chờ lượt sau thay vì gói-và-tải-lại liên tục.
+
+**Số version là thứ duy nhất tăng theo nhịp mà không tự dọn.** Mỗi lượt đẩy là một version
+~1 GB, nhịp theo speaker ⇒ vài chục version mỗi phiên. `KEEP_OLD_VERSIONS = False` thêm
+`--delete-old-versions` để dataset chỉ giữ bản mới nhất — mất mát duy nhất là đường lùi,
+vì bản mới nhất luôn là superset của mọi bản cũ. Mặc định vẫn `True` vì xoá version là
+không lấy lại được; đổi khi dung lượng thành vấn đề.
+
+Lượt đẩy nền không in được vào ô nào — xem bằng `sync_log()`; ô A5 tự in toàn bộ.
+
+#### Kho corpus này chỉ nhận đẩy từ MỘT phía
+
+| Notebook | Nạp về | Đẩy lên kho corpus | Đẩy đi đâu khác |
+|---|---|---|---|
+| `aidetector_dataset.ipynb` | A1b nạp corpus phiên trước | ba mốc ở trên | — |
+| `aidetector_train.ipynb` | A1b nạp corpus — **bắt buộc**, không có thì dừng ngay | **không bao giờ** | mô hình + báo cáo → `MODEL_STORE_ID` (ô B5) |
+
+Notebook train không đẩy vào kho corpus là có chủ ý, không phải bỏ sót: phần B chạy
+`augment`, nó ghi thêm bản nhiễu/nén vào corpus. Đẩy sau đó là bơm dữ liệu phái sinh vào
+kho, buộc mọi phiên sau tải thêm phần mà một lệnh `augment` sinh lại được trong vài phút.
+
+Xác thực Kaggle nằm ở ô dùng chung phía trên — cả hai chiều đẩy đi qua đúng một `kaggle_ready()`.
+"""),
+code("""
+# DATASET_ID khai báo ở ô setup — cùng một biến với ô A1b nạp về.
+#
+# 0 = đẩy sau MỌI speaker. Làm được vì lượt đẩy chạy NỀN: gói + upload là việc của CPU và
+# mạng, GPU vẫn sinh tiếp trong lúc đó. Đặt số > 0 nếu muốn thưa hơn — mạng chậm, hoặc
+# muốn ít version trên dataset hơn.
+SYNC_EVERY_MINUTES = 0
+
+# Mỗi lượt đẩy tạo một version mới, và mỗi version là ảnh chụp TOÀN BỘ corpus. Nhịp theo
+# speaker ⇒ vài chục version ~1 GB mỗi phiên. True = giữ hết (còn đường lùi nếu một bản
+# đẩy ra rác); False = thêm `--delete-old-versions`, dataset chỉ giữ bản mới nhất.
+#
+# Giữ mặc định True: xoá version là không lấy lại được. Đổi sang False khi dung lượng
+# dataset thành vấn đề — bản mới nhất luôn là superset của mọi bản cũ nên mất mát duy
+# nhất là đường lùi.
+KEEP_OLD_VERSIONS = True
+
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+# Lượt đẩy chạy nền nên không in được vào output của ô. Log ra file, xem bằng sync_log().
+SYNC_LOG = Path("/kaggle/working/sync.log")
 
 # Script độc lập, để `generate --after-speaker` gọi được từ tiến trình con.
 SYNC_SCRIPT = Path("/kaggle/working/sync_corpus.py")
@@ -2203,6 +2236,100 @@ if DO_TRAIN:
         print(f"{_zip.stat().st_size / 1024**2:8.1f} MB  {_zip}")
 else:
     skipped("đóng gói mô hình")
+"""),
+
+md("""
+## B5. Đẩy mô hình + báo cáo lên Kaggle Dataset
+
+`/kaggle/working` bị **xoá sạch** khi phiên kết thúc, nên hai zip ở ô trên chỉ sống nếu
+bạn bấm Save Version. Ô này là đường thứ hai, không cần nhớ bấm gì: đẩy thẳng lên một
+Kaggle Dataset để phiên sau, máy khác, hay người khác `Add Input` là dùng được ngay.
+
+Kho đích là **`MODEL_STORE_ID`** ở ô setup — **không bao giờ** là kho corpus, và ô này
+dừng phiên nếu hai giá trị trùng nhau. Lý do không phải sạch sẽ mà là mất dữ liệu: mỗi
+lượt đẩy là ảnh chụp **toàn bộ** thư mục staging, nên mô hình nằm trong kho corpus sẽ bị
+lượt đẩy corpus kế tiếp xoá khỏi version mới nhất — mà kho corpus cũng phải lên version
+lại cả GB chỉ để đổi một file 800 KB. Corpus và mô hình khác nhịp, nên khác kho.
+
+```
+sonpham12/aidetector-model
+├── checkpoints/best.pt      ← head + meta (backbone, chuẩn hoá, ngưỡng, chuẩn audio)
+├── reports/                 ← metrics.json · predictions.csv · curves.png · …
+└── model-info.json          ← tóm tắt một trang: EER, backbone, ngưỡng, bộ đã học
+```
+
+`best.pt` **không chứa WavLM** — nó chỉ ghi tên checkpoint trên HuggingFace, nên kho này
+chưa tới 10 MB và mỗi lượt train là một version mới (version cũ vẫn còn, lùi được).
+
+Không có token thì ô này chỉ in nhắc rồi đi tiếp: `model.zip` ở ô trên vẫn là đường lùi.
+"""),
+code("""
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+# Đẩy nhầm vào kho corpus là mất mô hình ở lượt đẩy corpus kế tiếp. Kiểm bằng mã chứ
+# không bằng comment: hai biến này nằm cạnh nhau ở ô setup nên rất dễ copy nhầm.
+if MODEL_STORE_ID == DATASET_ID:
+    raise SystemExit("MODEL_STORE_ID trùng DATASET_ID — mỗi kho một việc, xem ô setup.")
+
+STAGE_MODEL = Path("/kaggle/working/model_upload")
+
+if not DO_TRAIN:
+    skipped("đẩy mô hình")
+elif not kaggle_ready():
+    print("Chưa xác thực được `kaggle` — mô hình vẫn nằm ở model.zip (Save Version để giữ).")
+else:
+    shutil.rmtree(STAGE_MODEL, ignore_errors=True)
+    STAGE_MODEL.mkdir(parents=True)
+    shutil.copytree("/kaggle/working/checkpoints", STAGE_MODEL / "checkpoints")
+    shutil.copytree("/kaggle/working/reports", STAGE_MODEL / "reports")
+
+    # Tóm tắt một trang, đọc được ngay trên trang dataset — cùng lý do corpus có
+    # progress.json: không ai tải 800 KB checkpoint về chỉ để biết nó tốt cỡ nào.
+    import torch
+
+    _meta = torch.load(STAGE_MODEL / "checkpoints" / "best.pt",
+                       map_location="cpu", weights_only=True)["meta"]
+    _tong = json.loads((STAGE_MODEL / "reports" / "metrics.json").read_text())["overall"]
+    _info = {
+        "eer": _tong["eer"],
+        "roc_auc": _tong["roc_auc"],
+        "min_dcf": _tong["min_dcf"],
+        "threshold": _meta["threshold"],
+        "n_test": _tong["n_samples"],
+        "backbone": _meta["backbone"],
+        "head": _meta["model"],
+        "input_dim": _meta["input_dim"],
+        "best_epoch": _meta["epoch"],
+        "val_eer": _meta["val_eer"],
+        # Học trên bộ nào — câu đầu tiên phải hỏi khi thấy một checkpoint lạ.
+        "corpus": {"sources": NGUON_DA_CO, "store": DATASET_ID},
+    }
+    (STAGE_MODEL / "model-info.json").write_text(
+        json.dumps(_info, ensure_ascii=False, indent=2), encoding="utf-8")
+    (STAGE_MODEL / "dataset-metadata.json").write_text(json.dumps({
+        "title": "aidetector model",
+        "id": MODEL_STORE_ID,
+        "licenses": [{"name": "CC0-1.0"}],
+    }, ensure_ascii=False))
+
+    _note = (f"EER {_tong['eer'] * 100:.2f}% · {_meta['backbone']['name']}"
+             f" · bộ {', '.join(sorted(NGUON_DA_CO)) or '?'}")
+    # `version` cho kho đã có, `create` cho lần đầu — thử lần lượt, đừng đoán.
+    for _argv, _viec in (
+        (["datasets", "version", "-p", str(STAGE_MODEL), "-m", _note], "thêm version"),
+        (["datasets", "create", "-p", str(STAGE_MODEL)], "tạo mới"),
+    ):
+        _r = subprocess.run(["kaggle", *_argv], capture_output=True, text=True)
+        if _r.returncode == 0:
+            print(f"✔ {_viec} · {_note}")
+            print(f"  https://www.kaggle.com/datasets/{MODEL_STORE_ID}")
+            break
+        print(f"— {_viec} không xong: {(_r.stdout + _r.stderr).strip()[-300:]}")
+    else:
+        raise SystemExit("Không đẩy được mô hình — xem log trên. model.zip vẫn là đường lùi.")
 """),
 
 md("""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -735,6 +736,7 @@ def test_each_file_defines_every_name_it_uses(tep):
 @pytest.mark.parametrize("part,khong_duoc_co", [
     ("dataset", ('run("split"', 'run("features"', 'run("train"', 'run("evaluate"')),
     ("train", ('run("ingest"', 'run("generate"', "SYNC_SCRIPT.write_text", "CONVERT")),
+    ("dataset", ("STAGE_MODEL", "model-info.json")),
 ])
 def test_neither_file_carries_the_other_half(part, khong_duoc_co):
     """Ô của phần kia còn nằm lại là mời người dùng chạy nó — hoặc chỉ để đọc rồi bỏ qua."""
@@ -1193,6 +1195,106 @@ def test_the_push_tolerates_the_legacy_merged_manifest(notebook, tmp_path):
 
     ket = subprocess.run([sys.executable, str(tep)], capture_output=True, text=True)
     assert "TỪ CHỐI ĐẨY" not in ket.stdout, ket.stdout
+
+
+# --------------------------------------- mô hình đi kho RIÊNG, không vào kho corpus
+def test_the_model_goes_to_its_own_store(notebook, notebook_code):
+    """Mỗi lượt đẩy là ảnh chụp toàn bộ staging: mô hình nằm trong kho corpus sẽ bị lượt
+    đẩy corpus kế tiếp xoá khỏi version mới nhất."""
+    assert notebook_code.count("sonpham12/aidetector-model") == 1
+    setup = _cells_with(notebook, "MODEL_STORE_ID = ")[0]
+    assert setup == _cells_with(notebook, "DATASET_ID = ")[0], "hai kho khai báo cạnh nhau"
+
+    src = _cell_src(notebook, "STAGE_MODEL")
+    # Rào bằng MÃ chứ không bằng comment — hai biến nằm cạnh nhau nên rất dễ copy nhầm.
+    assert "if MODEL_STORE_ID == DATASET_ID:" in src
+    assert src.index("MODEL_STORE_ID == DATASET_ID") < src.index('"datasets", "version"')
+    # Và lệnh đẩy chỉ được nhắm vào kho mô hình. `DATASET_ID` vẫn được nhắc tới, nhưng
+    # chỉ ở hai chỗ vô hại: rào ở trên và dòng ghi lại "học từ kho nào" trong model-info.
+    assert '"-p", str(STAGE_MODEL)' in src
+    assert f'"id": MODEL_STORE_ID' in src
+    assert src.count("DATASET_ID") == 3, src   # rào (2 lần trong 1 dòng) + model-info
+    assert '"store": DATASET_ID' in src
+
+
+def test_the_model_push_is_train_only_and_never_blocks_the_session(notebook):
+    """Không có token thì in nhắc rồi đi tiếp: `model.zip` ở ô B4 vẫn là đường lùi."""
+    src = _cell_src(notebook, "STAGE_MODEL")
+    assert "if not DO_TRAIN:" in src and "skipped(" in src
+    assert "elif not kaggle_ready():" in src
+    # Ô B4 (gói zip cho Output) phải chạy TRƯỚC — nó không cần mạng, không cần token.
+    assert _cells_with(notebook, "make_archive")[0] < _cells_with(notebook, "STAGE_MODEL")[0]
+
+
+def test_credentials_are_shared_by_both_push_paths(tep):
+    """Hai file cùng đẩy, chỉ khác đẩy CÁI GÌ — đường xác thực thì phải đúng một."""
+    ten, nb = tep
+    code = "".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
+    assert code.count("def kaggle_ready(") == 1, f"{ten}: xác thực phải nằm ở đúng một ô"
+
+
+def _fake_kaggle(tmp_path):
+    """`kaggle` giả trên PATH: ghi lại argv rồi báo thành công."""
+    bin_dir, log = tmp_path / "bin", tmp_path / "kaggle_argv.txt"
+    bin_dir.mkdir()
+    (bin_dir / "kaggle").write_text(f'#!/bin/sh\necho "$@" >> {log}\nexit 0\n', encoding="utf-8")
+    (bin_dir / "kaggle").chmod(0o755)
+    return bin_dir, log
+
+
+def test_the_model_push_stages_checkpoint_reports_and_a_summary(notebook, tmp_path, monkeypatch):
+    """Chạy thật ô B5 với `kaggle` giả: staging phải đủ ba thứ và lệnh phải nhắm đúng kho."""
+    import numpy as np
+
+    from aidetector.models import build_head, save_checkpoint
+
+    work = tmp_path / "working"
+    (work / "checkpoints").mkdir(parents=True)
+    (work / "reports").mkdir(parents=True)
+    save_checkpoint(work / "checkpoints" / "best.pt", build_head({"head": "linear"}, 4), {
+        "model": {"head": "linear"}, "input_dim": 4,
+        "norm_mean": [[0.0] * 4], "norm_std": [[1.0] * 4],
+        "backbone": {"name": "wavlm", "checkpoint": "microsoft/wavlm-base-plus",
+                     "output_layer": 6, "pooling": "mean"},
+        "audio": {}, "epoch": 7, "val_eer": 0.04, "val_loss": 0.2, "threshold": 0.61,
+    })
+    (work / "reports" / "metrics.json").write_text(json.dumps(
+        {"overall": {"eer": 0.05, "roc_auc": 0.98, "min_dcf": 0.1, "n_samples": 200,
+                     "accuracy": 0.95, "threshold": 0.61}}), encoding="utf-8")
+    (work / "reports" / "curves.png").write_bytes(b"PNG")
+
+    bin_dir, log = _fake_kaggle(tmp_path)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    cell = _cell_src(notebook, "STAGE_MODEL").replace("/kaggle/working", str(work))
+    ns = {"DO_TRAIN": True, "MODEL_STORE_ID": "ai/kho-mo-hinh", "DATASET_ID": "ai/kho-vivos",
+          "NGUON_DA_CO": {"vivos": 7367}, "kaggle_ready": lambda: True,
+          "skipped": lambda *a: None}
+    exec(compile(cell, "b5", "exec"), ns)
+
+    stage = ns["STAGE_MODEL"]
+    assert (stage / "checkpoints" / "best.pt").exists()
+    assert (stage / "reports" / "metrics.json").exists()
+    assert (stage / "reports" / "curves.png").exists()
+    assert json.loads((stage / "dataset-metadata.json").read_text())["id"] == "ai/kho-mo-hinh"
+
+    info = json.loads((stage / "model-info.json").read_text())
+    assert info["eer"] == 0.05 and info["threshold"] == 0.61
+    assert info["backbone"]["checkpoint"] == "microsoft/wavlm-base-plus"
+    assert info["corpus"] == {"sources": {"vivos": 7367}, "store": "ai/kho-vivos"}
+
+    lenh = log.read_text()
+    assert "datasets version -p" in lenh and str(stage) in lenh
+    assert "EER 5.00%" in lenh and "vivos" in lenh
+    assert "ai/kho-vivos" not in lenh, "không được đẩy vào kho corpus"
+
+
+def test_the_model_push_refuses_to_target_the_corpus_store(notebook, tmp_path):
+    src = _cell_src(notebook, "STAGE_MODEL").replace("/kaggle/working", str(tmp_path))
+    with pytest.raises(SystemExit) as err:
+        exec(compile(src, "b5", "exec"),
+             {"DO_TRAIN": True, "MODEL_STORE_ID": "ai/x", "DATASET_ID": "ai/x"})
+    assert "MODEL_STORE_ID" in str(err.value)
 
 
 def test_the_source_and_the_store_must_name_the_same_set(notebook):

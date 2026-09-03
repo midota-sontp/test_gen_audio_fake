@@ -111,8 +111,8 @@ def audio_folder(rec: Record) -> str:
     """Thư mục chuẩn của một bản ghi, tính từ gốc corpus.
 
         <bộ>/real/<speaker>/
-        <bộ>/fake/<engine>/<speaker>/
-        <bộ>/augment/[<engine>/]<speaker>/
+        <bộ>/fake/<speaker>/
+        <bộ>/augment/<speaker>/
 
     Tầng ngoài cùng là BỘ DỮ LIỆU, để mỗi bộ là một thư mục tự chứa: `real/`, `fake/`
     và `metadata.csv` của riêng nó. Thêm hay bỏ một bộ là thêm hay bỏ một thư mục.
@@ -124,15 +124,15 @@ def audio_folder(rec: Record) -> str:
     duy nhất, dùng được ở mọi chỗ mà không cần biết bản ghi thuộc bộ nào — mà thư mục bộ
     vẫn dời được sang corpus khác miễn giữ nguyên tên.
 
-    Tên voice KHÔNG vào path (`piper:vi_VN-vais1000` chỉ lấy `piper`): một engine nhiều
-    giọng mà tách thư mục thì cây phình ra mà không ai duyệt theo chiều đó — voice vẫn
-    nằm đủ trong cột `generator`.
+    ENGINE KHÔNG vào path. Một quy tắc duy nhất cho cả ba lớp — `<bộ>/<lớp>/<speaker>/`
+    — nên `fake/` đối xứng với `real/`: đứng ở một giọng là thấy hai lớp của giọng đó
+    cùng độ sâu, đối chiếu được ngay. Tách thư mục theo engine thì cây phình ra một tầng
+    mà không ai duyệt theo chiều đó, và đổi engine là đổi đường dẫn của cùng một mẫu.
+    Engine (kèm cả tên voice: `piper:vi_VN-vais1000`) vẫn nằm đủ trong cột `generator`,
+    lọc theo nó là một phép trên manifest chứ không phải một phép trên cây thư mục.
     """
-    engine = rec.generator.partition(":")[0] if rec.generator else ""
-    tang = [shard_name(rec.source), "augment" if rec.augment else rec.label]
-    if engine:
-        tang.append(slugify(engine))
-    tang.append(slugify(rec.speaker or "unknown"))
+    tang = [shard_name(rec.source), "augment" if rec.augment else rec.label,
+            slugify(rec.speaker or "unknown")]
     return "/".join(tang)
 
 

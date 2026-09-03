@@ -103,6 +103,17 @@ def test_fix_refuses_to_wipe_a_systemically_broken_corpus(tmp_path, vivos_like):
     assert len(Manifest.load(corpus, required=True)) == truoc, "không được xoá gì"
 
 
+def test_migrating_an_empty_corpus_is_not_a_failure(tmp_path, capsys):
+    """Ô A1d chạy `migrate` TRƯỚC `ingest`, nên phiên đầu tiên luôn gặp corpus rỗng.
+
+    Trả mã khác 0 lúc đó là `run()` ném SystemExit và dừng cả notebook ngay trước khi có
+    gì để dọn — đúng lỗi một phiên Kaggle đã chết ở ô A1d với "Corpus rỗng".
+    """
+    corpus = tmp_path / "chua-co-gi"
+    assert main(["migrate", "--set", f"paths.corpus={corpus}"]) == 0
+    assert "rỗng" in capsys.readouterr().out
+
+
 # ------------------------------------------ trạng thái nối tiếp, ghi vào dataset
 def test_progress_records_which_speakers_are_finished(tmp_path, vivos_like, monkeypatch):
     """Đơn vị là speaker vì đó là ranh giới `generate` chốt tiến độ.

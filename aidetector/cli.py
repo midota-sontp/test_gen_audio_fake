@@ -549,9 +549,12 @@ def cmd_progress(args) -> int:
 def cmd_migrate(args) -> int:
     """Dọn corpus về đúng cấu trúc thư mục hiện hành."""
     _, manifest, _ = _load(args)
+    # Corpus rỗng KHÔNG phải lỗi ở đây: `migrate` là bước dọn cây thư mục cũ, chạy
+    # trước `ingest`, nên ở phiên đầu tiên nó luôn gặp corpus chưa tồn tại. Trả về 2
+    # là dừng notebook ngay ô A1d — trước khi có gì để dọn.
     if not len(manifest):
-        log.error("Corpus rỗng.")
-        return 2
+        print("Corpus rỗng — chưa có gì để dọn, bỏ qua.")
+        return 0
     with timed("migrate", log):
         result = manifest.migrate_layout(dry_run=args.dry_run)
     if not args.dry_run and result["moved"]:

@@ -148,7 +148,8 @@ Manifest còn được lưu sau mỗi `SAVE_EVERY = 50` mẫu, nên bị ngắt 
 giữ được phần đã sinh. Nếu chỉ lưu lúc engine chạy xong thì mất vài giờ GPU là chuyện
 thường.
 
-Fake được ghi vào `corpus/<bộ>/fake/<engine>/<speaker>/` — thư mục của **chính bộ dữ
+Fake được ghi vào `corpus/<bộ>/fake/<speaker>/` — cùng độ sâu với `real/`, trong thư
+mục của **chính bộ dữ
 liệu đã sinh ra nó**, vì `source` thừa hưởng từ real gốc. Mỗi bản ghi mang:
 `generator` (vd `piper:vi_VN-vais1000-medium`), `ref_utt_id` (utterance real gốc)
 và **cùng `speaker` + cùng `text` với real** — nhờ vậy mô hình không thể phân loại
@@ -326,7 +327,7 @@ sonpham12/vivos-fake-v2          ← kho của bộ `vivos`
 └── vivos/
     ├── metadata.csv             ← chỉ kể bản ghi của vivos
     ├── real/<speaker>/0001.wav
-    └── fake/<engine>/<speaker>/0001.wav
+    └── fake/<speaker>/0001.wav
    (+ progress.json ở gốc kho — tiến độ của riêng bộ này)
 ```
 
@@ -474,8 +475,8 @@ corpus/
 ├── vivos/
 │   ├── metadata.csv                ← nguồn sự thật về dữ liệu của bộ này
 │   ├── real/<speaker>/0001.wav
-│   ├── fake/<engine>/<speaker>/0001.wav
-│   └── augment/[<engine>/]<speaker>/0001.wav
+│   ├── fake/<speaker>/0001.wav
+│   └── augment/<speaker>/0001.wav
 └── abc/
     ├── metadata.csv
     └── real/<speaker>/0001.wav
@@ -571,17 +572,38 @@ Thứ duy nhất tăng theo nhịp mà không tự dọn là **số version**: m
 bản mới nhất luôn là superset của mọi bản cũ. Mặc định `True` — xoá version là không lấy
 lại được.
 
-Hai notebook dùng chung dataset đó, nhưng chỉ một chiều đẩy:
+Hai notebook dùng chung kho corpus đó, nhưng chỉ một chiều đẩy vào nó:
 
-| Notebook | Nạp về | Đẩy lên |
-|---|---|---|
-| `aidetector_dataset.ipynb` | A1b nạp corpus phiên trước | ba mốc ở trên |
-| `aidetector_train.ipynb` | A1b nạp corpus — **bắt buộc**, không có thì dừng ngay | không đẩy |
+| Notebook | Nạp về | Đẩy vào kho corpus | Đẩy đi đâu khác |
+|---|---|---|---|
+| `aidetector_dataset.ipynb` | A1b nạp corpus phiên trước | ba mốc ở trên | — |
+| `aidetector_train.ipynb` | A1b nạp corpus — **bắt buộc**, không có thì dừng ngay | **không bao giờ** | mô hình + báo cáo → `MODEL_STORE_ID` |
 
-File train không đẩy là có chủ ý: phần B chạy `augment`, nó ghi thêm bản nhiễu/nén vào
-corpus. Đẩy sau đó là bơm dữ liệu phái sinh vào dataset, buộc mọi phiên sau tải thêm phần
-mà một lệnh `augment` sinh lại được trong vài phút. Mô hình và báo cáo đi đường Output
-(ô B4 gói `model.zip`, `reports_bundle.zip`).
+File train không đẩy vào kho corpus là có chủ ý: phần B chạy `augment`, nó ghi thêm bản
+nhiễu/nén vào corpus. Đẩy sau đó là bơm dữ liệu phái sinh vào kho, buộc mọi phiên sau tải
+thêm phần mà một lệnh `augment` sinh lại được trong vài phút.
+
+#### Mô hình đi kho RIÊNG
+
+Xong `evaluate`, ô **B5** đẩy `checkpoints/` + `reports/` lên `MODEL_STORE_ID` (ô setup,
+mặc định `sonpham12/aidetector-model`):
+
+```
+sonpham12/aidetector-model
+├── checkpoints/best.pt      ← head + meta (backbone, chuẩn hoá, ngưỡng, chuẩn audio)
+├── reports/                 ← metrics.json · predictions.csv · curves.png · …
+└── model-info.json          ← EER · AUC · min-DCF · ngưỡng · backbone · bộ đã học
+```
+
+Kho mô hình **phải khác** kho corpus, và ô B5 dừng phiên nếu hai biến trùng nhau. Lý do là
+mất dữ liệu chứ không phải gọn gàng: mỗi lượt đẩy là ảnh chụp **toàn bộ** thư mục staging,
+nên mô hình nằm trong kho corpus sẽ bị lượt đẩy corpus kế tiếp xoá khỏi version mới nhất —
+mà kho corpus cũng phải lên version lại cả GB chỉ để đổi một file 800 KB.
+
+Kho này nhẹ (`best.pt` không chứa WavLM, chỉ ghi tên checkpoint trên HuggingFace), nên mỗi
+lượt train là một version mới với ghi chú `EER … · wavlm · bộ vivos` — lùi lại bản cũ được.
+Không có token thì B5 chỉ in nhắc rồi đi tiếp: ô **B4** vẫn gói `model.zip` +
+`reports_bundle.zip` cho đường Output (nhớ Save Version, `/kaggle/working` bị xoá).
 
 Chuỗi thường dùng: file dataset vài phiên cho tới khi đủ mẫu (mỗi phiên chỉ sinh phần còn
 thiếu — xem `--dry-run` để biết còn bao nhiêu), rồi một phiên file train.
@@ -603,7 +625,8 @@ công của nó.**
 2. Trong notebook: **Add-ons → Secrets** → thêm `KAGGLE_API_TOKEN`, **tick attach**
    (secret là của tài khoản nhưng attach theo từng notebook). `HF_TOKEN` là tuỳ chọn —
    không có thì tải checkpoint bị throttle chứ không hỏng.
-3. Đặt `DATASET_ID` ở ô setup thành kho của bạn.
+3. Đặt `DATASET_ID` (kho corpus) và `MODEL_STORE_ID` (kho mô hình) ở ô setup thành kho
+   của bạn — hai giá trị phải khác nhau.
 
 #### Mỗi phiên — thứ tự không đổi
 
@@ -620,7 +643,7 @@ công của nó.**
 | 9 | A3c | đếm lại: `còn 0` ⇒ xong | — |
 | 10 | A4 | `validate` + thống kê + nghe thử + đo giống giọng/phát âm | corpus không đạt chuẩn |
 | 11 | A5 | `sync_now()` (chặn, đợi lượt nền) + `sync_log()` | — |
-| 12 | B | split → augment → features → train → evaluate | ở file train, phiên riêng |
+| 12 | B | split → augment → features → train → evaluate → **B5 đẩy mô hình lên `MODEL_STORE_ID`** | ở file train, phiên riêng |
 
 Bảng trên là hai file gộp lại: ô 1–11 thuộc `aidetector_dataset.ipynb`, ô 12 thuộc
 `aidetector_train.ipynb`; ô 2 và 4 có ở cả hai và giống nhau từng byte.

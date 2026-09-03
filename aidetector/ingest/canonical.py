@@ -3,7 +3,7 @@
     <root>/
       metadata.csv                 (tuỳ chọn; `manifest.csv` cũng đọc được)
       real/<nguồn>/<speaker>/0001.wav
-      fake/<engine>/<speaker>/0001.wav
+      fake/<speaker>/0001.wav
 
 Đây là định dạng mà `pack`/`migrate` sinh ra, nên nó là thứ để trao đổi giữa các máy:
 convert một bộ dữ liệu về cây này **một lần**, rồi mọi thứ phía sau không cần biết nó

@@ -1,8 +1,8 @@
 """Corpus tách theo BỘ DỮ LIỆU: mỗi bộ một thư mục tự chứa.
 
     corpus/
-      vivos/metadata.csv · vivos/real/<speaker>/ · vivos/fake/<engine>/<speaker>/
-      abc/metadata.csv   · abc/real/<speaker>/   · abc/fake/<engine>/<speaker>/
+      vivos/metadata.csv · vivos/real/<speaker>/ · vivos/fake/<speaker>/
+      abc/metadata.csv   · abc/real/<speaker>/   · abc/fake/<speaker>/
 
 Trong bộ nhớ vẫn là MỘT bảng hợp nhất — chia tập speaker-disjoint, cân bằng lớp và
 huấn luyện đều phải nhìn toàn bộ dữ liệu cùng lúc. Những test dưới đây canh đúng hai
@@ -12,6 +12,7 @@ huấn luyện đều phải nhìn toàn bộ dữ liệu cùng lúc. Những te
 from __future__ import annotations
 
 import csv
+from pathlib import Path
 
 import numpy as np
 
@@ -89,7 +90,7 @@ def test_fake_lives_in_the_folder_of_the_dataset_that_produced_it(tmp_path):
 
     for rec in m.fakes:
         tang = rec.path.split("/")
-        assert tang[0] == rec.source and tang[1] == "fake" and tang[2] == "omnivoice"
+        assert tang[0] == rec.source and tang[1] == "fake" and tang[2] == rec.speaker
 
 
 # ------------------------------------------------- trong bộ nhớ: một bảng hợp nhất
@@ -203,3 +204,59 @@ def test_migrate_moves_an_old_corpus_into_per_dataset_folders(tmp_path):
 
     lan_hai = m.migrate_layout()
     assert lan_hai["moved"] == 0 and lan_hai["kept"] == len(m), "chạy lại phải không xáo gì"
+
+
+def test_fake_sits_at_the_same_depth_as_real(tmp_path):
+    """`<bộ>/fake/<speaker>/`, không có tầng engine — đối xứng với `<bộ>/real/<speaker>/`.
+
+    Đứng ở một giọng là thấy hai lớp của giọng đó cùng chỗ, đối chiếu được ngay. Engine
+    nằm trong cột `generator`; đưa nó vào path thì đổi engine là đổi đường dẫn của cùng
+    một mẫu, và hai engine cho cùng speaker bị tách ra hai nhánh không ai duyệt tới.
+    """
+    m = Manifest(tmp_path / "corpus")
+    _ghi(m, "vivos", "spk07", n=2)
+    _ghi(m, "vivos", "spk07", n=2, generator="omnivoice")
+    _ghi(m, "vivos", "spk07", n=1, generator="piper:vi_VN-vais1000")
+
+    duong = sorted(r.path for r in m)
+    assert [d for d in duong if "/real/" in d] == [
+        "vivos/real/spk07/0001.wav", "vivos/real/spk07/0002.wav"]
+    # Hai engine, MỘT thư mục: số thứ tự chạy tiếp chứ không đụng nhau.
+    assert [d for d in duong if "/fake/" in d] == [
+        "vivos/fake/spk07/0001.wav", "vivos/fake/spk07/0002.wav",
+        "vivos/fake/spk07/0003.wav"]
+    assert {r.generator for r in m.fakes} == {"omnivoice", "piper:vi_VN-vais1000"}
+
+
+def test_migrate_flattens_the_old_per_engine_fake_folders(tmp_path):
+    """Corpus phiên trước có `fake/<engine>/<speaker>/`; `migrate` dọn về cây hiện hành.
+
+    Giữ nguyên utt_id nên không sinh lại gì, và thư mục engine rỗng phải biến mất — còn
+    lại thì `ls corpus/vivos/fake/` không đọc ra được "mỗi speaker một thư mục" nữa.
+    """
+    import shutil
+
+    corpus = tmp_path / "corpus"
+    m = Manifest(corpus)
+    _ghi(m, "vivos", "spk07", n=2, generator="omnivoice")
+    m.save()
+
+    # Dựng lại cây CŨ trên đĩa: vivos/fake/omnivoice/spk07/000N.wav
+    for rec in list(m):
+        cu = corpus / "vivos" / "fake" / "omnivoice" / "spk07" / Path(rec.path).name
+        cu.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(m.abs_path(rec)), str(cu))
+        rec.path = cu.relative_to(corpus).as_posix()
+    m.save()
+
+    lai = Manifest.load(corpus, required=True)
+    id_cu = {r.utt_id for r in lai}
+    kq = lai.migrate_layout()
+    assert kq["moved"] == 2 and kq["missing"] == 0
+    lai.save()
+
+    assert {r.utt_id for r in lai} == id_cu, "migrate không được đổi utt_id"
+    for rec in lai:
+        assert rec.path.startswith("vivos/fake/spk07/"), rec.path
+        assert lai.abs_path(rec).exists()
+    assert not (corpus / "vivos" / "fake" / "omnivoice").exists(), "thư mục engine phải bị dọn"
