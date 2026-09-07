@@ -408,10 +408,23 @@ def _run_batch(
     """Vòng lặp sinh — tách khỏi `generate_fakes` để thư mục reference tạm luôn được dọn."""
     since_save = 0
     speaker: str | None = None
+    kept_luc_mo = 0        # `stats["kept"]` lúc mở giọng hiện tại — mốc để biết có gì mới
 
     def close_speaker() -> None:
-        """Chốt một giọng: lưu manifest TRƯỚC rồi mới báo, để hook thấy trạng thái thật."""
+        """Chốt một giọng: lưu manifest TRƯỚC rồi mới báo, để hook thấy trạng thái thật.
+
+        Giọng không tạo được bản ghi nào thì KHÔNG chốt. Lượt chạy lại (mọi mẫu đã có
+        nên bị bỏ qua theo utt_id) vẫn đi hết danh sách khuôn, và chốt vô điều kiện ở
+        đây là ghi lại manifest hàng chục nghìn dòng rồi gọi hook đồng bộ MỘT LẦN CHO
+        MỖI SPEAKER — không thêm một bản ghi nào. Đo trên một phiên thật: 30 lượt lưu +
+        30 lượt gọi hook đẩy dataset để đổi lấy đúng 1 mẫu mới. Tốn I/O, tốn lượt đẩy,
+        và log đọc y như đang sinh thật nên không nhìn ra là đang chạy không.
+        """
         if speaker is None:
+            return
+        if stats["kept"] == kept_luc_mo:
+            log.info("Speaker %s: mọi mẫu đã có sẵn — không phải lưu, không phải đồng bộ",
+                     speaker)
             return
         manifest.save()
         log.info("Xong speaker %s · tổng đã tạo %d", speaker, stats["kept"])
@@ -422,6 +435,7 @@ def _run_batch(
         if target.speaker != speaker:
             close_speaker()
             speaker = target.speaker
+            kept_luc_mo = stats["kept"]
             since_save = 0
         voice = voice_list[i % len(voice_list)]
         # Câu dự phòng không có utt gốc ⇒ lấy chính nội dung câu làm khoá, nếu không

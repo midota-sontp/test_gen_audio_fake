@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from aidetector.corpus.manifest import Manifest
+from aidetector.corpus.manifest import MANIFEST_NAME, Manifest
 from aidetector.corpus.spec import AudioSpec
 from aidetector.generate import base as gen_base, generate_fakes
 from aidetector.ingest import ingest_source
@@ -146,6 +146,47 @@ def test_hook_sees_a_manifest_already_written_to_disk(corpus):
 
     generate_fakes(corpus, CountingClone.id, SPEC, count=8, on_speaker_done=hook)
     assert observed and all(n > 0 for n in observed), observed
+
+
+def test_a_rerun_that_creates_nothing_neither_saves_nor_syncs(corpus):
+    """Lượt chạy lại đi hết danh sách khuôn nhưng bỏ qua từng cái theo utt_id.
+
+    Chốt vô điều kiện ở ranh giới speaker khi đó là ghi lại manifest hàng chục nghìn
+    dòng và gọi hook đẩy dataset MỘT LẦN CHO MỖI SPEAKER — không thêm bản ghi nào. Một
+    phiên Kaggle thật đã trả 30 lượt lưu + 30 lượt đẩy để đổi lấy đúng 1 mẫu mới, mà log
+    thì đọc y như đang sinh thật nên không nhìn ra là đang chạy không.
+    """
+    goi: list[str] = []
+    lan_dau = generate_fakes(corpus, CountingClone.id, SPEC, count=8,
+                             on_speaker_done=lambda spk, _: goi.append(spk))
+    assert lan_dau["kept"] == 8 and goi, "lượt đầu phải sinh thật và có chốt"
+
+    mtime = (corpus.root / "vivos" / MANIFEST_NAME).stat().st_mtime_ns
+    goi.clear()
+    lai = generate_fakes(corpus, CountingClone.id, SPEC, count=8,
+                         on_speaker_done=lambda spk, _: goi.append(spk))
+
+    assert lai["kept"] == 0 and lai["skip_exists"] == 8, lai
+    assert goi == [], f"hook vẫn chạy dù không tạo được gì: {goi}"
+    assert (corpus.root / "vivos" / MANIFEST_NAME).stat().st_mtime_ns == mtime, \
+        "manifest bị ghi lại dù không có bản ghi mới"
+
+
+def test_a_speaker_that_does_add_records_still_closes(corpus):
+    """Cổng "có gì mới không" không được nuốt luôn ca bình thường.
+
+    Sinh thêm cho ĐÚNG những giọng đã xong một phần: giọng nào có bản ghi mới thì vẫn
+    phải lưu và vẫn phải gọi hook, nếu không mất chính cái mốc an toàn để đẩy dữ liệu.
+    """
+    generate_fakes(corpus, CountingClone.id, SPEC, count=4)
+    goi: list[str] = []
+    kq = generate_fakes(corpus, CountingClone.id, SPEC, count=12,
+                        on_speaker_done=lambda spk, _: goi.append(spk))
+
+    assert kq["kept"] > 0 and kq["skip_exists"] == 4, kq
+    assert goi, "giọng có bản ghi mới vẫn phải được chốt"
+    tu_dia = Manifest.load(corpus.root, required=True)
+    assert len(tu_dia.fakes) == len(corpus.fakes), "manifest trên đĩa phải khớp bộ nhớ"
 
 
 def test_a_failing_hook_does_not_abort_generation(corpus):

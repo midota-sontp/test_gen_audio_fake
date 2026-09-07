@@ -975,7 +975,10 @@ def test_a_session_that_cannot_load_the_corpus_stops(notebook):
     assert "_co_du_lieu" in src
     assert "raise SystemExit(" in src
     # Phải chặn cả hai đường biết dataset có dữ liệu: manifest rời, và hỏi API.
-    assert '"corpus.zip", "metadata.csv",' in src
+    # Đường API phải ĐẾM dòng file, không dò tên file: listing bị phân trang nên
+    # `metadata.csv` thường nằm ở trang sau — xem
+    # `test_a_paginated_file_listing_is_not_read_as_an_empty_dataset`.
+    assert "_dem_file(r.stdout)" in src
     assert src.index("_co_du_lieu = (f\"{len(rows)} bản ghi") < src.index("if _co_du_lieu:")
 
 
@@ -1036,6 +1039,83 @@ def _run_a1b(notebook, tmp_path, mounts, make_dataset, dataset_id="ai/kho-vivos"
           "CFG": "configs/kaggle.yaml", "run": lambda *a: None}
     exec(compile(cell, "a1b", "exec"), ns)
     return ns
+
+
+def test_a_paginated_file_listing_is_not_read_as_an_empty_dataset(notebook, tmp_path):
+    """`kaggle datasets files` PHÂN TRANG, và trang đầu của corpus vài nghìn file toàn .wav.
+
+    Cổng cũ dò đúng mấy cái tên `corpus.zip`/`metadata.csv`/`progress.json`, nên nó in ra
+    bảng file THẬT rồi kết luận "Dataset trống — bắt đầu từ đầu" ngay bên dưới. Một phiên
+    thật đã đi tiếp theo kết luận đó: ingest lại 12.420 file VIVOS từ đầu, và lượt đẩy
+    cuối phiên sẽ ĐÈ MẤT corpus đã sinh. Có DÒNG FILE nào là có dữ liệu, chấm hết.
+    """
+    mounts = tmp_path / "input"
+    _kho_mot_bo(mounts / "kho-vivos", "vivos")
+    _dem_file = _run_a1b(notebook, tmp_path, mounts, make_dataset=True)["_dem_file"]
+
+    # stdout THẬT của phiên đó, cắt còn hai dòng file.
+    that = (
+        "Next Page Token = CfDJ8ImuQD4OY2pEnVW2WQ-kgncjjoIjtqjHo9B0ti57foqe\n"
+        "name                                     size  creationDate                \n"
+        "-------------------------------------  ------  --------------------------  \n"
+        "corpus/vivos/fake/vivosdev01/0001.wav   99116  2026-09-03 09:44:05.407000  \n"
+        "corpus/vivos/fake/vivosdev01/0002.wav  107308  2026-09-03 09:44:05.416000  \n"
+    )
+    assert not any(t in that for t in ("corpus.zip", "metadata.csv", "manifest.csv",
+                                       "progress.json")), \
+        "chính vì mấy tên này nằm ở TRANG SAU mà cổng cũ báo trống"
+    assert _dem_file(that) == 2
+
+    assert _dem_file("name  size  creationDate\n----  ----  ------------") == 0
+    assert _dem_file("") == 0
+
+
+def test_a_store_holding_only_a_notebook_is_read_as_empty(notebook, tmp_path):
+    """Tạo dataset từ output của notebook là kho có đúng một `*.ipynb` và không có corpus.
+
+    Cổng đếm MỌI dòng file sẽ dừng phiên vì file đó — và đó là bế tắc không có đường ra:
+    kho không có corpus nên Add Input cũng chẳng nạp được gì, chạy lại là cổng đếm đúng
+    file đó rồi dừng lần nữa. Kho chỉ có notebook là kho TRỐNG.
+    """
+    mounts = tmp_path / "input"
+    _kho_mot_bo(mounts / "kho-vivos", "vivos")
+    _dem_file = _run_a1b(notebook, tmp_path, mounts, make_dataset=True)["_dem_file"]
+
+    # stdout THẬT của phiên bị chặn: dataset sonpham12/vivos-fake-v3.
+    that = (
+        "name                        size  creationDate                \n"
+        "------------------------  ------  --------------------------  \n"
+        "aidetector_dataset.ipynb  259544  2026-09-04 03:57:52.072000  \n"
+    )
+    assert _dem_file(that) == 0
+
+    # Nhưng file dữ liệu đứng cạnh notebook thì vẫn là có dữ liệu.
+    assert _dem_file(that + "corpus/vivos/metadata.csv  1234  2026-09-04 03:58:00  \n") == 1
+
+    # Và còn TRANG SAU thì không được trừ gì cả: trang sau mới là chỗ có .wav.
+    assert _dem_file("Next Page Token = CfDJ8Imu\n" + that) == 1
+
+
+def test_a_store_mounted_under_the_nested_layout_is_still_found(notebook, tmp_path):
+    """Kaggle mount dataset ở hai kiểu; kiểu mới là `datasets/<owner>/<slug>/`.
+
+    Log một phiên thật: VIVOS nằm ở /kaggle/input/datasets/kynthesis/vivos-vietnamese-
+    speech-corpus-for-asr/vivos/. Chỉ glob `/kaggle/input/<slug>/` là kho ĐÃ add vẫn
+    "không thấy" — ô này kết luận trống rồi phiên đi ingest lại từ đầu.
+    """
+    mounts = tmp_path / "input"
+    _kho_mot_bo(mounts / "datasets" / "ai" / "kho-vivos", "vivos")
+
+    ns = _run_a1b(notebook, tmp_path, mounts, make_dataset=True)
+
+    m = Manifest.load(ns["CORPUS"], required=True)
+    assert {r.source for r in m} == {"vivos"}
+    assert ns["NGUON_DA_CO"] == {"vivos": 3}
+    # Đơn vị "kho" phải là dataset, không phải thư mục `datasets` gộp chung: lấy một
+    # tầng là hai kho khác nhau bị coi là một, và phép chặn "một bộ tới từ hai Input"
+    # im lặng mất tác dụng.
+    assert ns["_kho_cua"](str(mounts / "datasets" / "ai" / "kho-vivos" / "vivos"
+                             / "metadata.csv")) == str(mounts / "datasets" / "ai" / "kho-vivos")
 
 
 def test_training_merges_every_mounted_store(notebook, tmp_path):

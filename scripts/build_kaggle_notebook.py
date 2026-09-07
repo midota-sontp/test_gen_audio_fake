@@ -613,9 +613,19 @@ CORPUS = Path("/kaggle/working/corpus")
 #                 bộ lạ vào kho của bộ này, phá đúng bất biến vừa dựng lên.
 #   huấn luyện  — MỌI mount là corpus, gộp hết: kho khớp `DATASET_ID` trước, rồi tới các
 #                 kho khác. Càng nhiều bộ càng đúng thứ test đo — tổng quát sang giọng mới.
+#
+# Kaggle mount dataset ở HAI kiểu, và phải nhận cả hai:
+#
+#   /kaggle/input/<slug>/…                    kiểu cũ
+#   /kaggle/input/datasets/<owner>/<slug>/…   kiểu mới, mọi dataset chung một gốc
+#
+# Log một phiên thật: VIVOS nằm ở /kaggle/input/datasets/kynthesis/vivos-vietnamese-
+# speech-corpus-for-asr/vivos/. Chỉ glob kiểu cũ là kho ĐÃ add vẫn "không thấy" — rồi ô
+# này kết luận trống và phiên đi ingest lại từ đầu.
 def _find(name):
     slug = DATASET_ID.split("/")[-1]
-    rieng = sorted(glob.glob(f"/kaggle/input/{slug}/**/{name}", recursive=True))
+    rieng = sorted(glob.glob(f"/kaggle/input/{slug}/**/{name}", recursive=True)
+                   or glob.glob(f"/kaggle/input/datasets/*/{slug}/**/{name}", recursive=True))
     if MAKE_DATASET:
         return rieng
     return rieng + [p for p in sorted(glob.glob(f"/kaggle/input/**/{name}", recursive=True))
@@ -759,7 +769,64 @@ def _bo_trong(nguon):
 # tình cờ chứa cùng tên bộ thì không.
 def _kho_cua(duong):
     goc, duong = Path("/kaggle/input"), Path(duong)
-    return str(goc / duong.relative_to(goc).parts[0]) if goc in duong.parents else str(duong)
+    if goc not in duong.parents:
+        return str(duong)
+    phan = duong.relative_to(goc).parts
+    # Kiểu mount mới gộp MỌI dataset dưới `datasets/<owner>/<slug>/`, nên lấy một tầng
+    # là mọi kho hoá thành cùng một kho `datasets` — phép "một bộ tới từ hai Input" mất
+    # tác dụng đúng lúc cần nhất. Đơn vị ở kiểu đó là ba tầng.
+    n = 3 if phan[0] == "datasets" and len(phan) >= 3 else 1
+    return str(goc.joinpath(*phan[:n]))
+
+# `kaggle datasets files` có BAO NHIÊU dòng file DỮ LIỆU.
+#
+# Listing bị PHÂN TRANG (`Next Page Token = …`). Corpus vài nghìn file thì trang đầu
+# toàn `.wav`, còn `metadata.csv`/`progress.json` nằm tận trang sau. Cổng cũ dò đúng mấy
+# cái tên đó nên nó kết luận "trống" ngay dưới một bảng đang liệt kê file thật — rồi
+# phiên đi ingest lại từ đầu và lượt đẩy cuối phiên ĐÈ MẤT cả kho. Còn trang sau là
+# CÓ dữ liệu, không cần biết trang này có tên gì.
+#
+# Nhưng hết trang rồi thì phải trừ những file KHÔNG PHẢI dữ liệu. Tự tay tạo dataset từ
+# output của notebook là kho có đúng một `*.ipynb` — và cổng cũ dừng phiên vì nó, trong
+# một BẾ TẮC không có đường ra: kho không có corpus nên Add Input cũng chẳng nạp được
+# gì, chạy lại là cổng đếm đúng file đó rồi dừng lần nữa. Kho chỉ có notebook là kho
+# trống.
+KHONG_PHAI_DU_LIEU = (".ipynb", ".md", ".py", ".log")
+
+def _dem_file(stdout):
+    dong = [l for l in stdout.splitlines() if l.strip()]
+    con_trang = any("next page token" in l.lower() for l in dong)
+    for i, l in enumerate(dong):
+        if set(l.strip()) <= set("- "):     # dòng gạch dưới tiêu đề bảng
+            ten = [d.split()[0] for d in dong[i + 1:]
+                   if d.split() and "next page token" not in d.lower()]
+            break
+    else:
+        # Không nhận ra định dạng (bản `kaggle` khác) — thà báo có còn hơn báo trống.
+        return sum(1 for l in dong if "/" in l)
+    if con_trang:
+        return len(ten)
+    return sum(1 for t in ten if not t.lower().endswith(KHONG_PHAI_DU_LIEU))
+
+# MỌI mount đang chứa corpus của pipeline này, KHÔNG lọc theo `DATASET_ID`. Chỉ dùng để
+# BÁO khi `DATASET_ID` trỏ trượt — nạp thì vẫn phải theo `DATASET_ID`, vì một dataset là
+# một bộ và trộn kho là phá đúng bất biến đó.
+def _kho_co_corpus():
+    import csv
+
+    ra = {_kho_cua(p) for p in glob.glob("/kaggle/input/**/corpus.zip", recursive=True)}
+    for ten in ("metadata.csv", "manifest.csv"):
+        for duong in glob.glob(f"/kaggle/input/**/{ten}", recursive=True):
+            try:
+                with open(duong, encoding="utf-8", newline="") as fh:
+                    cot = set(next(csv.reader(fh)))
+            except Exception:
+                continue
+            # Manifest CỦA TA, không phải `metadata.csv` bất kỳ của một dataset lạ —
+            # bộ giọng thật đang mount cũng hay có một file trùng tên.
+            if {"utt_id", "path", "label", "speaker"} <= cot:
+                ra.add(_kho_cua(duong))
+    return sorted(ra)
 
 def _ghi_nhan(nguon):
     bo, kho = _bo_trong(nguon), _kho_cua(nguon)
@@ -835,9 +902,12 @@ if not _da_nap:
         if r.returncode == 0:
             print("Dataset trên Kaggle đang có:")
             print(r.stdout.strip()[:800])
-            if any(t in r.stdout for t in ("corpus.zip", "metadata.csv",
-                                           "manifest.csv", "progress.json")):
-                _co_du_lieu = "dữ liệu trên dataset nhưng chưa Add Input"
+            _n = _dem_file(r.stdout)
+            if _n:
+                _co_du_lieu = f"{_n}+ file trên dataset nhưng chưa Add Input"
+            else:
+                print("Không có file dữ liệu nào trên dataset (notebook/README không tính)"
+                      " — coi như kho trống.")
         else:
             print("Chưa nối được tới dataset (chưa add Input, chưa có token, hoặc dataset trống).")
 
@@ -846,6 +916,20 @@ if not _da_nap:
             f"DỪNG: dataset {DATASET_ID} đã có {_co_du_lieu}.\\n"
             "Add Input → Datasets → dataset đó rồi chạy lại ô này.\\n"
             "Chạy tiếp mà không nạp được là ingest lại từ đầu rồi ĐÈ MẤT công phiên trước."
+        )
+    # DATASET_ID trỏ trượt là ca IM LẶNG NHẤT và tốn kém nhất: phiên tạo dataset chỉ nạp
+    # mount khớp `DATASET_ID`, nên lệch một ký tự (v2/v3) là corpus rỗng, ô này in "bắt
+    # đầu từ đầu", rồi A2b cuối phiên đẩy một corpus 0 fake ĐÈ lên kho đúng. Trước khi
+    # kết luận "trống", soi mọi mount: có corpus ở đâu đó mà ta không nạp là phải dừng.
+    _lech = [k for k in _kho_co_corpus()
+             if Path(k).name != DATASET_ID.split("/")[-1]]
+    if _lech:
+        raise SystemExit(
+            f"DỪNG: DATASET_ID = {DATASET_ID!r} không khớp mount nào, nhưng các mount sau"
+            " ĐANG chứa corpus:\\n"
+            + "\\n".join(f"  {k}" for k in _lech)
+            + f"\\nSửa DATASET_ID ở ô setup cho khớp (vd {Path(_lech[0]).name!r}) rồi chạy"
+              " lại ô này.\\nĐi tiếp là ingest lại từ đầu rồi ĐÈ MẤT công phiên trước."
         )
     if MAKE_DATASET:
         print("Dataset trống — phiên này bắt đầu từ đầu.")
