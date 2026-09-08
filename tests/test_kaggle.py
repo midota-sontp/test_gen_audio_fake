@@ -9,9 +9,11 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aidetector.config import Config
 from aidetector.corpus.manifest import MANIFEST_NAME, Manifest, find_shards
+from aidetector.corpus.schema import LABEL_FAKE, LABEL_REAL, Record
 from aidetector.corpus.spec import AudioSpec
 from aidetector.env import KAGGLE, LOCAL, detect_platform, find_kaggle_datasets, free_space_gb
 from aidetector.generate import generate_fakes
@@ -461,6 +463,68 @@ def test_dataset_phase_has_a_smoke_switch_and_inspection(notebook_text):
     assert "ref_utt_id" in notebook_text
 
 
+# ------------------------------- thử mô hình: mẫu phải tìm được trên cây corpus hiện hành
+def _run_detect_cell(notebook, corpus_root, tmp_path, extra=None):
+    """Chạy ô B4 với `run` giả, trả về danh sách file nó định đem đi chấm."""
+    cfg = tmp_path / "cfg_detect.yaml"
+    cfg.write_text(yaml.safe_dump({"paths": {"corpus": str(corpus_root)}}), encoding="utf-8")
+    ghi: dict = {}
+    namespace = {"DO_TRAIN": True, "CFG": str(cfg), "skipped": lambda _: None,
+                 "run": lambda *args: ghi.update(files=list(args[1:])) or True,
+                 **(extra or {})}
+    exec(compile(_cell_src(notebook, 'run("detect"'), "B4", "exec"), namespace)
+    return ghi.get("files", [])
+
+
+def test_detect_cell_finds_samples_on_the_current_corpus_tree(notebook, corpus, tmp_path):
+    """Ô B4 phải chọn được mẫu THẬT — không phải glob của một cây corpus đã đổi.
+
+    Cây corpus đã đổi một lần: `real/`, `fake/` từ gốc corpus vào trong `<bộ>/`. Một ô
+    glob cứng theo cây cũ không đỏ ở đâu cả, nó chỉ trả về rỗng — rồi `detect` chết vì
+    thiếu tham số, ngay trước ô đóng gói mô hình, tức mất cả phiên GPU.
+    """
+    files = _run_detect_cell(notebook, corpus.root, tmp_path)
+    assert files, "ô B4 không chọn được mẫu nào — lệch với cây corpus hiện hành"
+    thieu = [f for f in files if not Path(f).exists()]
+    assert not thieu, f"chọn ra đường dẫn không tồn tại: {thieu}"
+    assert any("/fake/" in f for f in files) and any("/real/" in f for f in files), (
+        "phải có cả hai lớp, một lớp thôi thì không thấy được mô hình lệch về đâu"
+    )
+
+
+def test_detect_cell_prefers_unseen_samples(notebook, corpus, tmp_path):
+    """Chấm lại mẫu đã train thì điểm đẹp mà không nói lên gì — phải ưu tiên split=test."""
+    for i, rec in enumerate(sorted(corpus, key=lambda r: r.path)):
+        rec.split = "test" if i % 3 == 0 else "train"
+    corpus.save()
+
+    lai = Manifest.load(corpus.root)
+    files = _run_detect_cell(notebook, lai.root, tmp_path)
+    theo_path = {str(lai.abs_path(r)): r for r in lai}
+    assert files and all(theo_path[f].split == "test" for f in files)
+
+
+def test_detect_cell_spreads_across_generators(notebook, corpus, tmp_path):
+    """5 mẫu đầu theo path rơi hết vào một engine; chênh lệch giữa engine mới là thứ đáng nhìn."""
+    for i, rec in enumerate(sorted(corpus.fakes, key=lambda r: r.path)):
+        rec.generator, rec.split = f"engine_{i % 2}", "test"
+    corpus.save()
+
+    lai = Manifest.load(corpus.root)
+    files = _run_detect_cell(notebook, lai.root, tmp_path)
+    theo_path = {str(lai.abs_path(r)): r for r in lai}
+    engines = {theo_path[f].generator for f in files if "/fake/" in f}
+    assert len(engines) > 1, f"chỉ chấm mẫu của một engine: {engines}"
+
+
+def test_manual_detect_loads_the_model_once(notebook_code):
+    """Ô thử thủ công phải nạp WavLM MỘT lần: mỗi lượt nạp lại là ~30 giây chờ."""
+    assert "FileUpload(" in notebook_code, "thiếu nút chọn file để thử tay"
+    assert '"_DETECTOR" not in globals()' in notebook_code, (
+        "Detector phải giữ lại trong kernel, không dựng lại mỗi lượt chọn file"
+    )
+
+
 def _sync_script(notebook) -> str:
     """Dựng lại sync_corpus.py từ f-string lồng trong ô A2b."""
     import textwrap
@@ -610,9 +674,25 @@ _STAGE_CELLS = ("INGEST_ADDED = ", "*TTS_ENGINES", "xác nhận omnivoice đã �
                 'run("features")', 'run("detect"')
 
 
-def _stages_that_run(notebook, notebook_code, mode) -> set[str]:
+def _corpus_chi_co_manifest(root: Path) -> Path:
+    """Corpus không có audio: ô B4 chỉ cần `path` trong manifest để dựng lệnh detect."""
+    mf = Manifest(root)
+    for i, (label, gen) in enumerate(((LABEL_REAL, ""), (LABEL_FAKE, "dummy:voice_a"))):
+        mf.add(Record(utt_id=f"u{i}", path=f"bo/{label}/spk/{i:04d}.wav", label=label,
+                      source="bo", speaker="spk", generator=gen, split="test"))
+    mf.save()
+    return root
+
+
+def _stages_that_run(notebook, notebook_code, mode, tmp_path) -> set[str]:
     called: list[str] = []
+    # Ô B4 chọn mẫu qua manifest, nên harness phải có một corpus tối thiểu để đọc.
+    cfg = tmp_path / f"cfg_{mode}.yaml"
+    cfg.write_text(yaml.safe_dump(
+        {"paths": {"corpus": str(_corpus_chi_co_manifest(tmp_path / f"corpus_{mode}"))}},
+    ), encoding="utf-8")
     namespace = {
+        "CFG": str(cfg),
         "MODE": mode, "sys": sys, "SMOKE": False, "SYNC_READY": False,
         "TTS_ENGINES": ["piper"], "RAW": "/tmp/khong-dung", "N_REAL": 1,
         "PER_SPEAKER": 1, "N_FAKE_TTS": 1, "N_FAKE_CLONE": 1,
@@ -639,16 +719,16 @@ def _stages_that_run(notebook, notebook_code, mode) -> set[str]:
      {"ingest", "generate"}),
 ])
 def test_mode_gates_the_stages_that_actually_run(notebook, notebook_code, mode,
-                                                phai_chay, khong_duoc_chay):
-    called = _stages_that_run(notebook, notebook_code, mode)
+                                                phai_chay, khong_duoc_chay, tmp_path):
+    called = _stages_that_run(notebook, notebook_code, mode, tmp_path)
     assert phai_chay <= called, f"MODE={mode} thiếu: {phai_chay - called}"
     assert not (khong_duoc_chay & called), f"MODE={mode} chạy thừa: {khong_duoc_chay & called}"
 
 
-def test_the_two_files_together_run_the_whole_pipeline(notebook, notebook_code):
+def test_the_two_files_together_run_the_whole_pipeline(notebook, notebook_code, tmp_path):
     """Tách file không được làm rơi stage nào ra ngoài cả hai."""
-    ca_hai = (_stages_that_run(notebook, notebook_code, "dataset")
-              | _stages_that_run(notebook, notebook_code, "train"))
+    ca_hai = (_stages_that_run(notebook, notebook_code, "dataset", tmp_path)
+              | _stages_that_run(notebook, notebook_code, "train", tmp_path))
     assert {"ingest", "generate", "split", "augment", "features", "train", "evaluate",
             "detect"} <= ca_hai
 

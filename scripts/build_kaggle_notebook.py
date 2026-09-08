@@ -2297,17 +2297,138 @@ else:
 """),
 
 md("## B4. Thử trên file bất kỳ + lưu mô hình"),
-code("""
-import glob
-
+code('''
 if DO_TRAIN:
-    # Bất kỳ engine nào có trong corpus — cứng nhắc "piper" là rỗng khi TTS tắt.
-    mau = sorted(glob.glob("/kaggle/working/corpus/fake/*/*/*.wav"))[:5]
-    mau += sorted(glob.glob("/kaggle/working/corpus/real/*/*/*.wav"))[:5]
-    run("detect", *mau)
+    from aidetector.config import Config
+    from aidetector.corpus.manifest import Manifest
+
+    # Chọn mẫu qua MANIFEST, không glob theo cây thư mục: `path` là khoá tra cứu duy
+    # nhất của một bản ghi, còn hình dạng cây thì đã đổi một lần (`real/` từ gốc corpus
+    # vào trong `<bộ>/`) — glob cứng thì lần đổi sau ô này im lặng chấm 0 file, rồi
+    # `detect` chết vì thiếu tham số, ngay trước ô đóng gói mô hình.
+    _mf = Manifest.load(Config.load(CFG).get("paths.corpus", "corpus"), required=True)
+
+    def _mau(recs, n=5):
+        """n mẫu: ưu tiên split=test, trải vòng tròn qua các generator."""
+        # split=test là phần mô hình CHƯA thấy — chấm lại mẫu đã train thì điểm đẹp mà
+        # không nói lên gì. Corpus chưa chia tập thì lấy tất, còn hơn không có mẫu nào.
+        recs = sorted([r for r in recs if r.split == "test"] or recs, key=lambda r: r.path)
+        # Sắp theo path thì 5 mẫu đầu rơi hết vào một bộ/một engine, trong khi chính
+        # chênh lệch giữa các engine là thứ đáng nhìn (xem bảng by_generator ở B3).
+        theo_engine = {}
+        for r in recs:
+            theo_engine.setdefault(r.generator or "-", []).append(r)
+        ra = []
+        while len(ra) < n and any(theo_engine.values()):
+            for nhom in theo_engine.values():
+                if nhom and len(ra) < n:
+                    ra.append(nhom.pop(0))
+        return ra
+
+    _chon = _mau(_mf.fakes) + _mau(_mf.reals)
+    for _r in _chon:
+        print(f"  {_r.label:<4} {_r.generator or '-':<28} {_r.split or '-':<5} {_r.path}")
+    print()
+    run("detect", *[str(_mf.abs_path(r)) for r in _chon])
 else:
     skipped("thử detect — phiên này chưa huấn luyện mô hình nào")
+'''),
+
+md("""
+### B4b. Thử THỦ CÔNG — bấm nút, chọn file trên máy
+
+Ô trên chấm mẫu có sẵn trong corpus, tức chấm lại chính dữ liệu mô hình đã thấy. Ô này
+để thử file **của bạn**: bấm nút, chọn file trên máy, kết quả in ra ngay kèm trình phát
+để nghe lại.
+
+Mô hình nạp **một lần** rồi giữ trong kernel, nên mỗi file sau đó chấm trong khoảng một
+giây — thay vì ~30 giây nạp lại WavLM mỗi lượt `run("detect", ...)`. Chọn được nhiều
+file một lượt; định dạng nào `librosa` đọc được cũng nhận (wav, mp3, m4a, flac, ogg).
+
+Nếu Kaggle không hiện được widget, ô vẫn để lại hàm gọi tay từ một ô trống bất kỳ:
+
+    cham_diem("/kaggle/input/ten-dataset/a.wav")
 """),
+code('''
+if DO_TRAIN:
+    from pathlib import Path
+    from IPython.display import Audio, display
+
+    from aidetector.config import Config
+    from aidetector.detect import Detector
+
+    _CKPT = Path(Config.load(CFG).get("paths.checkpoints", "checkpoints")) / "best.pt"
+    _TAI_LEN = Path("/kaggle/working/thu_thu_cong")     # nơi ghi file tải lên
+    _TAI_LEN.mkdir(parents=True, exist_ok=True)
+
+    # Nạp một lần, giữ trong biến toàn cục của kernel: chạy lại ô này không nạp lại
+    # WavLM nữa. Vừa train ra checkpoint mới thì `del _DETECTOR` rồi chạy lại ô.
+    if "_DETECTOR" not in globals():
+        _DETECTOR = Detector(checkpoint=_CKPT)
+
+    def cham_diem(path):
+        """Chấm một file rồi in kết quả — dùng được cả khi widget không hiện."""
+        res = _DETECTOR.predict(path)
+        ten = Path(res["path"]).name
+        if "error" in res:
+            print(f"✖ {ten}: {res['error']}")
+            return res
+        diem = res["score_fake"]
+        thanh = "█" * round(diem * 30)
+        print(f"{'🔴 FAKE' if res['label'] == 'FAKE' else '🟢 REAL'}  {ten}")
+        print(f"   P(fake) = {diem:.3f}  |{thanh:<30}|  ngưỡng {res['threshold']:.3f}")
+        print(f"   {res['duration']}s · {res['n_chunks']} đoạn · từng đoạn: "
+              f"{res['chunk_scores']}")
+        if res.get("warning"):
+            print(f"   ⚠ {res['warning']}")
+        return res
+
+    try:
+        import ipywidgets as W
+    except ImportError:
+        W = None
+        print("⚠ Không có ipywidgets — gọi tay: cham_diem('/kaggle/input/…/a.wav')")
+
+    if W is not None:
+        _chon = W.FileUpload(accept="audio/*", multiple=True,
+                             description="Chọn file audio",
+                             layout=W.Layout(width="240px"))
+        _khung = W.Output()
+
+        def _lay_file(gia_tri):
+            """ipywidgets 8 trả tuple[dict], bản 7 trả dict[tên] — về một dạng chung."""
+            if isinstance(gia_tri, dict):
+                return [(ten, m["content"]) for ten, m in gia_tri.items()]
+            return [(m["name"], m["content"]) for m in gia_tri]
+
+        def _xoa_lua_chon():
+            """Xoá lựa chọn, để chọn LẠI đúng file đó vẫn kích hoạt được lần nữa."""
+            try:
+                _chon.value = {} if isinstance(_chon.value, dict) else ()
+                _chon._counter = 0          # chỉ có ở ipywidgets 7
+            except Exception:
+                pass
+
+        def _khi_chon(_):
+            files = _lay_file(_chon.value)
+            if not files:                   # gồm cả lượt tự gọi sau khi xoá lựa chọn
+                return
+            with _khung:
+                _khung.clear_output()
+                for ten, noi_dung in files:
+                    dich = _TAI_LEN / Path(ten).name
+                    dich.write_bytes(noi_dung)
+                    # File hỏng thì KHÔNG dựng trình phát: `Audio` cũng đọc file, nó
+                    # ném lỗi ở đây là mất luôn các file còn lại trong lượt chọn.
+                    if "error" not in cham_diem(dich):
+                        display(Audio(str(dich)))
+            _xoa_lua_chon()
+
+        _chon.observe(_khi_chon, names="value")
+        display(W.VBox([_chon, _khung]))
+else:
+    skipped("thử detect thủ công")
+'''),
 code("""
 import shutil
 from pathlib import Path
