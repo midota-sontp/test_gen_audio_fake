@@ -525,6 +525,23 @@ def test_manual_detect_loads_the_model_once(notebook_code):
     )
 
 
+def test_every_dataset_push_uploads_subfolders(notebook_code):
+    """Thiếu `--dir-mode` là kho nhận đúng file ở tầng gốc, mà lệnh vẫn trả mã 0.
+
+    Mặc định của CLI Kaggle là `skip`: nó bỏ qua mọi thư mục con rồi báo thành công.
+    Đã cắn một lần thật — kho mô hình chỉ có `model-info.json`, `checkpoints/` và
+    `reports/` không bao giờ lên, và không log nào nói gì. Cây corpus cũng cùng cảnh:
+    `<bộ>/metadata.csv` là thư mục, chỉ `corpus.zip` ở tầng gốc là thoát.
+    """
+    import re
+
+    lenh = [m.group(0) for m in re.finditer(
+        r'\[\s*"datasets",\s*"(?:version|create)"[^]]*\]', notebook_code)]
+    assert lenh, "không thấy lệnh đẩy dataset nào — regex lệch với ô đẩy?"
+    thieu = [l for l in lenh if "dir_mode" not in l]
+    assert not thieu, f"lệnh đẩy không có --dir-mode: {thieu}"
+
+
 def _sync_script(notebook) -> str:
     """Dựng lại sync_corpus.py từ f-string lồng trong ô A2b."""
     import textwrap

@@ -1672,14 +1672,19 @@ SYNC_SCRIPT.write_text(textwrap.dedent(f'''
         print(f"[{{time.strftime('%H:%M:%S')}}] gói xong {{size:.2f}} GB"
               f" trong {{time.time() - started:.0f}}s — {{note}}")
 
-        add_version = ["datasets", "version", "-p", str(STAGE), "-m", note]
+        # Mặc định của CLI Kaggle là `--dir-mode skip`: nó bỏ qua thư mục con mà vẫn
+        # trả mã 0. Staging này có `<bộ>/metadata.csv` là thư mục, nên thiếu cờ đó thì
+        # manifest-để-rời-ngoài-zip không bao giờ lên kho — A1b mất đường đọc tiến độ mà
+        # không phải tải cả GB. `corpus.zip` ở tầng gốc thì vẫn lên, nên lỗi này im lặng.
+        dir_mode = ["--dir-mode", "zip"]
+        add_version = ["datasets", "version", "-p", str(STAGE), "-m", note, *dir_mode]
         if not KEEP_OLD:
             add_version.append("--delete-old-versions")
 
         # `version` cho dataset đã có, `create` cho lần đầu — thử lần lượt, đừng đoán.
         for argv, what in (
             (add_version, "thêm version"),
-            (["datasets", "create", "-p", str(STAGE)], "tạo mới"),
+            (["datasets", "create", "-p", str(STAGE), *dir_mode], "tạo mới"),
         ):
             r = subprocess.run(["kaggle", *argv], capture_output=True, text=True)
             if r.returncode == 0:
@@ -2522,10 +2527,18 @@ else:
 
     _note = (f"EER {_tong['eer'] * 100:.2f}% · {_meta['backbone']['name']}"
              f" · bộ {', '.join(sorted(NGUON_DA_CO)) or '?'}")
+    # `--dir-mode zip` là BẮT BUỘC, không phải tinh chỉnh: mặc định của CLI Kaggle là
+    # `skip`, tức nó ÂM THẦM bỏ qua mọi thư mục con và vẫn trả về mã 0. Staging này có
+    # `checkpoints/` và `reports/` là thư mục, nên thiếu cờ đó thì kho chỉ nhận đúng
+    # `model-info.json` — một dataset "đẩy thành công" mà không có mô hình trong đó.
+    # `zip` thì Kaggle tự giải nén lại thành cây như cũ (xem A1b), nên đường dẫn không đổi.
+    _dir_mode = ["--dir-mode", "zip"]
+
     # `version` cho kho đã có, `create` cho lần đầu — thử lần lượt, đừng đoán.
     for _argv, _viec in (
-        (["datasets", "version", "-p", str(STAGE_MODEL), "-m", _note], "thêm version"),
-        (["datasets", "create", "-p", str(STAGE_MODEL)], "tạo mới"),
+        (["datasets", "version", "-p", str(STAGE_MODEL), "-m", _note, *_dir_mode],
+         "thêm version"),
+        (["datasets", "create", "-p", str(STAGE_MODEL), *_dir_mode], "tạo mới"),
     ):
         _r = subprocess.run(["kaggle", *_argv], capture_output=True, text=True)
         if _r.returncode == 0:
