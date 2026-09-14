@@ -129,7 +129,9 @@ def dat_che_do(cells: list[dict], part: str, file_kia: str) -> None:
           'MODE = "both"\n')
     lam = "phần A — tạo dataset" if part == DATASET else "phần B — huấn luyện"
     moi = (f"# File này chạy {lam}. Phần còn lại ở\n"
-           f"# {file_kia} — cùng payload, cùng ô A1b.\n",
+           f"# {file_kia} — cùng payload, cùng ô A1b.\n"
+           + ('# Chỉ muốn thử mô hình đã có trên file lẻ: đổi thành "test" — bỏ hết\n'
+              "# stage, bỏ cả đòi hỏi corpus, chỉ ô B4b chạy.\n" if part == TRAIN else ""),
            f'MODE = "{part}"\n')
     thay = 0
     for cell in cells:
@@ -392,10 +394,15 @@ TTS_ENGINES = []
 # Hai giá trị, một cho mỗi file — không còn "both": phần A và phần B nằm ở hai notebook,
 # nên "một phiên chạy cả hai" là chuyện không tồn tại nữa. Vẫn kiểm, vì MODE sai mà chạy
 # tiếp im lặng là bỏ cả phiên GPU.
-if MODE not in ("dataset", "train"):
-    raise SystemExit(f'MODE={MODE!r} không hợp lệ — "dataset" hoặc "train".')
+if MODE not in ("dataset", "train", "test"):
+    raise SystemExit(f'MODE={MODE!r} không hợp lệ — "dataset", "train" hoặc "test".')
 MAKE_DATASET = MODE == "dataset"
 DO_TRAIN = MODE == "train"
+# "test" = CHỈ thử mô hình đã có trên file lẻ: không corpus, không stage nào, không GPU.
+# Nó là tập con của "train" — train xong mà thử ngay trong phiên đó là chuyện đương nhiên
+# — nên `DO_DETECT` bật ở CẢ HAI, còn `DO_TRAIN` thì không. Ở MODE="test" mô hình tới từ
+# Input (ô B4b tự dò), vì `/kaggle/working` của phiên train cũ đã bị xoá cùng phiên đó.
+DO_DETECT = MODE in ("train", "test")
 
 # Nói rõ vì sao một ô không làm gì: Run All mà im lặng thì log không đọc được.
 def skipped(what):
@@ -420,7 +427,7 @@ pip("-U", "kaggle", ok_to_fail=True)
 if not MAKE_DATASET:
     # Không sinh audio thì không cần engine nào. WavLM chạy được trên cả hai nhánh
     # transformers nên cứ để bản Kaggle cài sẵn — đây là chế độ cài nhẹ nhất.
-    print("Chỉ huấn luyện — không cài engine sinh audio.")
+    print(f"MODE={MODE!r} — không cài engine sinh audio.")
 elif TTS_ENGINES:
     pip("piper-tts", ok_to_fail=True)
     pip("git+https://github.com/iamdinhthuan/Kokoro-Vietnamese.git", ok_to_fail=True)
@@ -872,7 +879,9 @@ else:
         if _m0.prune_missing():
             _m0.save()
 
-if not _da_nap:
+if not _da_nap and MODE == "test":
+    skipped('nạp corpus — MODE="test" chấm file lẻ bằng mô hình đã có, không cần corpus')
+elif not _da_nap:
     # DỪNG HẲN nếu dataset đã có dữ liệu mà phiên này không nạp được. Đi tiếp nghĩa là
     # ingest lại từ đầu rồi đẩy một corpus 0 fake ĐÈ LÊN công của các phiên trước —
     # `datasets version` là ảnh chụp toàn bộ thư mục, không phải cộng dồn.
@@ -971,13 +980,14 @@ if _cac_meta(CORPUS):
           f" ({100 * _xong / max(len(_pool), 1):.0f}%) · còn {_con} mẫu"
           f" ≈ {_con * 3.7 / 3600:.1f} giờ trên T4")
     # Chỉ-huấn-luyện thì corpus không phải tiện lợi mà là điều kiện sống.
-    if not MAKE_DATASET and not (_m.reals and _m.fakes):
+    if DO_TRAIN and not (_m.reals and _m.fakes):
         raise SystemExit(f"Corpus chỉ có một lớp (real={len(_m.reals)}, fake={len(_m.fakes)})"
                          " — phân loại real/fake cần cả hai.")
-elif not MAKE_DATASET:
+elif DO_TRAIN:
     raise SystemExit(
         f"MODE={MODE!r} nhưng không bung được corpus nào — không có gì để huấn luyện.\\n"
-        f"Add Input → Datasets → {DATASET_ID} rồi chạy lại ô này."
+        f"Add Input → Datasets → {DATASET_ID} rồi chạy lại ô này.\\n"
+        'Chỉ muốn thử mô hình đã có thì đặt MODE = "test" ở ô setup.'
     )
 """),
 
@@ -2353,16 +2363,58 @@ file một lượt; định dạng nào `librosa` đọc được cũng nhận (
 Nếu Kaggle không hiện được widget, ô vẫn để lại hàm gọi tay từ một ô trống bất kỳ:
 
     cham_diem("/kaggle/input/ten-dataset/a.wav")
+
+#### Chỉ test, không train lại: `MODE = "test"`
+
+Mô hình không nhất thiết phải của phiên này. Ô tìm theo thứ tự
+`/kaggle/working/checkpoints/best.pt` → `/kaggle/input/**/best.pt` (ưu tiên kho khớp
+`MODEL_STORE_ID`), nên một phiên chỉ-test chỉ cần:
+
+1. **Add Input** → Datasets → kho `MODEL_STORE_ID`. Không cần corpus.
+2. Ô setup: `MODE = "test"`.
+3. **Run All.**
+
+`MODE="test"` tắt `DO_TRAIN` nên mọi stage bỏ qua, và A1b thôi đòi corpus — không phải
+nhớ chạy ô nào, bỏ ô nào. Ô in ra nó chấm bằng checkpoint nào và bỏ qua kho nào: mount
+vài kho rồi chấm bằng mô hình sai là kiểu lỗi không có triệu chứng.
 """),
 code('''
-if DO_TRAIN:
+if DO_DETECT:
+    import glob
+    import json
     from pathlib import Path
-    from IPython.display import Audio, display
+    from IPython.display import Audio, Image, display
 
     from aidetector.config import Config
     from aidetector.detect import Detector
 
+    # Checkpoint của phiên này trước; không có thì tới kho mô hình đang mount. Nhờ nhánh
+    # thứ hai, một phiên CHỈ TEST không phải train lại: Add Input kho mô hình rồi chạy
+    # đúng ô này (ô B1/B2 bỏ trắng, ô A1b cũng không cần — đây là ô duy nhất trong phần
+    # B không đọc corpus).
     _CKPT = Path(Config.load(CFG).get("paths.checkpoints", "checkpoints")) / "best.pt"
+    _TU_INPUT = not _CKPT.exists()
+    if _TU_INPUT:
+        # Kaggle mount hai kiểu (`<slug>/…` và `datasets/<owner>/<slug>/…`) và tự giải
+        # nén zip, nên chỉ dò theo tên file — đường dẫn tới nó thì không đoán được.
+        _co = sorted(glob.glob("/kaggle/input/**/best.pt", recursive=True))
+        # Kho khớp MODEL_STORE_ID trước: mount vài kho cùng lúc mà chấm bằng mô hình
+        # nào cũng được là kiểu sai im lặng nhất — điểm vẫn ra, chỉ là của mô hình khác.
+        _uu_tien = [p for p in _co if MODEL_STORE_ID.split("/")[-1] in p]
+        if not _co:
+            raise SystemExit(
+                f"Không có {_CKPT} mà cũng không thấy best.pt nào trong /kaggle/input.\\n"
+                f"Phiên chỉ-test: Add Input → Datasets → {MODEL_STORE_ID} rồi chạy lại ô này.\\n"
+                "Chưa từng đẩy mô hình lên đó thì phải chạy B1→B5 một lượt trước."
+            )
+        _CKPT = Path((_uu_tien or _co)[0])
+        print(f"Dùng mô hình từ Input: {_CKPT}")
+        # Nói rõ những kho KHÔNG được chọn: mount vài kho mà im lặng chấm bằng một
+        # trong số đó là kiểu sai không có triệu chứng nào.
+        _khac = [p for p in _co if p != str(_CKPT)]
+        if _khac:
+            print("  bỏ qua: " + ", ".join(_khac))
+
     _TAI_LEN = Path("/kaggle/working/thu_thu_cong")     # nơi ghi file tải lên
     _TAI_LEN.mkdir(parents=True, exist_ok=True)
 
@@ -2370,6 +2422,67 @@ if DO_TRAIN:
     # WavLM nữa. Vừa train ra checkpoint mới thì `del _DETECTOR` rồi chạy lại ô.
     if "_DETECTOR" not in globals():
         _DETECTOR = Detector(checkpoint=_CKPT)
+
+    # Mô hình tới từ kho thì phiên này KHÔNG có reports/ của riêng nó — ô B3 bỏ qua vì
+    # không có gì để đọc. Nên đây là chỗ duy nhất người test biết mình đang cầm cái gì:
+    # học trên bộ nào, engine nào, đo được bao nhiêu, ngưỡng nào chia REAL/FAKE, và
+    # file dài bao nhiêu thì hợp chuẩn. Chấm một file mà không biết mấy điều đó thì con
+    # số hiện ra không đọc được.
+    #
+    # Chỉ in khi checkpoint tới từ Input: phiên train vừa xem đúng những bảng này ở B3.
+    def _the_mo_hinh(ckpt):
+        # B5 đẩy nguyên `checkpoints/`, `reports/`, `model-info.json` — nên gốc kho là
+        # thư mục cha của `checkpoints/`. Đừng suy ra bằng `parent.parent` vô điều kiện:
+        # best.pt nằm thẳng ở gốc kho thì phép đó trỏ ra ngoài, sang cả kho khác.
+        goc = ckpt.parent.parent if ckpt.parent.name == "checkpoints" else ckpt.parent
+        print(f"\\n{'-' * 74}\\nMÔ HÌNH ĐANG DÙNG · kho {goc.name}")
+        print(f"  checkpoint : {ckpt}")
+        print(f"  chuẩn audio: {_DETECTOR.spec.describe()}")
+        print(f"  ngưỡng     : {_DETECTOR.threshold:.4f} — điểm ≥ ngưỡng là FAKE")
+
+        _tep = goc / "model-info.json"
+        if _tep.exists():
+            _i = json.loads(_tep.read_text(encoding="utf-8"))
+            _bb, _corpus = _i.get("backbone", {}), _i.get("corpus", {})
+            print(f"  đo lúc train: EER {_i['eer'] * 100:.2f}%"
+                  f" · ROC-AUC {_i['roc_auc']:.4f} · min-DCF {_i['min_dcf']:.4f}"
+                  f" · n={_i['n_test']} · epoch {_i.get('best_epoch', '?')}")
+            print(f"  backbone   : {_bb.get('name')} ({_bb.get('checkpoint')})"
+                  f" lớp {_bb.get('output_layer')} · head {_i.get('head', {}).get('head')}")
+            # Học trên bộ nào là câu quyết định đọc kết quả thủ công thế nào: mô hình chỉ
+            # thấy một bộ giọng thật và một engine thì file ngoài vùng đó là ngoại suy.
+            _bo = _corpus.get("sources", {})
+            print("  học trên   : "
+                  + (" · ".join(f"{_k} ({_v} real)" for _k, _v in sorted(_bo.items())) or "?")
+                  + f"  ← kho corpus {_corpus.get('store', '?')}")
+        else:
+            print(f"  (kho không có model-info.json — chỉ có checkpoint)")
+
+        _mt = goc / "reports" / "metrics.json"
+        if not _mt.exists():
+            print("  (kho không có reports/metrics.json — không có bảng chi tiết)")
+            return
+        _m = json.loads(_mt.read_text(encoding="utf-8"))
+        print("\\n  Engine mô hình ĐÃ THẤY, và bắt được bao nhiêu:")
+        for _ten, _e in _m.get("by_generator", {}).items():
+            if "eer_vs_all_real" in _e:
+                print(f"    {_ten:<40} n={_e['n']:>5}"
+                      f" · EER {_e['eer_vs_all_real'] * 100:6.2f}%"
+                      f" · bắt được {_e['detection_rate'] * 100:5.1f}%")
+            elif "false_alarm_rate" in _e:
+                print(f"    {_ten:<40} n={_e['n']:>5}"
+                      f" · báo nhầm {_e['false_alarm_rate'] * 100:5.1f}%")
+        print("\\n  Clean vs augmented — lệch nhiều là mô hình bám dấu vết kênh/codec"
+              " hơn là bám giọng:")
+        for _ten, _e in _m.get("by_condition", {}).items():
+            print(f"    {_ten:<12} n={_e['n']:>5} · điểm trung bình {_e['mean_score']:.3f}")
+        print("-" * 74)
+        for _anh in ("curves.png", "confusion_matrix.png"):
+            if (goc / "reports" / _anh).exists():
+                display(Image(str(goc / "reports" / _anh)))
+
+    if _TU_INPUT:
+        _the_mo_hinh(_CKPT)
 
     def cham_diem(path):
         """Chấm một file rồi in kết quả — dùng được cả khi widget không hiện."""
@@ -2531,7 +2644,8 @@ else:
     # `skip`, tức nó ÂM THẦM bỏ qua mọi thư mục con và vẫn trả về mã 0. Staging này có
     # `checkpoints/` và `reports/` là thư mục, nên thiếu cờ đó thì kho chỉ nhận đúng
     # `model-info.json` — một dataset "đẩy thành công" mà không có mô hình trong đó.
-    # `zip` thì Kaggle tự giải nén lại thành cây như cũ (xem A1b), nên đường dẫn không đổi.
+    # Đã cắn một lần thật. `zip` thì Kaggle tự giải nén lại thành cây như cũ (xem A1b),
+    # nên đường dẫn `checkpoints/best.pt` không đổi.
     _dir_mode = ["--dir-mode", "zip"]
 
     # `version` cho kho đã có, `create` cho lần đầu — thử lần lượt, đừng đoán.

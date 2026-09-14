@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import types
 import zipfile
 from pathlib import Path
 
@@ -530,8 +531,7 @@ def test_every_dataset_push_uploads_subfolders(notebook_code):
 
     Mặc định của CLI Kaggle là `skip`: nó bỏ qua mọi thư mục con rồi báo thành công.
     Đã cắn một lần thật — kho mô hình chỉ có `model-info.json`, `checkpoints/` và
-    `reports/` không bao giờ lên, và không log nào nói gì. Cây corpus cũng cùng cảnh:
-    `<bộ>/metadata.csv` là thư mục, chỉ `corpus.zip` ở tầng gốc là thoát.
+    `reports/` không bao giờ lên, và không log nào nói gì.
     """
     import re
 
@@ -540,6 +540,180 @@ def test_every_dataset_push_uploads_subfolders(notebook_code):
     assert lenh, "không thấy lệnh đẩy dataset nào — regex lệch với ô đẩy?"
     thieu = [l for l in lenh if "dir_mode" not in l]
     assert not thieu, f"lệnh đẩy không có --dir-mode: {thieu}"
+
+
+# ------------------------------------- phiên chỉ-test: mô hình lấy từ Input, không train lại
+def _run_manual_cell(notebook, tmp_path, ckpt_dir, mount):
+    """Chạy ô B4b với ipywidgets/Detector giả; trả về checkpoint nó chọn."""
+    # `/kaggle` là read-only ngoài Kaggle, mà ô này mkdir thư mục nhận file tải lên.
+    src = (_cell_src(notebook, "FileUpload(")
+           .replace("/kaggle/input", str(mount))
+           .replace("/kaggle/working", str(tmp_path / "working")))
+    cfg = tmp_path / "cfg_thu.yaml"
+    cfg.write_text(yaml.safe_dump({"paths": {"checkpoints": str(ckpt_dir)}}), encoding="utf-8")
+
+    chon: dict = {}
+    W = types.ModuleType("ipywidgets")
+    W.FileUpload = type("FileUpload", (), {
+        "__init__": lambda s, **kw: setattr(s, "value", ()),
+        "observe": lambda s, fn, names=None: None})
+    W.Output = type("Output", (), {"clear_output": lambda s: None})
+    W.Layout = type("Layout", (), {"__init__": lambda s, **kw: None})
+    W.VBox = type("VBox", (), {"__init__": lambda s, con: None})
+    def _dung(s, checkpoint=None):
+        chon.update(ckpt=str(checkpoint))
+        s.spec = types.SimpleNamespace(describe=lambda: "16000 Hz · 3-10s")
+        s.threshold = 0.8575
+
+    det = types.ModuleType("aidetector.detect")
+    det.Detector = type("Detector", (), {"__init__": _dung})
+    disp = types.ModuleType("IPython.display")
+    disp.Audio = disp.Image = lambda p: p
+    disp.display = lambda x: None
+    ipy = types.ModuleType("IPython")
+    ipy.display = disp
+
+    cu = {k: sys.modules.get(k) for k in
+          ("ipywidgets", "aidetector.detect", "IPython", "IPython.display")}
+    sys.modules.update({"ipywidgets": W, "aidetector.detect": det,
+                        "IPython": ipy, "IPython.display": disp})
+    try:
+        exec(compile(src, "B4b", "exec"),  # noqa: S102
+             {"DO_DETECT": True, "CFG": str(cfg), "skipped": lambda _: None,
+              "MODEL_STORE_ID": "chu/kho-mo-hinh"})
+    finally:
+        for k, v in cu.items():
+            sys.modules[k] = v if v is not None else sys.modules.pop(k, None)
+    return chon.get("ckpt")
+
+
+def test_manual_test_falls_back_to_a_mounted_model(notebook, tmp_path):
+    """Phiên chỉ-test: mô hình tới từ Input, `/kaggle/working` thì trống."""
+    mount = tmp_path / "input"
+    (mount / "kho-mo-hinh" / "checkpoints").mkdir(parents=True)
+    (mount / "kho-mo-hinh" / "checkpoints" / "best.pt").touch()
+
+    got = _run_manual_cell(notebook, tmp_path, tmp_path / "trong", mount)
+    assert got == str(mount / "kho-mo-hinh" / "checkpoints" / "best.pt")
+
+
+def test_manual_test_prefers_the_model_store_over_other_mounts(notebook, tmp_path):
+    """Mount vài kho mà chấm bằng kho nào cũng được là sai KHÔNG có triệu chứng."""
+    mount = tmp_path / "input"
+    for ten in ("aaa-kho-khac", "kho-mo-hinh"):        # kho lạ đứng trước theo abc
+        (mount / ten / "checkpoints").mkdir(parents=True)
+        (mount / ten / "checkpoints" / "best.pt").touch()
+
+    got = _run_manual_cell(notebook, tmp_path, tmp_path / "trong", mount)
+    assert got == str(mount / "kho-mo-hinh" / "checkpoints" / "best.pt")
+
+
+def test_manual_test_prefers_this_session_over_any_mount(notebook, tmp_path):
+    """Vừa train xong thì phải chấm bằng checkpoint MỚI, không phải bản cũ trên Input."""
+    mount = tmp_path / "input"
+    (mount / "kho-mo-hinh" / "checkpoints").mkdir(parents=True)
+    (mount / "kho-mo-hinh" / "checkpoints" / "best.pt").touch()
+    phien_nay = tmp_path / "checkpoints"
+    phien_nay.mkdir()
+    (phien_nay / "best.pt").touch()
+
+    assert _run_manual_cell(notebook, tmp_path, phien_nay, mount) == str(phien_nay / "best.pt")
+
+
+def test_manual_test_says_what_to_add_when_there_is_no_model(notebook, tmp_path):
+    """Không có mô hình ở đâu cả thì phải nói rõ Add Input cái gì, đừng ném KeyError."""
+    with pytest.raises(SystemExit) as err:
+        _run_manual_cell(notebook, tmp_path, tmp_path / "trong", tmp_path / "input")
+    assert "chu/kho-mo-hinh" in str(err.value) and "Add Input" in str(err.value)
+
+
+def _kho_mo_hinh(goc: Path, info=True, reports=True, phang=False) -> Path:
+    """Kho mô hình như B5 đẩy lên: checkpoints/ + reports/ + model-info.json."""
+    ckpt = goc if phang else goc / "checkpoints"
+    ckpt.mkdir(parents=True, exist_ok=True)
+    (ckpt / "best.pt").touch()
+    if info:
+        (goc / "model-info.json").write_text(json.dumps({
+            "eer": 0.007471, "roc_auc": 0.999826, "min_dcf": 0.016676,
+            "threshold": 0.857531, "n_test": 3056, "best_epoch": 28,
+            "backbone": {"name": "wavlm", "checkpoint": "microsoft/wavlm-base-plus",
+                         "output_layer": 6},
+            "head": {"head": "mlp"},
+            "corpus": {"sources": {"vivos": 8246}, "store": "ai/kho-corpus-v3"},
+        }), encoding="utf-8")
+    if reports:
+        (goc / "reports").mkdir(parents=True, exist_ok=True)
+        (goc / "reports" / "metrics.json").write_text(json.dumps({
+            "by_generator": {
+                "(real)": {"n": 1528, "false_alarm_rate": 0.0072},
+                "omnivoice:vi": {"n": 1528, "eer_vs_all_real": 0.0075,
+                                 "detection_rate": 0.9915}},
+            "by_condition": {"clean": {"n": 2100, "mean_score": 0.501},
+                             "augmented": {"n": 956, "mean_score": 0.488}},
+        }), encoding="utf-8")
+    return goc
+
+
+def test_test_mode_shows_which_model_it_is_scoring_with(notebook, tmp_path, capsys):
+    """Phiên chỉ-test không có reports/ riêng, nên thẻ mô hình là chỗ DUY NHẤT nói rõ
+    đang cầm mô hình nào — một điểm 0.9 không đọc được nếu không biết ngưỡng là 0.86,
+    mô hình chỉ học trên vivos, và nó chỉ từng thấy đúng một engine."""
+    mount = tmp_path / "input"
+    _kho_mo_hinh(mount / "kho-mo-hinh")
+
+    _run_manual_cell(notebook, tmp_path, tmp_path / "trong", mount)
+    ra = capsys.readouterr().out
+
+    assert "0.8575" in ra, "không nói ngưỡng — điểm hiện ra thành vô nghĩa"
+    assert "16000 Hz · 3-10s" in ra, "không nói chuẩn audio, tức file nào là hợp lệ"
+    assert "EER 0.75%" in ra and "epoch 28" in ra
+    assert "vivos (8246 real)" in ra and "ai/kho-corpus-v3" in ra
+    assert "omnivoice:vi" in ra and "99.2%" in ra, "thiếu bảng engine đã thấy"
+    assert "augmented" in ra and "0.488" in ra, "thiếu bảng clean vs augmented"
+
+
+def test_the_model_card_degrades_when_the_store_has_only_a_checkpoint(notebook, tmp_path,
+                                                                      capsys):
+    """Kho đẩy từ phiên cũ có thể thiếu info/reports — vẫn phải chấm được, và nói rõ thiếu."""
+    mount = tmp_path / "input"
+    _kho_mo_hinh(mount / "kho-mo-hinh", info=False, reports=False)
+
+    got = _run_manual_cell(notebook, tmp_path, tmp_path / "trong", mount)
+    ra = capsys.readouterr().out
+    assert got, "thiếu model-info.json mà không chấm được nữa là đổi thứ yếu thành thiết yếu"
+    assert "không có model-info.json" in ra and "không có reports/metrics.json" in ra
+
+
+def test_the_model_card_never_reads_a_neighbouring_store(notebook, tmp_path, capsys):
+    """`best.pt` nằm thẳng ở gốc kho: suy gốc bằng `parent.parent` là trỏ ra /kaggle/input,
+    rồi đọc thông tin của MỘT KHO KHÁC và trình bày nó như của mô hình này."""
+    mount = tmp_path / "input"
+    _kho_mo_hinh(mount / "kho-mo-hinh", info=False, reports=False, phang=True)
+    # mồi: đặt đúng chỗ mà `parent.parent` sẽ nhìn
+    (mount / "model-info.json").write_text(json.dumps({
+        "eer": 0.5, "roc_auc": 0.5, "min_dcf": 0.9, "n_test": 1, "best_epoch": 1,
+        "backbone": {"name": "MO-HINH-KHAC"}, "head": {"head": "x"},
+        "corpus": {"sources": {"bo-la": 1}, "store": "ai/kho-la"},
+    }), encoding="utf-8")
+
+    _run_manual_cell(notebook, tmp_path, tmp_path / "trong", mount)
+    ra = capsys.readouterr().out
+    assert "MO-HINH-KHAC" not in ra and "ai/kho-la" not in ra, ra
+    assert "không có model-info.json" in ra
+
+
+def test_training_mode_prints_no_model_card(notebook, tmp_path, capsys):
+    """MODE="train" phải y như cũ: B3 vừa in đúng những bảng đó, lặp lại là nhiễu."""
+    mount = tmp_path / "input"
+    _kho_mo_hinh(mount / "kho-mo-hinh")
+    phien_nay = tmp_path / "checkpoints"
+    phien_nay.mkdir()
+    (phien_nay / "best.pt").touch()
+
+    assert _run_manual_cell(notebook, tmp_path, phien_nay, mount) == str(phien_nay / "best.pt")
+    ra = capsys.readouterr().out
+    assert "MÔ HÌNH ĐANG DÙNG" not in ra, ra
+    assert "EER" not in ra, ra
 
 
 def _sync_script(notebook) -> str:
@@ -601,19 +775,24 @@ def test_tts_is_off_but_still_one_switch_away(notebook_code):
 # mọi ô dùng chung phải tôn trọng nó: Save & Run All là cách dùng thật, nên "bỏ qua bằng
 # tay" không phải một lựa chọn.
 def _mode_block(notebook_code: str) -> str:
-    """Đoạn suy ra MAKE_DATASET/DO_TRAIN — lấy ra để CHẠY, chứ không chỉ khớp chuỗi."""
+    """Đoạn suy ra MAKE_DATASET/DO_TRAIN/DO_DETECT — lấy ra để CHẠY, không chỉ khớp chuỗi."""
     start = notebook_code.index("if MODE not in")
-    return notebook_code[start:notebook_code.index("\n", notebook_code.index("DO_TRAIN = ", start))]
+    cuoi = notebook_code.index("DO_DETECT = ", start)
+    return notebook_code[start:notebook_code.index("\n", cuoi)]
 
 
 @pytest.mark.parametrize("mode,phases", [
-    ("dataset", (True, False)),
-    ("train", (False, True)),
+    #                     (MAKE_DATASET, DO_TRAIN, DO_DETECT)
+    ("dataset",            (True,  False, False)),
+    ("train",              (False, True,  True)),
+    # "test" là tập con của "train": chỉ thử mô hình đã có, không stage nào.
+    ("test",               (False, False, True)),
 ])
 def test_mode_decides_which_phases_run(notebook_code, mode, phases):
     namespace = {"MODE": mode}
     exec(_mode_block(notebook_code), namespace)  # noqa: S102 — mã do chính repo sinh
-    assert (namespace["MAKE_DATASET"], namespace["DO_TRAIN"]) == phases
+    assert (namespace["MAKE_DATASET"], namespace["DO_TRAIN"],
+            namespace["DO_DETECT"]) == phases
 
 
 def test_a_misspelled_mode_stops_the_notebook(notebook_code):
@@ -624,7 +803,9 @@ def test_a_misspelled_mode_stops_the_notebook(notebook_code):
 
 def test_mode_is_set_before_anything_reads_it(notebook):
     """MODE và `skipped()` phải nằm ở ô cài thư viện: nó quyết định cài gói nào."""
-    setup = _cells_with(notebook, "MODE = ")
+    setup = [i for i, c in enumerate(notebook["cells"])
+             if c["cell_type"] == "code"
+             and any(l.startswith("MODE = ") for l in c["source"])]
     assert len(setup) == 1, "MODE phải khai báo đúng một chỗ"
     assert "def skipped(" in "".join(notebook["cells"][setup[0]]["source"])
 
@@ -665,7 +846,10 @@ def test_corpus_restore_runs_in_every_mode(notebook):
 def test_train_only_refuses_an_empty_or_one_sided_corpus(notebook):
     """Không corpus, hoặc corpus thiếu một lớp, thì phần B chỉ là mấy giờ GPU đổ đi."""
     src = _cell_src(notebook, 'run("unpack"')
-    assert "if not MAKE_DATASET:" in src
+    # Gác bằng DO_TRAIN, không phải `not MAKE_DATASET`: MODE="test" cũng không tạo
+    # dataset, nhưng nó chấm file lẻ bằng mô hình có sẵn nên corpus là thứ nó không cần.
+    assert "elif DO_TRAIN:" in src
+    assert "if DO_TRAIN and not (_m.reals and _m.fakes):" in src
     assert src.count("raise SystemExit") >= 2, src
     assert "chỉ có một lớp" in src
 
@@ -740,6 +924,48 @@ def test_mode_gates_the_stages_that_actually_run(notebook, notebook_code, mode,
     called = _stages_that_run(notebook, notebook_code, mode, tmp_path)
     assert phai_chay <= called, f"MODE={mode} thiếu: {phai_chay - called}"
     assert not (khong_duoc_chay & called), f"MODE={mode} chạy thừa: {khong_duoc_chay & called}"
+
+
+def test_test_mode_runs_no_stage_at_all(notebook, notebook_code, tmp_path):
+    """MODE="test" chỉ chấm file lẻ bằng mô hình đã có — một stage lọt qua là mất phiên.
+
+    `split`/`augment`/`features` ghi đè lên corpus và features của phiên trước, còn
+    `train` thì mất hàng giờ GPU. Người đặt MODE="test" rồi Run All không chờ thứ đó.
+    """
+    assert _stages_that_run(notebook, notebook_code, "test", tmp_path) == set()
+
+
+def test_test_mode_does_not_demand_a_corpus(notebook, tmp_path):
+    """Chỉ thử mô hình thì corpus là thứ KHÔNG cần — A1b không được dừng phiên vì nó.
+
+    Với MODE="train" thì đúng ba cổng trong A1b dừng phiên khi không nạp được corpus, và
+    một trong số đó còn gọi `kaggle datasets files` — tức phiên chỉ-test vừa chết vô ích
+    vừa phải có token. MODE="test" phải đi qua sạch, chỉ nói là mình bỏ qua.
+    """
+    ns = _run_a1b(notebook, tmp_path, tmp_path / "input", make_dataset=False, mode="test")
+    assert ns["MODE"] == "test"
+
+    # Cùng hoàn cảnh đó, MODE="train" phải đi TIẾP vào đường tra Kaggle rồi dừng —
+    # không có nó thì phép trên chỉ chứng minh A1b im lặng với mọi MODE. Ở máy test
+    # không có binary `kaggle` nên nó chết ngay tại lệnh đó; trên Kaggle thì lệnh chạy
+    # và cổng bên dưới `raise SystemExit`. Cả hai đều là "không đi qua được".
+    with pytest.raises(FileNotFoundError, match="kaggle"):
+        _run_a1b(notebook, tmp_path, tmp_path / "input", make_dataset=False, mode="train")
+
+
+def test_test_mode_still_runs_the_manual_check(notebook, notebook_code, tmp_path):
+    """Ô B4b là ô DUY NHẤT của phần B chạy ở MODE="test" — nó là lý do mode đó tồn tại."""
+    src = _cell_src(notebook, "FileUpload(")
+    assert "if DO_DETECT:" in src, "ô thử thủ công vẫn gác bằng DO_TRAIN"
+
+    ns = {"MODE": "test"}
+    exec(_mode_block(notebook_code), ns)  # noqa: S102
+    assert ns["DO_DETECT"] and not ns["DO_TRAIN"]
+
+    mount = tmp_path / "input"
+    (mount / "kho-mo-hinh" / "checkpoints").mkdir(parents=True)
+    (mount / "kho-mo-hinh" / "checkpoints" / "best.pt").touch()
+    assert _run_manual_cell(notebook, tmp_path, tmp_path / "trong", mount)
 
 
 def test_the_two_files_together_run_the_whole_pipeline(notebook, notebook_code, tmp_path):
@@ -1126,13 +1352,16 @@ def _kho_mot_bo(mount, ten_bo, n=3):
     return m
 
 
-def _run_a1b(notebook, tmp_path, mounts, make_dataset, dataset_id="ai/kho-vivos"):
+def _run_a1b(notebook, tmp_path, mounts, make_dataset, dataset_id="ai/kho-vivos",
+             mode=None):
     """Chạy ô A1b thật, với /kaggle/input và /kaggle/working trỏ vào tmp_path."""
     work = tmp_path / "working"
     work.mkdir(parents=True, exist_ok=True)
     cell = _cell_src(notebook, 'run("unpack"')
     cell = cell.replace("/kaggle/working", str(work)).replace("/kaggle/input", str(mounts))
+    mode = mode or ("dataset" if make_dataset else "train")
     ns = {"DATASET_ID": dataset_id, "MAKE_DATASET": make_dataset,
+          "MODE": mode, "DO_TRAIN": mode == "train", "skipped": lambda what: None,
           "CFG": "configs/kaggle.yaml", "run": lambda *a: None}
     exec(compile(cell, "a1b", "exec"), ns)
     return ns
