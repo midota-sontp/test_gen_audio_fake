@@ -75,6 +75,20 @@ services:
       - corpus-data:/data
     command: ["--out=/data/out"]
 
+  # Đẩy cây dataset cuối lên Kaggle thành MỘT dataset.
+  # docker compose run --rm push-dataset
+  push-dataset:
+    image: ai-detector/corpus-builder:latest
+    entrypoint: ["python", "/app/scripts/push_dataset.py"]
+    environment:
+      KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
+      KAGGLE_KEY: ${KAGGLE_KEY:-}
+      KAGGLE_DATASET_SLUG: ${KAGGLE_DATASET_SLUG:-vietnamese-audio-deepfake-demo}
+    volumes:
+      - corpus-data:/data
+    command: ["--dataset=/data/dataset/vietnamese-audio-deepfake-demo"]
+
   # Kiểm tra độc lập audio đã ghi: docker compose run --rm audit
   audit:
     image: ai-detector/corpus-builder:latest

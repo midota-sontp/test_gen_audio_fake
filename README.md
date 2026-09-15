@@ -23,6 +23,7 @@ $C up -d build-corpus dashboard         # 1. REAL — chạy nền, kèm UI :800
 $C run --rm build-fake --probe          # 2. kiểm tra tên cột VieNeu trước
 $C run --rm build-fake                  #    FAKE — lấy đúng bằng số REAL
 $C run --rm export --verify             # 3. bung ra cây dataset cuối
+$C run --rm push-dataset                #    đẩy lên Kaggle — MỘT dataset
 ```
 
 Thứ tự bắt buộc: FAKE cần biết số REAL nên phải chạy **sau**, và chỉ chạy khi
@@ -156,20 +157,6 @@ sha256_raw, sha256_norm, shard, bytes`.
 `split` để `null` — chia train/val/test speaker-disjoint là bước sau, làm trên
 metadata chứ không di chuyển file.
 
-## Theo dõi tiến độ
-
-Hai cách, cùng đọc một nguồn dữ liệu:
-
-```bash
-$C up -d dashboard                   # web: http://<máy-docker>:8000, tự làm mới 5 giây
-$C run --rm monitor --watch=10       # terminal
-```
-
-Dashboard là một trang tĩnh `dashboard/index.html` + một API JSON `/api/progress`.
-Server **chỉ đọc**: sqlite mở ở chế độ read-only nên không đụng vào tiến độ của job,
-và mọi lỗi phía dashboard đều bị nuốt để không bao giờ làm sập job đang chạy.
-Đổi cổng bằng `DASHBOARD_PORT` trong `.env`.
-
 ## Phần FAKE — cân bằng với REAL
 
 VieNeu-TTS-140h là dataset **gated**: accept terms tại
@@ -282,33 +269,32 @@ dạng khác nhau, và script báo đúng lỗi này.
 Mọi lệnh động tới Kaggle đều chạy `kaggle quota` để **xác thực thật** trước khi
 bắt đầu, thay vì chỉ kiểm biến môi trường có tồn tại hay không.
 
-## Đồng bộ Kaggle — giới hạn cần biết
+## Đẩy lên Kaggle
 
-Kaggle **không có upload delta**: mỗi `datasets version` đẩy lại toàn bộ thư mục và
-mất vài phút tạo version. Đẩy thật sự mỗi 10 audio là bất khả thi. Pipeline chia ba nhịp:
-
-| Cái gì | Nhịp | Kích thước |
-|---|---|---|
-| Checkpoint xuống đĩa | **mỗi 10 audio** | — |
-| Dataset `…-index` (`progress.json` + `manifest.json`) | `--push-index-every` (mặc định 120 s) | vài KB |
-| Dataset `…-NNNN` (một shard) | `--push-shard-every` (mặc định 900 s) + khi shard đóng | ≤ `--shard-max-mb` (256 MB) |
-
-**Mỗi shard là một dataset Kaggle riêng** (`<slug>-0000`, `<slug>-0001`, …). Nhờ vậy
-mỗi lần đẩy chỉ tốn đúng một shard chứ không phải toàn bộ corpus đã tích luỹ — nếu
-gom hết vào một dataset thì lần đẩy cuối sẽ phải upload lại cả ~5 GB.
-
-Đẩy tay (job chạy với `--no-kaggle`, hoặc push lỗi giữa chừng):
+Dataset cuối là **một** dataset, đúng cây trong spec §12:
 
 ```bash
-$C run --rm push                    # đẩy tất cả shard chưa đẩy
-$C run --rm push --retry-failed     # chỉ shard chưa có dấu pushed_at
-$C run --rm push --only real_shard_0007
-$C run --rm push --index-only       # chỉ cập nhật file tiến độ
+$C run --rm export --verify     # bung shard thành file WAV rời + metadata
+$C run --rm push-dataset        # đẩy cả cây lên Kaggle
 ```
 
-Owner và slug lấy từ `KAGGLE_USERNAME` / `KAGGLE_SLUG` trong `docker/.env`.
-Dataset tạo ra là **private**; chỉ `--public` mới công khai — kiểm tra quyền
-redistribution của từng nguồn trước khi dùng cờ đó.
+Tên dataset lấy từ `KAGGLE_DATASET_SLUG` (mặc định `vietnamese-audio-deepfake-demo`),
+owner từ `KAGGLE_USERNAME`. Tạo ra ở chế độ **private**; `--public` mới công khai —
+kiểm quyền redistribution của từng nguồn trước khi dùng cờ đó.
+
+Kaggle CLI bỏ qua thư mục con trừ khi có `--dir-mode`. Script dùng `-r zip`: mỗi
+thư mục con được gói thành một file rồi Kaggle bung lại phía server, nhờ vậy
+`audio/real/...` giữ nguyên cấu trúc thay vì phải upload 50 nghìn file WAV rời.
+`--dir-mode tar` nhanh hơn (WAV nén gần như vô ích) nếu muốn.
+
+Chạy lại lệnh đó lần nữa sẽ tạo **version mới** của cùng dataset, không tạo cái thứ hai.
+
+### Đẩy theo shard (không khuyến nghị)
+
+`$C run --rm push` đẩy **từng shard thành một dataset riêng** (`<slug>-0000`,
+`<slug>-0001`, …). Chỉ dùng khi cần đồng bộ liên tục *trong lúc* job còn chạy:
+Kaggle không có upload delta nên một dataset duy nhất sẽ phải upload lại toàn bộ
+mỗi lần. Xong việc thì dùng `push-dataset` và xoá các dataset shard đi.
 
 ## Dung lượng
 

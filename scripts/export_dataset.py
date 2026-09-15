@@ -4,7 +4,8 @@
     vietnamese-audio-deepfake-demo/
     ├── audio/real/{common_voice,vietmed,vivos}/*.wav
     ├── audio/fake/<generator>/*.wav
-    ├── metadata/{metadata.csv,metadata.parquet,metadata.jsonl}
+    ├── metadata.csv
+    ├── metadata.parquet
     └── README.md
 
 Tar shard chỉ là dạng vận chuyển (Kaggle upload 30k file rời rất chậm). Bước này
@@ -112,8 +113,7 @@ def flatten(r: dict) -> dict:
 
 
 def write_metadata(dest: Path, rows: list[dict]) -> None:
-    md = dest / "metadata"
-    md.mkdir(parents=True, exist_ok=True)
+    md = dest                      # để ngay gốc, đúng cây trong spec §12
     flat = [flatten(r) for r in rows]
 
     with open(md / "metadata.csv", "w", encoding="utf-8", newline="") as f:
@@ -172,8 +172,7 @@ def write_readme(dest: Path, rows: list[dict]) -> None:
         f"{dest.name}/", "├── audio/",
         "│   ├── real/{common_voice,vietmed,vivos}/*.wav",
         "│   └── fake/<generator>/*.wav",
-        "├── metadata/", "│   ├── metadata.csv",
-        "│   ├── metadata.parquet", "│   └── metadata.jsonl",
+        "├── metadata.csv", "├── metadata.parquet",
         "└── README.md", "```", "",
         "Split quản lý bằng cột `split` trong metadata, không chia theo thư mục —",
         "đổi cách chia không phải di chuyển hàng chục nghìn file.", "",
@@ -230,8 +229,7 @@ def main() -> int:
     write_metadata(dest, rows)
     write_readme(dest, rows)
     print(f"Xong     : {dest}")
-    for f in ("metadata/metadata.csv", "metadata/metadata.parquet",
-              "metadata/metadata.jsonl", "README.md"):
+    for f in ("metadata.csv", "metadata.parquet", "metadata.jsonl", "README.md"):
         print(f"           {f}  {(dest / f).stat().st_size / 1e6:.2f} MB")
     return 0
 
