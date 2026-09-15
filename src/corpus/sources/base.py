@@ -12,6 +12,10 @@ import requests
 CHUNK = 1 << 20
 
 
+class AccessError(RuntimeError):
+    """Server từ chối (401/403) — lỗi quyền, không phải lỗi mạng, retry vô ích."""
+
+
 @dataclass
 class RawItem:
     item_id: str                 # id ổn định, tái chạy phải ra đúng id này
@@ -43,6 +47,11 @@ def download(url: str, dest: Path, token: str | None = None, desc: str = "") -> 
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     head = requests.head(url, headers=headers, allow_redirects=True, timeout=60)
+    if head.status_code in (401, 403):
+        raise AccessError(
+            f"HTTP {head.status_code} khi tải {url}\n"
+            + ("Token đang RỖNG." if not token else
+               f"Token đang dùng bắt đầu bằng {token[:3]!r}, dài {len(token)} ký tự."))
     total = int(head.headers.get("x-linked-size") or head.headers.get("content-length") or 0)
     if dest.exists() and total and dest.stat().st_size == total:
         return dest
@@ -56,6 +65,11 @@ def download(url: str, dest: Path, token: str | None = None, desc: str = "") -> 
         headers["Range"] = f"bytes={pos}-"
 
     with requests.get(url, headers=headers, stream=True, timeout=120) as r:
+        if r.status_code in (401, 403):
+            raise AccessError(
+                f"HTTP {r.status_code} khi tải {url}\n"
+                + ("Token đang RỖNG." if not token else
+                   f"Token đang dùng bắt đầu bằng {token[:3]!r}, dài {len(token)} ký tự."))
         if pos and r.status_code == 200:      # server bỏ qua Range -> tải lại từ đầu
             pos, mode = 0, "wb"
         r.raise_for_status()

@@ -11,28 +11,49 @@ Raw Audio → decode? → 2–10s? → speech ≥50%? → clipping <1%? → SHA2
 
 ## Chạy nhanh
 
+Yêu cầu máy build: Docker + **~50 GB trống** (24 GB trong đó là cache VieNeu).
+
 ```bash
-cp docker/.env.example docker/.env          # KAGGLE_USERNAME / KAGGLE_KEY / HF_TOKEN
+git clone <repo> && cd ai-detector
+cp docker/.env.example docker/.env      # rồi điền KAGGLE_* và HF_TOKEN
 C="docker compose -f docker/docker-compose.yml"
 
-$C up -d --build                     # 1. REAL: lấy MỌI audio đạt chuẩn từ 3 nguồn
-                                     #    dashboard: http://<máy-docker>:8000
-$C run --rm monitor --watch=10       #    hoặc theo dõi trong terminal
-$C run --rm build-fake               # 2. FAKE: lấy đúng bằng số REAL đã nhận
-$C run --rm export --verify          # 3. bung ra cây dataset cuối
+$C build                                # 0. dựng image (các service dùng chung)
+$C up -d build-corpus dashboard         # 1. REAL — chạy nền, kèm UI :8000
+$C run --rm build-fake --probe          # 2. kiểm tra tên cột VieNeu trước
+$C run --rm build-fake                  #    FAKE — lấy đúng bằng số REAL
+$C run --rm export --verify             # 3. bung ra cây dataset cuối
 ```
 
-Thứ tự bắt buộc: FAKE cần biết số REAL nên phải chạy sau, và chỉ chạy khi
-`monitor` báo cả ba nguồn REAL đã `unit x/x`.
+Thứ tự bắt buộc: FAKE cần biết số REAL nên phải chạy **sau**, và chỉ chạy khi
+dashboard báo cả ba nguồn REAL đã xong (`unit x/x`, thanh đầy 100%).
 
-Chạy thử không đụng Kaggle:
+Chạy thử 50 audio, không đụng Kaggle, không đụng volume thật:
 
 ```bash
-docker run --rm -v $PWD/data:/data ai-detector/corpus-builder:latest \
+docker run --rm -v "$PWD/data":/data ai-detector/corpus-builder:latest \
   --out /data/out --cache /data/cache --sources common_voice --limit 50 --no-kaggle
 ```
 
-Chạy trực tiếp (không Docker): `pip install -r requirements.txt` rồi
+### Dừng, chạy lại, lấy kết quả
+
+```bash
+$C stop build-corpus     # SIGTERM -> chốt checkpoint cuối (có 120s ân hạn)
+$C start build-corpus    # chạy tiếp từ đúng con trỏ, không quét lại
+$C logs -f build-corpus
+```
+
+Dữ liệu nằm trong volume `ai-detector_corpus-data`. Copy ra máy host:
+
+```bash
+docker run --rm -v ai-detector_corpus-data:/data -v "$PWD/out":/host \
+  alpine cp -r /data/dataset /host/
+```
+
+Muốn ghi thẳng ra thư mục host thì đổi `corpus-data:/data` trong
+`docker-compose.yml` thành `./data:/data`.
+
+Chạy không cần Docker: `pip install -r requirements.txt` rồi
 `python scripts/build_corpus.py --out ./data/out --cache ./data/cache --no-kaggle`.
 
 ## Theo dõi tiến độ
@@ -173,6 +194,24 @@ duration thiếu ứng viên, phần thiếu được bù từ bucket còn dư v
 **Dung lượng:** mặc định giữ cache 24 GB để pha `write` đọc lại từ đĩa.
 `--no-keep-cache` xoá từng file arrow sau khi xử lý (đĩa ~500 MB thay vì 24 GB,
 đổi lại phải tải lại toàn bộ ở pha `write`).
+
+## Kiểm tra lại audio đã ghi
+
+Audio chỉ được ghi vào shard **sau khi qua đủ 6 cổng lọc**, và chỉ shard đã
+checkpoint (đã `fsync` + commit sqlite) mới được đẩy lên Kaggle — nên mọi thứ trên
+Kaggle đều đã qua kiểm. Nhưng đó là kiểm ở *đầu vào*; muốn kiểm ở *đầu ra* thì:
+
+```bash
+$C run --rm audit                      # mở lại từng WAV trong tar, đo lại từ đầu
+$C run --rm audit --pushed-only        # chỉ các shard đã đẩy lên Kaggle
+$C run --rm audit --sample 2000        # kiểm nhanh 2000 file đầu
+```
+
+Script **không tin metadata**: nó giải mã lại từng file trong tar rồi đối chiếu
+sample rate / channels / encoding / duration / speech ratio / `sha256_norm`,
+kiểm trùng `id` + hai loại hash trên toàn corpus, và kiểm tar ↔ metadata khớp
+hai chiều. Sai lệch nào cũng làm mã thoát ≠ 0, dùng được trong CI hoặc chặn trước
+khi push.
 
 ## Dataset cuối (spec §12)
 

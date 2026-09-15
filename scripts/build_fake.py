@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from corpus.builder import BuildConfig, Builder          # noqa: E402
 from corpus.kaggle_sync import KaggleSync                # noqa: E402
 from corpus.selector import select                       # noqa: E402
+from corpus.sources.base import AccessError             # noqa: E402
 from corpus.sources.vieneu import VieNeuSource           # noqa: E402
 from corpus.state import State, write_progress_json      # noqa: E402
 
@@ -125,14 +126,20 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
 
-    if not a.hf_token:
-        print("LỖI: VieNeu-TTS-140h là dataset gated. Accept terms tại "
-              "https://huggingface.co/datasets/pnnbao-ump/VieNeu-TTS-140h "
-              "rồi đặt HF_TOKEN.", file=sys.stderr)
+    # Kiểm quyền TRƯỚC khi vào pha 1: hỏng ở đây thì hỏng ngay, không để job chạy
+    # được một lúc rồi mới ngã sấp mặt lúc bắt đầu tải 24 GB.
+    try:
+        src = VieNeuSource(cache, a.hf_token, keep_cache=not a.no_keep_cache,
+                           columns={"audio": a.audio_column, "speaker": a.speaker_column,
+                                    "text": a.text_column, "id": a.id_column})
+        pre = src.preflight()
+    except AccessError as e:
+        print(f"\nLỖI QUYỀN TRUY CẬP VieNeu-TTS-140h\n{e}\n", file=sys.stderr)
         return 2
+    print(f"HuggingFace: đăng nhập '{pre['user']}', đã có quyền đọc "
+          f"{SOURCE} ({pre['first_file_bytes'] / 1e6:.0f} MB/file × 49)")
 
     if a.probe:
-        src = VieNeuSource(cache, a.hf_token, keep_cache=not a.no_keep_cache)
         info = src.probe()
         print("Các cột trong file arrow:")
         for name, typ in info["fields"]:

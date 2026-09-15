@@ -14,7 +14,9 @@ from typing import Iterator
 
 import pyarrow as pa
 
-from .base import RawItem, download, hf_url
+import requests
+
+from .base import AccessError, RawItem, download, hf_url
 
 REPO = "pnnbao-ump/VieNeu-TTS-140h"
 N_FILES = 49
@@ -86,10 +88,8 @@ class VieNeuSource:
         self.token = hf_token
         self.keep_cache = keep_cache
         self.columns = columns or {}
-        if not self.token:
-            raise SchemaError(
-                "VieNeu-TTS-140h là dataset gated: accept terms tại "
-                f"https://huggingface.co/datasets/{REPO} rồi đặt HF_TOKEN.")
+        # Không ném lỗi ở đây: preflight() mới là chỗ chẩn đoán, và nó phân biệt
+        # được thiếu token / token sai / chưa accept terms.
 
     # ---------- hạ tầng ----------
     def units(self) -> list[str]:
@@ -101,6 +101,50 @@ class VieNeuSource:
     def prepare(self) -> None:
         """Không tải sẵn: 24 GB. Mỗi unit tải đúng lúc cần trong iter_unit()."""
         self.cache.mkdir(parents=True, exist_ok=True)
+        self.preflight()
+
+    def preflight(self) -> dict:
+        """Phân biệt rõ 3 kiểu hỏng trước khi tải 24 GB: thiếu token / token sai /
+        token đúng nhưng chưa được cấp quyền. Cả ba đều trả về 401 như nhau nếu
+        chỉ nhìn vào lệnh tải."""
+        if not self.token:
+            raise AccessError(
+                "Chưa đặt HF_TOKEN.\n"
+                f"  1. Accept terms tại https://huggingface.co/datasets/{REPO}\n"
+                "  2. Tạo token tại https://huggingface.co/settings/tokens (READ là đủ)\n"
+                "  3. Ghi vào docker/.env:  HF_TOKEN=hf_...")
+
+        hint = ""
+        if not self.token.startswith("hf_"):
+            hint = (f"\n  ⚠ Token đang dùng bắt đầu bằng {self.token[:5]!r} — token "
+                    "HuggingFace luôn bắt đầu bằng 'hf_'.\n"
+                    "    (Chuỗi 'KGAT_...' là API key của Kaggle, không dùng được ở đây.)")
+
+        try:
+            who = requests.get("https://huggingface.co/api/whoami-v2",
+                               headers={"Authorization": f"Bearer {self.token}"},
+                               timeout=30)
+        except requests.RequestException as e:
+            raise AccessError(f"Không gọi được HuggingFace API: {e}")
+        if who.status_code != 200:
+            raise AccessError(
+                f"Token KHÔNG hợp lệ (whoami trả HTTP {who.status_code})."
+                f"{hint}\n  Tạo token mới tại https://huggingface.co/settings/tokens")
+        user = (who.json() or {}).get("name", "?")
+
+        head = requests.head(hf_url(REPO, self.units()[0]),
+                             headers={"Authorization": f"Bearer {self.token}"},
+                             allow_redirects=True, timeout=60)
+        if head.status_code in (401, 403):
+            raise AccessError(
+                f"Token hợp lệ (đăng nhập là '{user}') nhưng tài khoản này CHƯA được "
+                f"cấp quyền đọc {REPO}.\n"
+                f"  Mở https://huggingface.co/datasets/{REPO} bằng chính tài khoản "
+                f"'{user}', bấm chấp nhận điều khoản, rồi chạy lại.")
+        if head.status_code >= 400:
+            raise AccessError(f"HuggingFace trả HTTP {head.status_code} cho {REPO}.")
+        size = int(head.headers.get("x-linked-size") or head.headers.get("content-length") or 0)
+        return {"user": user, "first_file_bytes": size}
 
     def _fetch(self, unit: str) -> Path:
         return download(hf_url(REPO, unit), self.cache / unit, self.token,
