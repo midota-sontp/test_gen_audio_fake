@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from corpus.builder import BuildConfig, Builder          # noqa: E402
-from corpus.kaggle_sync import KaggleSync                # noqa: E402
+from corpus.kaggle_sync import KaggleError, KaggleSync   # noqa: E402
 from corpus.selector import select                       # noqa: E402
 from corpus.sources.base import AccessError             # noqa: E402
 from corpus.sources.vieneu import VieNeuSource           # noqa: E402
@@ -160,7 +160,12 @@ def main(argv=None) -> int:
             return 2
         kaggle = KaggleSync(a.kaggle_owner, a.kaggle_slug, out / "stage",
                             public=a.kaggle_public)
-        kaggle.check()
+        try:
+            kaggle.check()
+        except KaggleError as e:
+            print(f"\nLỖI XÁC THỰC KAGGLE\n{e}\n"
+                  "Dùng --no-kaggle nếu chỉ muốn ghi xuống đĩa.", file=sys.stderr)
+            return 2
 
     if a.phase in ("all", "index"):
         print("\n########## PHA 1/3 — INDEX ứng viên FAKE ##########")

@@ -15,7 +15,7 @@ Yêu cầu máy build: Docker + **~50 GB trống** (24 GB trong đó là cache V
 
 ```bash
 git clone <repo> && cd ai-detector
-cp docker/.env.example docker/.env      # rồi điền KAGGLE_* và HF_TOKEN
+cp docker/.env.example docker/.env      # rồi điền KAGGLE_API_TOKEN và HF_TOKEN
 C="docker compose -f docker/docker-compose.yml"
 
 $C build                                # 0. dựng image (các service dùng chung)
@@ -84,9 +84,17 @@ làm job chậm lại hay hỏng tiến độ.
 
 | Nguồn | Lấy từ | Số audio | Speaker | Recording |
 |---|---|---|---|---|
-| `common_voice` | HF `hataphu/common-voice-corpus-20` (parquet, 244 MB) | 8,963 | **không có** → mỗi clip 1 speaker, `speaker_known=false` | clip id |
+| `common_voice` | HF `hataphu/common-voice-corpus-20` (parquet, 244 MB) | 8,963 dòng nhưng chỉ **5,388 clip khác nhau** | **không có** → mỗi clip 1 speaker, `speaker_known=false` | clip id |
 | `vietmed` | HF `leduckhai/VietMed` (parquet, 185 MB) | 9,207 | `speaker_name` (13 speaker ở train) | `audio_name` |
 | `vivos` | HF `AILAB-VNUHCM/vivos` (tar.gz, 1.47 GB) | 12,420 | thư mục `VIVOSSPK*` | tên file |
+
+> **Mirror Common Voice 20 đếm trùng.** Split `validation` (5,388) chứa **trọn cả**
+> `train` (2,219) lẫn `test` (1,356) — kiểm bằng `audio.path`: `train ∩ validation`
+> = 2,219, `validation ∩ test` = 1,356. Cộng ba split ra 8,963 nhưng chỉ có 5,388
+> clip khác nhau. Con số "8,963 Common Voice" trong spec Demo v1 vì thế đếm thừa
+> 3,575, và mục tiêu 30,590 REAL không thể đạt bằng ba nguồn này. Pipeline bỏ qua
+> bản lặp theo `item_id` và đếm riêng ở cột **Bỏ qua**, nên luôn có
+> `quét = nhận + loại + bỏ qua`.
 
 VIVOS lấy bản HuggingFace thay vì Kaggle: **cùng nội dung** nhưng không cần Kaggle
 credential để tải. File mp3 của Common Voice thực tế là 32/48 kHz (dataset card ghi
@@ -257,6 +265,23 @@ số member tar = số dòng metadata = số item trong DB, không trùng id.
 `SIGTERM`/`Ctrl-C` → chốt checkpoint cuối rồi thoát sạch (compose để
 `stop_grace_period: 120s`). `--max-seconds` đặt ngân sách thời gian cho một lần chạy.
 
+## Xác thực Kaggle
+
+Kaggle CLI 2.x nhận nhiều kiểu credential; chọn **một**:
+
+| Cách | Biến | Lấy ở đâu |
+|---|---|---|
+| Token mới (khuyến nghị) | `KAGGLE_API_TOKEN=KGAT_...` | <https://www.kaggle.com/settings/api> → Generate New Token |
+| API key cũ | `KAGGLE_USERNAME` + `KAGGLE_KEY` | `key` trong `kaggle.json`, 32 ký tự hex |
+| File | mount `~/.kaggle/kaggle.json` hoặc `~/.kaggle/access_token` | — |
+
+`KAGGLE_USERNAME` **luôn** phải có dù dùng cách nào: nó là phần `<owner>` của
+dataset id. Đặt token `KGAT_...` vào `KAGGLE_KEY` sẽ không chạy — đó là hai định
+dạng khác nhau, và script báo đúng lỗi này.
+
+Mọi lệnh động tới Kaggle đều chạy `kaggle quota` để **xác thực thật** trước khi
+bắt đầu, thay vì chỉ kiểm biến môi trường có tồn tại hay không.
+
 ## Đồng bộ Kaggle — giới hạn cần biết
 
 Kaggle **không có upload delta**: mỗi `datasets version` đẩy lại toàn bộ thư mục và
@@ -272,12 +297,18 @@ mất vài phút tạo version. Đẩy thật sự mỗi 10 audio là bất kh�
 mỗi lần đẩy chỉ tốn đúng một shard chứ không phải toàn bộ corpus đã tích luỹ — nếu
 gom hết vào một dataset thì lần đẩy cuối sẽ phải upload lại cả ~5 GB.
 
-Đẩy tay khi job đã dừng hoặc push lỗi:
+Đẩy tay (job chạy với `--no-kaggle`, hoặc push lỗi giữa chừng):
 
 ```bash
-python scripts/push_kaggle.py --out /data/out --owner <user> --slug vi-real-audio-demo-v1
-python scripts/push_kaggle.py --out /data/out ... --retry-failed   # chỉ shard chưa đẩy
+$C run --rm push                    # đẩy tất cả shard chưa đẩy
+$C run --rm push --retry-failed     # chỉ shard chưa có dấu pushed_at
+$C run --rm push --only real_shard_0007
+$C run --rm push --index-only       # chỉ cập nhật file tiến độ
 ```
+
+Owner và slug lấy từ `KAGGLE_USERNAME` / `KAGGLE_SLUG` trong `docker/.env`.
+Dataset tạo ra là **private**; chỉ `--public` mới công khai — kiểm tra quyền
+redistribution của từng nguồn trước khi dùng cờ đó.
 
 ## Dung lượng
 

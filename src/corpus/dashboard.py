@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .state import State
 
-EXPECTED = {"common_voice": 8963, "vietmed": 9207, "vivos": 12420, "vieneu_tts": 74858}
+EXPECTED = {"common_voice": 8963, "vietmed": 9207, "vivos": 12420, "vieneu_tts": 73882}
 LABEL_OF = {"common_voice": 0, "vietmed": 0, "vivos": 0, "vieneu_tts": 1}
 REASON_VI = {
     "decode_failed": "Lỗi giải mã",
@@ -81,18 +81,28 @@ def build(out: Path) -> dict:
         rej = stats["rejected_by_source"].get(name, {})
         acc = stats["accepted_by_source"].get(name, 0)
         cand = stats["candidates"].get(name, {})
+        scanned = max((p["scanned"] for p in ph), default=0)
+        units = max((p["units"] for p in ph), default=0)
+        units_done = max((p["units_done"] for p in ph), default=0)
+        # Số tổng là ước lượng từ dataset card, có thể sai vài trăm dòng. Quét hết
+        # unit rồi thì con số đúng là con số vừa đếm được, không phải hằng số.
+        done = units > 0 and units_done == units
+        expected = scanned if done else max(EXPECTED[name], scanned)
         sources.append({
             "name": name,
             "label": LABEL_OF[name],
-            "expected": EXPECTED[name],
+            "expected": expected,
+            "expected_card": EXPECTED[name],
+            "done": done,
             "phases": ph,
-            "scanned": max((p["scanned"] for p in ph), default=0),
-            "units": max((p["units"] for p in ph), default=0),
-            "units_done": max((p["units_done"] for p in ph), default=0),
+            "scanned": scanned,
+            "units": units,
+            "units_done": units_done,
             "accepted": acc,
             "candidates": cand.get("total", 0),
             "selected": cand.get("selected", 0),
             "rejected": sum(rej.values()),
+            "skipped": sum(stats.get("skipped_by_source", {}).get(name, {}).values()),
             "reject_reasons": [{"reason": k, "label": REASON_VI.get(k, k), "n": v}
                                for k, v in sorted(rej.items(), key=lambda kv: -kv[1])],
             "duration": src_rates.get(name, {}),
@@ -116,6 +126,7 @@ def build(out: Path) -> dict:
         "totals": {
             "real": real, "fake": fake, "all": real + fake,
             "rejected": stats["total_rejected"],
+            "skipped": stats.get("total_skipped", 0),
             "hours_real": hours.get(0, 0), "hours_fake": hours.get(1, 0),
             "hours": stats["total_hours"], "bytes": stats["total_bytes"],
             "speakers_real": speakers.get(0, 0), "speakers_fake": speakers.get(1, 0),

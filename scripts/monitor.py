@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-EXPECTED = {"common_voice": 8963, "vietmed": 9207, "vivos": 12420}
+EXPECTED = {"common_voice": 8963, "vietmed": 9207, "vivos": 12420, "vieneu_tts": 73882}
 REASON_VI = {
     "decode_failed": "lỗi giải mã",
     "empty_audio": "audio rỗng",
@@ -74,6 +74,7 @@ def render(d: dict) -> str:
 
     acc = d.get("accepted_by_source", {})
     rej = d.get("rejected_by_source", {})
+    skp = d.get("skipped_by_source", {})
     cursors = d.get("cursors", [])
     by_src: dict[str, list] = {}
     for c in cursors:
@@ -89,8 +90,10 @@ def render(d: dict) -> str:
         r = sum(rej.get(src, {}).values())
         L.append(f"  {src:<13} {bar(seen, total)}  {seen:>6,}/{total:,}"
                  f"  (unit {units_done}/{units})")
+        k = sum(skp.get(src, {}).values())
         keep = f"{a / (a + r) * 100:.1f}%" if (a + r) else "—"
-        L.append(f"  {'':<13} nhận {a:>6,} | loại {r:>6,} | tỷ lệ giữ {keep}")
+        L.append(f"  {'':<13} nhận {a:>6,} | loại {r:>6,} | tỷ lệ giữ {keep}"
+                 + (f" | bỏ qua {k:,} trùng id" if k else ""))
         for reason, n in sorted(rej.get(src, {}).items(), key=lambda kv: -kv[1])[:4]:
             L.append(f"  {'':<15} · {REASON_VI.get(reason, reason):<28} {n:>6,}")
 

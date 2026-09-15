@@ -12,8 +12,9 @@ services:
     restart: on-failure
     stop_grace_period: 120s          # đủ để chốt checkpoint cuối khi nhận SIGTERM
     environment:
-      KAGGLE_USERNAME: ${KAGGLE_USERNAME:?dat trong file .env}
-      KAGGLE_KEY: ${KAGGLE_KEY:?dat trong file .env}
+      KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
+      KAGGLE_KEY: ${KAGGLE_KEY:-}
       KAGGLE_SLUG: ${KAGGLE_SLUG:-vi-real-audio-demo-v1}
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
@@ -40,10 +41,11 @@ services:
     image: ai-detector/corpus-builder:latest
     entrypoint: ["python", "/app/scripts/build_fake.py"]
     environment:
-      KAGGLE_USERNAME: ${KAGGLE_USERNAME:?dat trong file .env}
-      KAGGLE_KEY: ${KAGGLE_KEY:?dat trong file .env}
+      KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
+      KAGGLE_KEY: ${KAGGLE_KEY:-}
       KAGGLE_SLUG: ${KAGGLE_SLUG:-vi-real-audio-demo-v1}
-      HF_TOKEN: ${HF_TOKEN:?VieNeu-TTS-140h la dataset gated, can HF token}
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - corpus-data:/data
     command: ["--out=/data/out", "--cache=/data/cache", "--checkpoint-every=10"]
@@ -58,6 +60,20 @@ services:
     volumes:
       - corpus-data:/data
     command: ["--out=/data/out", "--host=0.0.0.0", "--port=8000"]
+
+  # Đẩy shard lên Kaggle. Chạy được nhiều lần, --retry-failed chỉ đẩy cái còn thiếu.
+  # docker compose run --rm push
+  push:
+    image: ai-detector/corpus-builder:latest
+    entrypoint: ["python", "/app/scripts/push_kaggle.py"]
+    environment:
+      KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
+      KAGGLE_KEY: ${KAGGLE_KEY:-}
+      KAGGLE_SLUG: ${KAGGLE_SLUG:-vi-real-audio-demo-v1}
+    volumes:
+      - corpus-data:/data
+    command: ["--out=/data/out"]
 
   # Kiểm tra độc lập audio đã ghi: docker compose run --rm audit
   audit:

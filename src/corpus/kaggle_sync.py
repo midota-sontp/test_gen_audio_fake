@@ -61,21 +61,54 @@ class KaggleSync:
 
     # ---------- hạ tầng ----------
     def check(self) -> None:
+        """Xác thực THẬT trước khi chạy job nhiều giờ.
+
+        Kiểm sự tồn tại của biến môi trường là không đủ: Kaggle CLI 2.x nhận
+        nhiều kiểu credential khác nhau và một token sai định dạng vẫn "có mặt".
+        `kaggle quota` là lệnh rẻ nhất bắt buộc phải đăng nhập được.
+        """
         if not self.enabled:
             return
         if not shutil.which("kaggle"):
             raise KaggleError("Không thấy lệnh `kaggle`. Cài `pip install kaggle`.")
-        if not (os.getenv("KAGGLE_USERNAME") and os.getenv("KAGGLE_KEY")) \
-                and not Path("~/.kaggle/kaggle.json").expanduser().exists():
-            raise KaggleError("Thiếu credential Kaggle: đặt KAGGLE_USERNAME/KAGGLE_KEY "
-                              "hoặc mount ~/.kaggle/kaggle.json.")
+        try:
+            _run(["kaggle", "quota"], timeout=120)
+        except KaggleError as e:
+            raise KaggleError(
+                "Kaggle từ chối xác thực.\n" + self._creds_report()
+                + "\n  Chấp nhận một trong các cách sau:\n"
+                "    · KAGGLE_API_TOKEN=KGAT_...   (token mới, lấy ở "
+                "https://www.kaggle.com/settings/api)\n"
+                "    · KAGGLE_USERNAME + KAGGLE_KEY  (API key cũ, 32 ký tự hex "
+                "trong kaggle.json)\n"
+                "    · mount ~/.kaggle/kaggle.json hoặc ~/.kaggle/access_token\n"
+                f"\n  Kaggle trả về: {str(e).splitlines()[-1][:200]}")
+
+    @staticmethod
+    def _creds_report() -> str:
+        """Nói rõ đang thấy gì, không in giá trị."""
+        lines = []
+        for var in ("KAGGLE_API_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY"):
+            v = os.getenv(var)
+            lines.append(f"  {var:<18} " + (f"có, {len(v)} ký tự" if v else "TRỐNG"))
+        key = os.getenv("KAGGLE_KEY") or ""
+        if key.startswith("KGAT_"):
+            lines.append("  ⚠ KAGGLE_KEY bắt đầu bằng 'KGAT_' — đó là token kiểu MỚI, "
+                         "phải đặt vào KAGGLE_API_TOKEN chứ không phải KAGGLE_KEY.")
+        for f in ("~/.kaggle/kaggle.json", "~/.kaggle/access_token"):
+            if Path(f).expanduser().exists():
+                lines.append(f"  {f} có tồn tại")
+        return "\n".join(lines)
 
     def _dataset_exists(self, slug: str) -> bool:
+        """`datasets list -s` là tìm kiếm có xếp hạng và phân trang — nó trả cả
+        dataset public của người khác, và dataset của chính mình có thể không nằm
+        ở trang đầu. `status` nhận đúng một ref cụ thể nên mới dùng được ở đây."""
         try:
-            out = _run(["kaggle", "datasets", "list", "-m", "-s", slug], timeout=120)
+            _run(["kaggle", "datasets", "status", f"{self.owner}/{slug}"], timeout=120)
+            return True
         except KaggleError:
             return False
-        return f"{self.owner}/{slug}" in out
 
     def _write_metadata(self, d: Path, slug: str, title: str) -> None:
         (d / "dataset-metadata.json").write_text(json.dumps({
@@ -91,8 +124,21 @@ class KaggleSync:
             _run(["kaggle", "datasets", "version", "-p", str(d), "-m", message,
                   "-r", "skip", "-q"])
             return "version"
-        _run(["kaggle", "datasets", "create", "-p", str(d), "-q"]
-             + ([] if self.public else ["-u"]))
+        # `-u` = `--public`. Không truyền thì Kaggle tạo private — đúng mặc định
+        # ta muốn. Trước đây chỗ này bị đảo, tức `public=False` lại đẩy công khai.
+        try:
+            _run(["kaggle", "datasets", "create", "-p", str(d), "-q"]
+                 + (["-u"] if self.public else []))
+        except KaggleError as e_create:
+            # `status` có thể nhận diện sai (mất quyền, lỗi mạng). Dataset đã tồn tại
+            # thì `create` hỏng nhưng `version` chạy được — thử nốt rồi mới bó tay.
+            try:
+                _run(["kaggle", "datasets", "version", "-p", str(d), "-m", message,
+                      "-r", "skip", "-q"])
+            except KaggleError as e_version:
+                raise KaggleError(f"create hỏng: {e_create}\n---\nversion cũng hỏng: {e_version}")
+            self._created.add(slug)
+            return "version"
         self._created.add(slug)
         return "create"
 

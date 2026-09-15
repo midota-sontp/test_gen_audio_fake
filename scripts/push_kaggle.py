@@ -35,7 +35,11 @@ def main() -> int:
     out = Path(a.out)
     st = State(out / "state" / "corpus.sqlite")
     k = KaggleSync(a.owner, a.slug, out / "stage", public=a.public)
-    k.check()
+    try:
+        k.check()
+    except KaggleError as e:
+        print(f"\nLỖI XÁC THỰC KAGGLE\n{e}\n", file=sys.stderr)
+        return 2
 
     rc = 0
     if not a.index_only:

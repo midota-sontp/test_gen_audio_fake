@@ -20,7 +20,7 @@ from .base import AccessError, RawItem, download, hf_url
 
 REPO = "pnnbao-ump/VieNeu-TTS-140h"
 N_FILES = 49
-EXPECTED_ROWS = 74858
+EXPECTED_ROWS = 73882      # đếm thực tế khi quét hết 49 file; card ghi 74.858
 
 SPEAKER_NAMES = ("speaker_id", "speaker", "speaker_name", "spk_id", "spk",
                  "voice", "voice_id", "speaker_idx")

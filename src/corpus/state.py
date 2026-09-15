@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS shards(
     name TEXT PRIMARY KEY, status TEXT NOT NULL, n_files INTEGER DEFAULT 0,
     bytes INTEGER DEFAULT 0, tar_offset INTEGER DEFAULT 0, meta_offset INTEGER DEFAULT 0,
     created_at TEXT, closed_at TEXT, pushed_at TEXT, push_target TEXT);
+-- Bản ghi lặp lại cùng item_id (mirror Common Voice 20: split validation chứa
+-- trọn cả train lẫn test). Không phải "bị loại" — nó là cùng một audio đã xử lý
+-- rồi — nên đếm riêng, để  quét = nhận + loại + bỏ qua  luôn cộng khớp.
+CREATE TABLE IF NOT EXISTS skips(
+    source TEXT NOT NULL, reason TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(source, reason));
 CREATE INDEX IF NOT EXISTS idx_items_source ON items(source);
 CREATE INDEX IF NOT EXISTS idx_rejects_reason ON rejects(source, reason);
 """
@@ -197,6 +203,17 @@ class State:
             "INSERT OR REPLACE INTO rejects(item_id,source,reason,detail,created_at)"
             " VALUES(?,?,?,?,?)", (item_id, source, reason, detail, utcnow()))
 
+    def load_item_ids(self) -> set[str]:
+        """Mọi id đã xử lý xong, dù được nhận hay bị loại."""
+        return {r[0] for r in self.db.execute(
+            "SELECT item_id FROM items UNION SELECT item_id FROM rejects")}
+
+    def add_skip(self, source: str, reason: str, k: int) -> None:
+        self.db.execute(
+            "INSERT INTO skips(source,reason,n) VALUES(?,?,?) "
+            "ON CONFLICT(source,reason) DO UPDATE SET n = n + excluded.n",
+            (source, reason, k))
+
     def has_item(self, item_id: str) -> bool:
         return self.db.execute("SELECT 1 FROM items WHERE item_id=?",
                                (item_id,)).fetchone() is not None
@@ -244,6 +261,12 @@ class State:
         for r in db.execute(
                 "SELECT source, reason, COUNT(*) n FROM rejects GROUP BY source, reason"):
             rejected.setdefault(r["source"], {})[r["reason"]] = r["n"]
+        skipped = {}
+        try:
+            for r in db.execute("SELECT source, reason, n FROM skips"):
+                skipped.setdefault(r["source"], {})[r["reason"]] = r["n"]
+        except sqlite3.OperationalError:
+            pass
         buckets = {"2-4s": 0, "4-6s": 0, "6-8s": 0, "8-10s": 0}
         for r in db.execute(
                 "SELECT CASE WHEN duration<4 THEN '2-4s' WHEN duration<6 THEN '4-6s' "
@@ -259,9 +282,11 @@ class State:
             "candidates": {k: {"total": v[0], "selected": v[1] or 0}
                            for k, v in cand.items()},
             "rejected_by_source": rejected,
+            "skipped_by_source": skipped,
             "duration_buckets": buckets,
             "total_accepted": tot["n"],
             "total_rejected": db.execute("SELECT COUNT(*) n FROM rejects").fetchone()["n"],
+            "total_skipped": sum(sum(v.values()) for v in skipped.values()),
             "total_hours": round(tot["d"] / 3600.0, 3),
             "total_bytes": tot["b"],
             "speakers": db.execute(

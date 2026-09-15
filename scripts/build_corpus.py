@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from corpus.builder import BuildConfig, Builder          # noqa: E402
-from corpus.kaggle_sync import KaggleSync                # noqa: E402
+from corpus.kaggle_sync import KaggleError, KaggleSync   # noqa: E402
 from corpus.sources.registry import REAL_SOURCES, REGISTRY  # noqa: E402
 
 
@@ -79,7 +79,13 @@ def main(argv=None) -> int:
             return 2
         kaggle = KaggleSync(a.kaggle_owner, a.kaggle_slug, out / "stage",
                             public=a.kaggle_public)
-        kaggle.check()
+        try:
+            kaggle.check()
+        except KaggleError as e:
+            print(f"\nLỖI XÁC THỰC KAGGLE\n{e}\n"
+                  "Dùng --no-kaggle nếu chỉ muốn ghi xuống đĩa, đẩy sau bằng "
+                  "`docker compose run --rm push`.", file=sys.stderr)
+            return 2
 
     cfg = BuildConfig(
         out_dir=out, cache_dir=cache, sources=a.sources,
@@ -108,12 +114,16 @@ def main(argv=None) -> int:
     print(f"Nhận  : {stats['total_accepted']:,}  ({stats['total_hours']} giờ, "
           f"{stats['total_bytes'] / 1e9:.2f} GB)")
     print(f"Loại  : {stats['total_rejected']:,}")
+    if stats.get("total_skipped"):
+        print(f"Bỏ qua: {stats['total_skipped']:,}  (bản lặp lại cùng item_id)")
     print(f"Speaker: {stats['speakers']:,}")
     for src, n in sorted(stats["accepted_by_source"].items()):
         print(f"  {src:<14} nhận {n:>7,}")
         for reason, m in sorted(stats["rejected_by_source"].get(src, {}).items(),
                                 key=lambda kv: -kv[1]):
-            print(f"      loại {reason:<26} {m:>7,}")
+            print(f"      loại   {reason:<24} {m:>7,}")
+        for reason, m in stats.get("skipped_by_source", {}).get(src, {}).items():
+            print(f"      bỏ qua {reason:<24} {m:>7,}")
     print("Phân bố duration:", stats["duration_buckets"])
     print(f"progress.json: {out / 'state' / 'progress.json'}")
     return 0

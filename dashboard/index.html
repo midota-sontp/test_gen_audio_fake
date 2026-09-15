@@ -219,7 +219,8 @@ function renderKpis(d){
           : running ? `audio/giây · còn ~${n(remain)} → ETA ~${Math.round(remain/rate/60)} phút`
                     : `audio/giây ở lần chạy gần nhất · còn ~${n(remain)} audio chưa duyệt`));
   g.appendChild(tile('Bị loại', n(T.rejected),
-    `Tỷ lệ giữ ${p1(pct(T.all, T.all + T.rejected))}%`));
+    `Tỷ lệ giữ ${p1(pct(T.all, T.all + T.rejected))}%`
+    + (T.skipped ? ` · bỏ qua ${n(T.skipped)} bản trùng id` : '')));
   if(d.disk_free != null)
     g.appendChild(tile('Đĩa còn trống', (d.disk_free/1e9).toFixed(1).replace('.',',')+' GB',
       d.disk_free < 10e9 ? '⚠ sắp hết chỗ' : 'đủ chỗ'));
@@ -249,24 +250,30 @@ function renderSources(d){
       const f = el('div','fill'+(s.label?' s2':''));
       f.style.width = p+'%';
       tr.appendChild(f);
+      // Pha index chưa ghi audio nào: đếm "nhận" ở đây luôn bằng 0, hiện ra
+      // sẽ bị hiểu nhầm là hỏng. Pha này con số có nghĩa là số ỨNG VIÊN.
+      const idx = ph.name === 'index';
       tr.dataset.tip = `<b>${s.name}${tag}</b>`
         + `<div class="r"><span>Đã duyệt</span><span>${n(ph.scanned)} / ${n(s.expected)}</span></div>`
-        + `<div class="r"><span>Nhận</span><span>${n(s.accepted)}</span></div>`
+        + (idx ? `<div class="r"><span>Ứng viên đạt chuẩn</span><span>${n(s.candidates)}</span></div>`
+               : `<div class="r"><span>Nhận</span><span>${n(s.accepted)}</span></div>`)
         + `<div class="r"><span>Loại</span><span>${n(s.rejected)}</span></div>`
-        + (kept ? `<div class="r"><span>Tỷ lệ giữ</span><span>${p1(pct(s.accepted,kept))}%</span></div>` : '')
-        + (s.candidates ? `<div class="r"><span>Ứng viên</span><span>${n(s.candidates)}</span></div>` : '')
+        + (s.skipped ? `<div class="r"><span>Bỏ qua (trùng id)</span><span>${n(s.skipped)}</span></div>` : '')
+        + (kept && !idx ? `<div class="r"><span>Tỷ lệ giữ</span><span>${p1(pct(s.accepted,kept))}%</span></div>` : '')
+        + (!idx && s.candidates ? `<div class="r"><span>Ứng viên</span><span>${n(s.candidates)}</span></div>` : '')
         + (s.selected ? `<div class="r"><span>Đã chọn</span><span>${n(s.selected)}</span></div>` : '')
         + `<div class="r"><span>Unit xong</span><span>${ph.units_done} / ${ph.units}</span></div>`;
       wrap.appendChild(tr);
       rows.appendChild(wrap);
       trows.push([`${s.name}${tag}`, n(ph.scanned), n(s.expected), p1(p)+'%',
-                  n(s.accepted), n(s.rejected), `${ph.units_done}/${ph.units}`]);
+                  idx ? n(s.candidates)+' ứng viên' : n(s.accepted),
+                  n(s.rejected), n(s.skipped), `${ph.units_done}/${ph.units}`]);
     });
   });
   c.appendChild(rows);
   const tw = el('div','tbl');
   tw.appendChild(table([{t:'Nguồn'},{t:'Đã duyệt',num:1},{t:'Tổng',num:1},{t:'%',num:1},
-    {t:'Nhận',num:1},{t:'Loại',num:1},{t:'Unit',num:1}], trows));
+    {t:'Nhận',num:1},{t:'Loại',num:1},{t:'Bỏ qua',num:1},{t:'Unit',num:1}], trows));
   c.appendChild(tw);
   return c;
 }

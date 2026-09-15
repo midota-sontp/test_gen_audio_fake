@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import signal
+from collections import Counter
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,18 @@ from .kaggle_sync import KaggleError, KaggleSync, PushThrottle
 from .state import State, utcnow, write_progress_json
 from .writer import DistWriter
 from .sources.registry import build as build_source
+
+# config được ghi vào sqlite -> progress.json -> ĐẨY LÊN DATASET KAGGLE.
+# Bất cứ thứ gì giống bí mật đều phải bị che trước khi tới đó.
+SECRET_FIELDS = {"hf_token", "kaggle_key", "kaggle_token", "token", "api_key"}
+
+
+def _redact(key: str, value):
+    if key in SECRET_FIELDS and value:
+        return f"<đã ẩn, {len(str(value))} ký tự>"
+    if isinstance(value, Path):
+        return str(value)
+    return value
 
 
 @dataclass
@@ -56,6 +69,7 @@ class Builder:
         self.writer = DistWriter(self.out / "dist", self.state, cfg.shard_max_bytes)
         self.progress_path = self.out / "state" / "progress.json"
         self.seen = self.state.load_hashes()
+        self.seen_ids = self.state.load_item_ids()
         if cfg.index_only:           # pass 1 chưa ghi vào bảng hashes -> lấy thêm từ candidates
             for name in cfg.sources:
                 self.seen |= self.state.candidate_hashes(name)
@@ -68,8 +82,7 @@ class Builder:
         self._last_ckpt = time.time()
         self._processed_total = 0
         self.state.set_meta("config", {
-            k: (str(v) if isinstance(v, Path) else v)
-            for k, v in vars(cfg).items()
+            k: _redact(k, v) for k, v in vars(cfg).items()
             if not isinstance(v, (KaggleSync, set))})
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, self._on_signal)
@@ -137,8 +150,12 @@ class Builder:
         cfg = self.cfg
         if cfg.only_ids is not None and item.item_id not in cfg.only_ids:
             return False                       # không được chọn -> bỏ qua trước cả decode
-        if self.state.has_item(item.item_id) or item.item_id in self._pending.item_ids:
-            return False                       # đã ghi ở lần chạy trước
+        if item.item_id in self.seen_ids or item.item_id in self._pending.item_ids:
+            # Cùng một id gặp lại (mirror Common Voice 20: split validation chứa
+            # trọn cả train lẫn test). Đếm riêng chứ không im lặng và cũng không
+            # tính là "bị loại" — nó là cùng một audio đã xử lý xong rồi.
+            self._pending.skips[(item.source, "duplicate_id")] += 1
+            return False
 
         # 1. Decode
         try:
@@ -197,6 +214,7 @@ class Builder:
                 item.recording_id, out_duration_, _bucket(out_duration_),
                 round(speech, 4), round(clip, 6), h_raw, h_norm))
             self._pending.item_ids.add(item.item_id)
+            self.seen_ids.add(item.item_id)
             self._since_ckpt += 1
             return True
 
@@ -243,11 +261,13 @@ class Builder:
                                     item.speaker_id, item.recording_id,
                                     out_duration, len(wav), item.label, item.generator))
         self._pending.item_ids.add(item.item_id)
+        self.seen_ids.add(item.item_id)
         self._since_ckpt += 1
         return True
 
     def _reject(self, item, reason: str, detail: str | None = None) -> bool:
         self._pending.rejects.append((item.item_id, item.source, reason, detail))
+        self.seen_ids.add(item.item_id)
         return False
 
     # --------------------------------------------------------- checkpoint
@@ -274,6 +294,8 @@ class Builder:
                 st.add_candidate(*rec)
             for rec in self._pending.rejects:
                 st.add_reject(*rec)
+            for (source, reason), k in self._pending.skips.items():
+                st.add_skip(source, reason, k)
             for (source, unit), (nxt, done) in self._pending.cursor.items():
                 st.set_cursor(source, unit, nxt, done)
             st.update_shard(self.writer.shard, n_files=self.writer.n_files,
@@ -365,10 +387,12 @@ def _bucket(d: float) -> str:
 class _Pending:
     items: list = field(default_factory=list)
     candidates: list = field(default_factory=list)
+    skips: Counter = field(default_factory=Counter)
     rejects: list = field(default_factory=list)
     hashes: list = field(default_factory=list)
     cursor: dict = field(default_factory=dict)
     item_ids: set = field(default_factory=set)
 
     def __bool__(self) -> bool:
-        return bool(self.items or self.candidates or self.rejects or self.cursor)
+        return bool(self.items or self.candidates or self.rejects
+                    or self.skips or self.cursor)
