@@ -1,0 +1,36 @@
+services:
+  build-corpus:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ai-detector/corpus-builder:latest
+    container_name: corpus-builder
+    # Job chạy nhiều giờ: tự dậy lại nếu container chết, con trỏ resume lo phần còn lại.
+    restart: unless-stopped
+    stop_grace_period: 120s          # đủ để chốt checkpoint cuối khi nhận SIGTERM
+    environment:
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:?dat trong file .env}
+      KAGGLE_KEY: ${KAGGLE_KEY:?dat trong file .env}
+      KAGGLE_SLUG: ${KAGGLE_SLUG:-vi-real-audio-demo-v1}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - corpus-data:/data
+    command:
+      - --out=/data/out
+      - --cache=/data/cache
+      - --checkpoint-every=10
+      - --shard-max-mb=256
+      - --push-index-every=120
+      - --push-shard-every=900
+
+  # docker compose run --rm monitor --watch 10
+  monitor:
+    image: ai-detector/corpus-builder:latest
+    depends_on: [build-corpus]
+    entrypoint: ["python", "/app/scripts/monitor.py"]
+    volumes:
+      - corpus-data:/data
+    command: ["--out=/data/out"]
+
+volumes:
+  corpus-data:

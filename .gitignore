@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+cache/
+out/
+data/
+*.parquet
+*.tar
+*.tar.gz
+*.wav
+*.sqlite
+*.sqlite-*

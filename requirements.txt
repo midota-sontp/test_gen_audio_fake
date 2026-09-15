@@ -1,0 +1,8 @@
+numpy>=1.26
+soundfile>=0.12.1
+soxr>=0.3.7
+webrtcvad-wheels>=2.0.14
+pyarrow>=14.0
+requests>=2.31
+tqdm>=4.66
+kaggle>=1.6.14
