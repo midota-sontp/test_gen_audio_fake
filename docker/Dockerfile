@@ -15,7 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ /app/src/
 COPY scripts/ /app/scripts/
+COPY dashboard/ /app/dashboard/
 
+EXPOSE 8000
 RUN mkdir -p /data/out /data/cache
 VOLUME ["/data"]
 

@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tiến độ dựng corpus</title>
+<style>
+:root{
+  color-scheme: light;
+  --page:#f9f9f7; --surface:#fcfcfb;
+  --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --baseline:#c3c2b7; --border:rgba(11,11,11,.10);
+  --track:#ebeae4;
+  --s1:#2a78d6; --s2:#eb6834;
+  --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --crit:#d03b3b;
+  --radius:10px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --page:#0d0d0d; --surface:#1a1a19;
+    --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --baseline:#383835; --border:rgba(255,255,255,.10);
+    --track:#26262400; --track:#262624;
+    --s1:#3987e5; --s2:#d95926;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --page:#0d0d0d; --surface:#1a1a19;
+  --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --baseline:#383835; --border:rgba(255,255,255,.10);
+  --track:#262624;
+  --s1:#3987e5; --s2:#d95926;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;}
+.wrap{max-width:1120px;margin:0 auto;padding-block:20px;padding-left:16px;padding-right:16px}
+
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;margin-bottom:18px}
+header > *{min-width:0}
+h1{font-size:19px;margin:0;font-weight:650;letter-spacing:-.01em}
+.spacer{flex:1}
+.sub{color:var(--muted);font-size:12.5px}
+button{font:inherit;font-size:12.5px;color:var(--ink-2);background:var(--surface);
+  border:1px solid var(--border);border-radius:7px;padding:5px 10px;cursor:pointer}
+button:hover{color:var(--ink)}
+button[aria-pressed="true"]{border-color:var(--s1);color:var(--ink)}
+
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;
+  padding:3px 9px;border-radius:999px;border:1px solid var(--border);background:var(--surface)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.dot.good{background:var(--good)} .dot.warn{background:var(--warn)}
+.dot.crit{background:var(--crit)} .dot.idle{background:var(--muted)}
+
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px;margin-bottom:14px}
+.card > h2{font-size:13px;margin:0 0 2px;font-weight:650;letter-spacing:.01em}
+.card > .hint{color:var(--muted);font-size:12px;margin:0 0 14px}
+.card-head{display:flex;align-items:flex-start;gap:10px;margin-bottom:14px}
+.card-head h2{margin:0}
+.card-head > div{min-width:0}
+.card-head button{flex:none}
+
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+@media (max-width:520px){ .kpis{grid-template-columns:repeat(2,minmax(0,1fr))} }
+.tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:13px 15px;min-width:0;overflow-wrap:anywhere}
+.tile .k{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.tile .v{font-size:26px;font-weight:660;margin-top:3px;letter-spacing:-.02em}
+.tile .v.hero{font-size:44px;line-height:1.05}
+.tile .n{font-size:12px;color:var(--ink-2);margin-top:3px}
+.sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:baseline}
+
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2);margin-bottom:12px}
+
+/* ---- thanh ngang: đầu dữ liệu bo 4px, chân neo về baseline ---- */
+.rows{display:flex;flex-direction:column;gap:12px;min-width:0}
+.row-lab{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;
+  margin-bottom:4px;flex-wrap:wrap}
+.row-lab .nm{color:var(--ink);min-width:0;overflow-wrap:anywhere}
+.row-lab .rt{color:var(--muted);font-variant-numeric:tabular-nums;flex:none}
+.track{background:var(--track);border-radius:4px;height:10px;width:100%;overflow:hidden}
+.fill{height:100%;border-radius:0 4px 4px 0;background:var(--s1);min-width:2px;
+  transition:width .35s ease}
+.fill.s2{background:var(--s2)}
+.pair{display:flex;flex-direction:column;gap:2px}   /* 2px khe giữa hai thanh kề */
+.pair .track{height:13px}
+.blab{font-size:12px;color:var(--ink-2);font-variant-numeric:tabular-nums;white-space:nowrap}
+.bline{display:flex;align-items:center;gap:8px;min-width:0}
+.bline .track{flex:1;min-width:0}
+.bline .blab{flex:none}
+.bkt{font-size:12.5px;margin-bottom:5px;color:var(--ink)}
+
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--grid);
+  font-variant-numeric:tabular-nums}
+th{color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.03em}
+td.num,th.num{text-align:right}
+.scroll{overflow-x:auto}
+.tbl{display:none;margin-top:14px}
+.card.show-table .tbl{display:block}
+
+#tip{position:fixed;z-index:9;pointer-events:none;opacity:0;transition:opacity .1s;
+  background:var(--surface);color:var(--ink);border:1px solid var(--border);
+  border-radius:8px;padding:8px 10px;font-size:12.5px;box-shadow:0 6px 22px rgba(0,0,0,.16);
+  max-width:260px}
+#tip b{font-weight:640}
+#tip .r{color:var(--ink-2);display:flex;justify-content:space-between;gap:14px;
+  font-variant-numeric:tabular-nums}
+.empty{color:var(--muted);font-size:12.5px}
+footer{color:var(--muted);font-size:11.5px;margin-top:20px}
+</style>
+</head>
+<body data-palette="#2a78d6,#eb6834">
+<div class="wrap">
+  <header>
+    <h1>Tiến độ dựng corpus</h1>
+    <span id="status"></span>
+    <span class="spacer"></span>
+    <span class="sub" id="updated"></span>
+    <button id="pause" aria-pressed="false">Tạm dừng</button>
+    <button id="theme">Nền tối</button>
+  </header>
+  <div id="app"></div>
+  <footer id="foot"></footer>
+</div>
+<div id="tip" role="status"></div>
+
+<script>
+const NF = new Intl.NumberFormat('vi-VN');
+const n = v => NF.format(v ?? 0);
+const pct = (a,b) => b ? (a/b*100) : 0;
+const p1 = v => v.toFixed(1).replace('.', ',');
+const el = (t,c,h) => { const e=document.createElement(t); if(c)e.className=c;
+  if(h!=null)e.innerHTML=h; return e; };
+
+const S = {data:null, paused:false, timer:null};
+
+/* ---------------- tooltip ---------------- */
+const tip = document.getElementById('tip');
+document.addEventListener('mousemove', e => {
+  const t = e.target.closest('[data-tip]');
+  if(!t){ tip.style.opacity=0; return; }
+  tip.innerHTML = t.dataset.tip;
+  tip.style.opacity = 1;
+  const r = tip.getBoundingClientRect();
+  let x = e.clientX+14, y = e.clientY+16;
+  if(x+r.width > innerWidth-8) x = e.clientX-r.width-14;
+  if(y+r.height > innerHeight-8) y = e.clientY-r.height-16;
+  tip.style.left = x+'px'; tip.style.top = y+'px';
+});
+
+/* ---------------- khung thẻ ---------------- */
+function card(title, hint, withTable){
+  const c = el('div','card');
+  const head = el('div','card-head');
+  const box = el('div'); box.style.flex='1';
+  box.appendChild(el('h2',null,title));
+  if(hint) box.appendChild(el('p','hint',hint));
+  head.appendChild(box);
+  if(withTable){
+    const b = el('button',null,'Bảng số liệu');
+    b.setAttribute('aria-pressed','false');
+    b.onclick = () => { const on = c.classList.toggle('show-table');
+      b.setAttribute('aria-pressed', on); };
+    head.appendChild(b);
+  }
+  c.appendChild(head);
+  return c;
+}
+function table(cols, rows){
+  const w = el('div','scroll'), t = el('table');
+  const hr = el('tr');
+  cols.forEach(c => hr.appendChild(el('th', c.num?'num':null, c.t)));
+  t.appendChild(el('thead')).appendChild(hr);
+  const tb = el('tbody');
+  rows.forEach(r => { const tr = el('tr');
+    r.forEach((v,i) => tr.appendChild(el('td', cols[i].num?'num':null, v)));
+    tb.appendChild(tr); });
+  t.appendChild(tb); w.appendChild(t); return w;
+}
+
+/* ---------------- KPI ---------------- */
+function tile(k, v, note, hero){
+  const t = el('div','tile');
+  t.appendChild(el('div','k',k));
+  t.appendChild(el('div','v'+(hero?' hero':''), v));
+  if(note) t.appendChild(el('div','n',note));
+  return t;
+}
+function renderKpis(d){
+  const T = d.totals, g = el('div','kpis');
+  g.appendChild(tile('Tổng audio đạt chuẩn', n(T.all),
+    `${p1(T.hours)} giờ · ${(T.bytes/1e9).toFixed(2).replace('.',',')} GB`, true));
+  g.appendChild(tile('REAL',
+    `<span class="sw" style="background:var(--s1)"></span>${n(T.real)}`,
+    `${p1(T.hours_real)} giờ · ${n(T.speakers_real)} speaker`));
+  g.appendChild(tile('FAKE',
+    `<span class="sw" style="background:var(--s2)"></span>${n(T.fake)}`,
+    `${p1(T.hours_fake)} giờ · ${n(T.speakers_fake)} speaker`));
+
+  let bs, bt, bn;
+  if(T.fake === 0){ bs='idle'; bt='Chưa dựng FAKE'; bn='Chạy build_fake sau khi REAL xong'; }
+  else if(T.balanced){ bs='good'; bt='Cân bằng 50/50'; bn='REAL = FAKE, đúng yêu cầu'; }
+  else { bs = T.gap/Math.max(T.real,1) > 0.02 ? 'crit' : 'warn';
+         bt = `Lệch ${n(T.gap)}`; bn='FAKE chưa bằng REAL'; }
+  g.appendChild(tile('Cân bằng REAL / FAKE',
+    `<span class="badge"><span class="dot ${bs}"></span>${bt}</span>`, bn));
+
+  const rate = d.rate_per_sec || 0;
+  const remain = d.sources.reduce((s,x) => s + Math.max(x.expected - x.scanned, 0), 0);
+  const running = d.status === 'running';
+  // ETA chỉ có nghĩa khi job đang chạy: pha `write` của FAKE bỏ qua phần lớn item
+  // nên nhịp của nó không suy ra được thời gian cho một pha quét đầy đủ.
+  g.appendChild(tile('Tốc độ', rate ? p1(rate) : '—',
+    !rate ? 'Chưa có số liệu'
+          : running ? `audio/giây · còn ~${n(remain)} → ETA ~${Math.round(remain/rate/60)} phút`
+                    : `audio/giây ở lần chạy gần nhất · còn ~${n(remain)} audio chưa duyệt`));
+  g.appendChild(tile('Bị loại', n(T.rejected),
+    `Tỷ lệ giữ ${p1(pct(T.all, T.all + T.rejected))}%`));
+  if(d.disk_free != null)
+    g.appendChild(tile('Đĩa còn trống', (d.disk_free/1e9).toFixed(1).replace('.',',')+' GB',
+      d.disk_free < 10e9 ? '⚠ sắp hết chỗ' : 'đủ chỗ'));
+  return g;
+}
+
+/* ---------------- tiến độ quét theo nguồn ---------------- */
+const PHASE_VI = {scan:'quét', 'index':'pha index', 'write':'pha write'};
+function renderSources(d){
+  const c = card('Tiến độ quét theo nguồn',
+    'Mỗi thanh là tỷ lệ audio đã duyệt qua trên tổng của nguồn đó.', true);
+  const rows = el('div','rows'), trows = [];
+  d.sources.forEach(s => {
+    if(!s.expected) return;
+    const phases = s.phases.length ? s.phases : [{name:'scan', scanned:0, units:0, units_done:0}];
+    phases.forEach(ph => {
+      const p = Math.min(pct(ph.scanned, s.expected), 100);
+      const kept = s.accepted + s.rejected;
+      const tag = phases.length>1 ? ` · ${PHASE_VI[ph.name]||ph.name}` : '';
+      const wrap = el('div');
+      const lab = el('div','row-lab');
+      lab.appendChild(el('span','nm',
+        `<span class="sw" style="background:var(--${s.label?'s2':'s1'})"></span>${s.name}${tag}`));
+      lab.appendChild(el('span','rt', `${n(ph.scanned)} / ${n(s.expected)} · ${p1(p)}%`));
+      wrap.appendChild(lab);
+      const tr = el('div','track');
+      const f = el('div','fill'+(s.label?' s2':''));
+      f.style.width = p+'%';
+      tr.appendChild(f);
+      tr.dataset.tip = `<b>${s.name}${tag}</b>`
+        + `<div class="r"><span>Đã duyệt</span><span>${n(ph.scanned)} / ${n(s.expected)}</span></div>`
+        + `<div class="r"><span>Nhận</span><span>${n(s.accepted)}</span></div>`
+        + `<div class="r"><span>Loại</span><span>${n(s.rejected)}</span></div>`
+        + (kept ? `<div class="r"><span>Tỷ lệ giữ</span><span>${p1(pct(s.accepted,kept))}%</span></div>` : '')
+        + (s.candidates ? `<div class="r"><span>Ứng viên</span><span>${n(s.candidates)}</span></div>` : '')
+        + (s.selected ? `<div class="r"><span>Đã chọn</span><span>${n(s.selected)}</span></div>` : '')
+        + `<div class="r"><span>Unit xong</span><span>${ph.units_done} / ${ph.units}</span></div>`;
+      wrap.appendChild(tr);
+      rows.appendChild(wrap);
+      trows.push([`${s.name}${tag}`, n(ph.scanned), n(s.expected), p1(p)+'%',
+                  n(s.accepted), n(s.rejected), `${ph.units_done}/${ph.units}`]);
+    });
+  });
+  c.appendChild(rows);
+  const tw = el('div','tbl');
+  tw.appendChild(table([{t:'Nguồn'},{t:'Đã duyệt',num:1},{t:'Tổng',num:1},{t:'%',num:1},
+    {t:'Nhận',num:1},{t:'Loại',num:1},{t:'Unit',num:1}], trows));
+  c.appendChild(tw);
+  return c;
+}
+
+/* ---------------- phân bố duration REAL vs FAKE ---------------- */
+function renderBuckets(d){
+  const c = card('Phân bố duration — REAL so với FAKE',
+    'Hai phân bố phải bám nhau, nếu không model sẽ học duration thay vì học đặc trưng AI-generated.',
+    true);
+  const lg = el('div','legend');
+  lg.innerHTML = `<span><span class="sw" style="background:var(--s1)"></span>REAL</span>`
+               + `<span><span class="sw" style="background:var(--s2)"></span>FAKE</span>`;
+  c.appendChild(lg);
+  const R = d.buckets.real, F = d.buckets.fake;
+  const tR = Object.values(R).reduce((a,b)=>a+b,0), tF = Object.values(F).reduce((a,b)=>a+b,0);
+  const maxShare = Math.max(...d.bucket_names.map(b =>
+    Math.max(pct(R[b]||0,tR), pct(F[b]||0,tF))), 1);
+  const rows = el('div','rows'), trows = [];
+  d.bucket_names.forEach(b => {
+    const rv = R[b]||0, fv = F[b]||0, rs = pct(rv,tR), fs = pct(fv,tF);
+    const wrap = el('div');
+    wrap.appendChild(el('div','bkt', b));
+    const pair = el('div','pair');
+    [['REAL',rv,rs,''],['FAKE',fv,fs,' s2']].forEach(([nm,v,sh,cls]) => {
+      const line = el('div','bline');
+      const tr = el('div','track');
+      const f = el('div','fill'+cls);
+      f.style.width = (sh/maxShare*100)+'%';
+      tr.appendChild(f);
+      tr.dataset.tip = `<b>${nm} · ${b}</b>`
+        + `<div class="r"><span>Số audio</span><span>${n(v)}</span></div>`
+        + `<div class="r"><span>Tỷ trọng</span><span>${p1(sh)}%</span></div>`
+        + `<div class="r"><span>Lệch REAL↔FAKE</span><span>${p1(Math.abs(rs-fs))} điểm %</span></div>`;
+      line.appendChild(tr);
+      line.appendChild(el('span','blab', `${n(v)} · ${p1(sh)}%`));
+      pair.appendChild(line);
+    });
+    wrap.appendChild(pair);
+    rows.appendChild(wrap);
+    trows.push([b, n(rv), p1(rs)+'%', n(fv), p1(fs)+'%', p1(Math.abs(rs-fs))]);
+  });
+  c.appendChild(rows);
+  const tw = el('div','tbl');
+  tw.appendChild(table([{t:'Bucket'},{t:'REAL',num:1},{t:'REAL %',num:1},
+    {t:'FAKE',num:1},{t:'FAKE %',num:1},{t:'Lệch (điểm %)',num:1}], trows));
+  c.appendChild(tw);
+  return c;
+}
+
+/* ---------------- lý do loại ---------------- */
+function renderRejects(d){
+  const agg = {}, bySrc = {};
+  d.sources.forEach(s => s.reject_reasons.forEach(r => {
+    agg[r.label] = (agg[r.label]||0) + r.n;
+    (bySrc[r.label] = bySrc[r.label]||[]).push([s.name, r.n]);
+  }));
+  const items = Object.entries(agg).sort((a,b) => b[1]-a[1]);
+  const c = card('Lý do bị loại', 'Gộp tất cả nguồn, sắp theo số lượng.', true);
+  if(!items.length){ c.appendChild(el('p','empty','Chưa có audio nào bị loại.')); return c; }
+  const max = items[0][1];
+  const rows = el('div','rows');
+  items.forEach(([lab, v]) => {
+    const wrap = el('div');
+    const l = el('div','row-lab');
+    l.appendChild(el('span','nm', lab));
+    l.appendChild(el('span','rt', `${n(v)} · ${p1(pct(v, d.totals.rejected))}%`));
+    wrap.appendChild(l);
+    const tr = el('div','track');
+    const f = el('div','fill'); f.style.width = (v/max*100)+'%';
+    tr.appendChild(f);
+    tr.dataset.tip = `<b>${lab}</b>`
+      + bySrc[lab].sort((a,b)=>b[1]-a[1])
+          .map(([s,x]) => `<div class="r"><span>${s}</span><span>${n(x)}</span></div>`).join('');
+    wrap.appendChild(tr);
+    rows.appendChild(wrap);
+  });
+  c.appendChild(rows);
+  const tw = el('div','tbl');
+  tw.appendChild(table([{t:'Lý do'},{t:'Số audio',num:1},{t:'Tỷ trọng',num:1}],
+    items.map(([l,v]) => [l, n(v), p1(pct(v, d.totals.rejected))+'%'])));
+  c.appendChild(tw);
+  return c;
+}
+
+/* ---------------- chọn mẫu FAKE ---------------- */
+function renderSelection(d){
+  const s = d.selection; if(!s) return null;
+  const c = card('Chọn mẫu FAKE cân bằng', `Seed ${s.seed} · ${n(s.speakers_used)}/${n(s.speakers_available)} speaker được dùng.`);
+  const rows = d.bucket_names.map(b => [b, n(s.bucket_target[b]), n(s.bucket_taken[b]),
+    n(s.bucket_available[b]), s.spill && s.spill[b] ? '+'+n(s.spill[b]) : '—']);
+  c.appendChild(table([{t:'Bucket'},{t:'Mục tiêu',num:1},{t:'Đã lấy',num:1},
+    {t:'Có sẵn',num:1},{t:'Bù từ bucket khác',num:1}], rows));
+  if(s.short_by)
+    c.appendChild(el('p','hint',
+      `⚠ Thiếu ${n(s.short_by)} mẫu — không đủ ứng viên FAKE. Phải giảm REAL hoặc thêm generator.`));
+  return c;
+}
+
+/* ---------------- shard / Kaggle ---------------- */
+function renderShards(d){
+  const sh = d.shards || [];
+  const pushed = sh.filter(s => s.pushed_at).length;
+  const c = card('Shard & đồng bộ Kaggle',
+    `${n(sh.length)} shard · đã đẩy ${n(pushed)}`, false);
+  if(!sh.length){ c.appendChild(el('p','empty','Chưa có shard nào.')); return c; }
+  const rows = sh.slice().reverse().slice(0,14).map(s => [
+    s.name, s.status === 'open' ? 'đang mở' : 'đã đóng', n(s.n_files),
+    ((s.bytes||0)/1e6).toFixed(1).replace('.',',')+' MB',
+    s.push_target || '—', s.pushed_at ? s.pushed_at.replace('T',' ').replace('+00:00',' UTC') : 'chưa đẩy']);
+  c.appendChild(table([{t:'Shard'},{t:'Trạng thái'},{t:'File',num:1},{t:'Dung lượng',num:1},
+    {t:'Dataset Kaggle'},{t:'Đẩy lúc'}], rows));
+  if(sh.length > 14) c.appendChild(el('p','hint', `Hiện 14 shard mới nhất trên tổng ${n(sh.length)}.`));
+  return c;
+}
+
+/* ---------------- vẽ ---------------- */
+function render(){
+  const d = S.data, app = document.getElementById('app');
+  const st = document.getElementById('status');
+  if(!d || !d.ready){
+    st.innerHTML = '<span class="badge"><span class="dot idle"></span>Chưa sẵn sàng</span>';
+    app.innerHTML = '';
+    app.appendChild(el('div','card',
+      `<p class="empty">${d ? (d.message||'Không đọc được tiến độ.') : 'Đang tải…'}</p>`));
+    return;
+  }
+  const map = {running:['good','Đang chạy'], stopped:['warn','Đã dừng'],
+               done:['good','Hoàn tất'], unknown:['idle','Không rõ']};
+  const [cls, txt] = map[d.status] || map.unknown;
+  st.innerHTML = `<span class="badge"><span class="dot ${cls}"></span>${txt}</span>`;
+  document.getElementById('updated').textContent = d.updated_at
+    ? 'Cập nhật ' + d.updated_at.replace('T',' ').replace('+00:00',' UTC') : '';
+  document.getElementById('foot').textContent =
+    `${d.out} · làm mới mỗi 5 giây · server chỉ đọc, không ảnh hưởng tiến độ job`;
+
+  const frag = document.createDocumentFragment();
+  frag.appendChild(renderKpis(d));
+  frag.appendChild(renderSources(d));
+  frag.appendChild(renderBuckets(d));
+  const sel = renderSelection(d); if(sel) frag.appendChild(sel);
+  frag.appendChild(renderRejects(d));
+  frag.appendChild(renderShards(d));
+  app.innerHTML = '';
+  app.appendChild(frag);
+}
+
+async function tick(){
+  try{
+    const r = await fetch('/api/progress', {cache:'no-store'});
+    S.data = await r.json();
+  }catch(e){
+    S.data = {ready:false, message:'Mất kết nối tới server dashboard.'};
+  }
+  render();
+}
+
+document.getElementById('pause').onclick = e => {
+  S.paused = !S.paused;
+  e.target.textContent = S.paused ? 'Tiếp tục' : 'Tạm dừng';
+  e.target.setAttribute('aria-pressed', S.paused);
+};
+const themeBtn = document.getElementById('theme');
+themeBtn.onclick = () => {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  document.documentElement.setAttribute('data-theme', dark ? 'light' : 'dark');
+  themeBtn.textContent = dark ? 'Nền tối' : 'Nền sáng';
+};
+tick();
+setInterval(() => { if(!S.paused) tick(); }, 5000);
+</script>
+</body>
+</html>

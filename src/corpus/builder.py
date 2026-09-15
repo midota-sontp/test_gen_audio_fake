@@ -34,6 +34,12 @@ class BuildConfig:
     checkpoint_max_seconds: float = 60.0
     shard_max_bytes: int = 256 * 1024 * 1024
     limit_per_source: int | None = None
+    # Pass 1 của FAKE: chỉ chấm chất lượng rồi ghi sổ ứng viên, không ghi audio.
+    index_only: bool = False
+    # Pass 2: chỉ xử lý đúng các id đã được chọn, item khác bỏ qua trước khi decode.
+    only_ids: set | None = None
+    cursor_prefix: str = ""          # tách con trỏ của hai pass trên cùng một nguồn
+    source_kwargs: dict = field(default_factory=dict)   # tham số riêng cho từng nguồn
     max_seconds: float | None = None     # ngân sách thời gian, dừng sạch trước khi bị kill
     hf_token: str | None = None
     kaggle: KaggleSync | None = None
@@ -50,6 +56,9 @@ class Builder:
         self.writer = DistWriter(self.out / "dist", self.state, cfg.shard_max_bytes)
         self.progress_path = self.out / "state" / "progress.json"
         self.seen = self.state.load_hashes()
+        if cfg.index_only:           # pass 1 chưa ghi vào bảng hashes -> lấy thêm từ candidates
+            for name in cfg.sources:
+                self.seen |= self.state.candidate_hashes(name)
         self.throttle = PushThrottle(cfg.push_index_every, cfg.push_shard_every)
         self.started = time.time()
         self.stopping = False
@@ -60,7 +69,8 @@ class Builder:
         self._processed_total = 0
         self.state.set_meta("config", {
             k: (str(v) if isinstance(v, Path) else v)
-            for k, v in vars(cfg).items() if not isinstance(v, KaggleSync)})
+            for k, v in vars(cfg).items()
+            if not isinstance(v, (KaggleSync, set))})
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, self._on_signal)
 
@@ -92,21 +102,23 @@ class Builder:
         return False
 
     def _run_source(self, name: str) -> None:
-        src = build_source(name, self.cfg.cache_dir, self.cfg.hf_token)
+        src = build_source(name, self.cfg.cache_dir, self.cfg.hf_token,
+                           **self.cfg.source_kwargs.get(name, {}))
         print(f"\n=== Nguồn: {name} ===", flush=True)
         src.prepare()
         units = src.units()
         taken = 0
+        ckey = f"{self.cfg.cursor_prefix}{name}"
         for unit_index, unit in enumerate(units):
-            start_row, done = self.state.cursor_for(name, unit, unit_index)
+            start_row, done = self.state.cursor_for(ckey, unit, unit_index)
             if done:
                 print(f"  [bỏ qua] {unit}: đã xong.", flush=True)
                 continue
             print(f"  [chạy] {unit} từ dòng {start_row}", flush=True)
             row = start_row - 1
             for row, item in src.iter_unit(unit, start_row):
-                self.process(item)
-                self._pending.cursor[(name, unit)] = (row + 1, False)
+                self.process(item, unit=unit, row=row)
+                self._pending.cursor[(ckey, unit)] = (row + 1, False)
                 self._processed_total += 1
                 self._processed_since += 1
                 taken += 1
@@ -117,12 +129,14 @@ class Builder:
                 if self.cfg.limit_per_source and taken >= self.cfg.limit_per_source:
                     self.checkpoint(force=True)
                     return
-            self._pending.cursor[(name, unit)] = (row + 1, True)
+            self._pending.cursor[(ckey, unit)] = (row + 1, True)
             self.checkpoint(force=True)
 
     # ------------------------------------------------------- xử lý một audio
-    def process(self, item) -> bool:
+    def process(self, item, unit: str = "", row: int = -1) -> bool:
         cfg = self.cfg
+        if cfg.only_ids is not None and item.item_id not in cfg.only_ids:
+            return False                       # không được chọn -> bỏ qua trước cả decode
         if self.state.has_item(item.item_id) or item.item_id in self._pending.item_ids:
             return False                       # đã ghi ở lần chạy trước
 
@@ -172,8 +186,22 @@ class Builder:
         if h_norm in self.seen:
             return self._reject(item, qc.RejectReason.DUP_NORM, h_norm[:16])
 
+        out_duration_ = len(pcm16) / cfg.target_sr
+        if cfg.index_only:
+            # Ghi sổ ứng viên, chưa ghi audio: số FAKE cuối cùng phụ thuộc số REAL,
+            # mà số REAL chỉ biết sau khi quét xong toàn bộ nguồn REAL.
+            self.seen.add(h_raw)
+            self.seen.add(h_norm)
+            self._pending.candidates.append((
+                item.item_id, item.source, unit, row, item.speaker_id,
+                item.recording_id, out_duration_, _bucket(out_duration_),
+                round(speech, 4), round(clip, 6), h_raw, h_norm))
+            self._pending.item_ids.add(item.item_id)
+            self._since_ckpt += 1
+            return True
+
         # 7. Ghi audio + metadata
-        out_duration = len(pcm16) / cfg.target_sr
+        out_duration = out_duration_
         arcname = f"audio/{'fake' if item.label else 'real'}/{item.source}/{item.item_id}.wav"
         shard = self.writer.shard
         self.writer.add(arcname, wav, {
@@ -213,7 +241,7 @@ class Builder:
         self._pending.hashes.append((h_norm, "norm", item.item_id))
         self._pending.items.append((item.item_id, item.source, shard, arcname,
                                     item.speaker_id, item.recording_id,
-                                    out_duration, len(wav)))
+                                    out_duration, len(wav), item.label, item.generator))
         self._pending.item_ids.add(item.item_id)
         self._since_ckpt += 1
         return True
@@ -242,6 +270,8 @@ class Builder:
                 st.add_hash(h, kind, iid)
             for rec in self._pending.items:
                 st.add_item(*rec)
+            for rec in self._pending.candidates:
+                st.add_candidate(*rec)
             for rec in self._pending.rejects:
                 st.add_reject(*rec)
             for (source, unit), (nxt, done) in self._pending.cursor.items():
@@ -327,13 +357,18 @@ class Builder:
             print(f"  [kaggle] LỖI đẩy index: {e}", flush=True)
 
 
+def _bucket(d: float) -> str:
+    return "2-4s" if d < 4 else "4-6s" if d < 6 else "6-8s" if d < 8 else "8-10s"
+
+
 @dataclass
 class _Pending:
     items: list = field(default_factory=list)
+    candidates: list = field(default_factory=list)
     rejects: list = field(default_factory=list)
     hashes: list = field(default_factory=list)
     cursor: dict = field(default_factory=dict)
     item_ids: set = field(default_factory=set)
 
     def __bool__(self) -> bool:
-        return bool(self.items or self.rejects or self.cursor)
+        return bool(self.items or self.candidates or self.rejects or self.cursor)

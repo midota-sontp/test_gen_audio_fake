@@ -35,7 +35,7 @@ def load(out: Path) -> dict:
     if db.exists():
         try:
             from corpus.state import State
-            st = State(db)
+            st = State(db, readonly=True)
             data = st.stats()
             st.close()
             data["_from"] = "sqlite"

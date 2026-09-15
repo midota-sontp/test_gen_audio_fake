@@ -32,5 +32,38 @@ services:
       - corpus-data:/data
     command: ["--out=/data/out"]
 
+  # Chạy SAU khi build-corpus xong: số FAKE lấy bằng đúng số REAL đã nhận.
+  # docker compose run --rm build-fake
+  build-fake:
+    image: ai-detector/corpus-builder:latest
+    entrypoint: ["python", "/app/scripts/build_fake.py"]
+    environment:
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:?dat trong file .env}
+      KAGGLE_KEY: ${KAGGLE_KEY:?dat trong file .env}
+      KAGGLE_SLUG: ${KAGGLE_SLUG:-vi-real-audio-demo-v1}
+      HF_TOKEN: ${HF_TOKEN:?VieNeu-TTS-140h la dataset gated, can HF token}
+    volumes:
+      - corpus-data:/data
+    command: ["--out=/data/out", "--cache=/data/cache", "--checkpoint-every=10"]
+
+  # Dashboard HTML: mở http://<máy-docker>:8000
+  dashboard:
+    image: ai-detector/corpus-builder:latest
+    entrypoint: ["python", "/app/scripts/serve_monitor.py"]
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8000}:8000"
+    volumes:
+      - corpus-data:/data
+    command: ["--out=/data/out", "--host=0.0.0.0", "--port=8000"]
+
+  # docker compose run --rm export --verify
+  export:
+    image: ai-detector/corpus-builder:latest
+    entrypoint: ["python", "/app/scripts/export_dataset.py"]
+    volumes:
+      - corpus-data:/data
+    command: ["--out=/data/out", "--dest=/data/dataset"]
+
 volumes:
   corpus-data:

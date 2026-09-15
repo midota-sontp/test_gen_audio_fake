@@ -12,13 +12,18 @@ Raw Audio → decode? → 2–10s? → speech ≥50%? → clipping <1%? → SHA2
 ## Chạy nhanh
 
 ```bash
-cp docker/.env.example docker/.env          # điền KAGGLE_USERNAME / KAGGLE_KEY
-docker compose -f docker/docker-compose.yml up -d --build
+cp docker/.env.example docker/.env          # KAGGLE_USERNAME / KAGGLE_KEY / HF_TOKEN
+C="docker compose -f docker/docker-compose.yml"
 
-# theo dõi
-docker compose -f docker/docker-compose.yml run --rm monitor --out=/data/out --watch=10
-docker compose -f docker/docker-compose.yml logs -f build-corpus
+$C up -d --build                     # 1. REAL: lấy MỌI audio đạt chuẩn từ 3 nguồn
+                                     #    dashboard: http://<máy-docker>:8000
+$C run --rm monitor --watch=10       #    hoặc theo dõi trong terminal
+$C run --rm build-fake               # 2. FAKE: lấy đúng bằng số REAL đã nhận
+$C run --rm export --verify          # 3. bung ra cây dataset cuối
 ```
+
+Thứ tự bắt buộc: FAKE cần biết số REAL nên phải chạy sau, và chỉ chạy khi
+`monitor` báo cả ba nguồn REAL đã `unit x/x`.
 
 Chạy thử không đụng Kaggle:
 
@@ -29,6 +34,30 @@ docker run --rm -v $PWD/data:/data ai-detector/corpus-builder:latest \
 
 Chạy trực tiếp (không Docker): `pip install -r requirements.txt` rồi
 `python scripts/build_corpus.py --out ./data/out --cache ./data/cache --no-kaggle`.
+
+## Theo dõi tiến độ
+
+Hai cách, cùng đọc một nguồn số liệu:
+
+```bash
+$C up -d dashboard                   # UI web  -> http://<máy-docker>:8000
+$C run --rm monitor --watch=10       # bản terminal, cho lúc chỉ có ssh
+```
+
+Dashboard tự làm mới mỗi 5 giây, có nút tạm dừng và nút đổi nền sáng/tối. Nội dung:
+
+| Khối | Trả lời câu hỏi gì |
+|---|---|
+| Hàng chỉ số | tổng audio, REAL, FAKE, **có cân bằng chưa**, tốc độ, số bị loại, đĩa còn trống |
+| Tiến độ quét theo nguồn | mỗi nguồn đã duyệt tới đâu; VieNeu tách riêng pha `index` và `write` |
+| Phân bố duration REAL ↔ FAKE | hai phân bố có bám nhau không — chỗ dễ hỏng nhất của dataset |
+| Chọn mẫu FAKE | mục tiêu / đã lấy / có sẵn từng bucket, phần bù chéo bucket, seed |
+| Lý do bị loại | loại vì gì, rê chuột ra chi tiết theo nguồn |
+| Shard & đồng bộ Kaggle | shard nào đã đẩy, đẩy lúc nào, vào dataset nào |
+
+Mỗi biểu đồ có nút **Bảng số liệu** để đọc bằng số thay vì bằng thanh.
+Server dashboard mở sqlite ở chế độ **read-only**, không xin khoá ghi nên không
+làm job chậm lại hay hỏng tiến độ.
 
 ## Nguồn dữ liệu
 
@@ -42,9 +71,12 @@ VIVOS lấy bản HuggingFace thay vì Kaggle: **cùng nội dung** nhưng khôn
 credential để tải. File mp3 của Common Voice thực tế là 32/48 kHz (dataset card ghi
 16 kHz là sai) nên bước resample là bắt buộc.
 
-Thêm nguồn FAKE (vd. VieNeu-TTS-140h) = thêm một file trong `src/corpus/sources/`
-rồi đăng ký ở `registry.py`, đặt `label = 1` và `generator = "<tên generator>"`.
-VieNeu-TTS-140h là dataset *gated*: cần accept terms rồi truyền `HF_TOKEN`.
+| Nguồn FAKE | Lấy từ | Số audio | Speaker |
+|---|---|---|---|
+| `vieneu_tts` | HF `pnnbao-ump/VieNeu-TTS-140h` (49 file arrow, **~24 GB**) | 74,858 → lấy đúng bằng số REAL | 193 |
+
+Thêm generator FAKE khác = thêm một file trong `src/corpus/sources/` rồi đăng ký ở
+`registry.py`, đặt `label = 1` và `generator = "<tên>"`.
 
 ## Ngưỡng lọc
 
@@ -68,7 +100,14 @@ VieNeu-TTS-140h là dataset *gated*: cần accept terms rồi truyền `HF_TOKEN
 
 VietMed gần như không bị loại vì speech ratio (thoại điện thoại, nói liên tục).
 
-## Output
+> **Cảnh báo về sample rate nguồn.** VietMed là thoại điện thoại **8 kHz gốc**, còn
+> Common Voice là 32/48 kHz. Upsample 8→16 kHz để lại vách phổ cứng ở 4 kHz. Vì
+> toàn bộ VietMed là REAL còn FAKE (VieNeu-TTS) là full-band, model rất dễ học tắt
+> theo băng thông thay vì học đặc trưng AI-generated. Cột `original_sample_rate`
+> trong metadata giữ lại thông tin này — nên kiểm tra khi đánh giá, và cân nhắc
+> lowpass đồng đều cả REAL lẫn FAKE khi train.
+
+## Output trong lúc chạy
 
 ```
 /data/out/
@@ -87,6 +126,80 @@ sha256_raw, sha256_norm, shard, bytes`.
 
 `split` để `null` — chia train/val/test speaker-disjoint là bước sau, làm trên
 metadata chứ không di chuyển file.
+
+## Theo dõi tiến độ
+
+Hai cách, cùng đọc một nguồn dữ liệu:
+
+```bash
+$C up -d dashboard                   # web: http://<máy-docker>:8000, tự làm mới 5 giây
+$C run --rm monitor --watch=10       # terminal
+```
+
+Dashboard là một trang tĩnh `dashboard/index.html` + một API JSON `/api/progress`.
+Server **chỉ đọc**: sqlite mở ở chế độ read-only nên không đụng vào tiến độ của job,
+và mọi lỗi phía dashboard đều bị nuốt để không bao giờ làm sập job đang chạy.
+Đổi cổng bằng `DASHBOARD_PORT` trong `.env`.
+
+## Phần FAKE — cân bằng với REAL
+
+VieNeu-TTS-140h là dataset **gated**: accept terms tại
+<https://huggingface.co/datasets/pnnbao-ump/VieNeu-TTS-140h> rồi đặt `HF_TOKEN`.
+Kiểm tra tên cột trước khi chạy thật (repo không công khai schema):
+
+```bash
+docker compose -f docker/docker-compose.yml run --rm build-fake --probe
+```
+
+Chạy sau khi REAL xong — số FAKE **lấy đúng bằng số REAL đã nhận**:
+
+```bash
+docker compose -f docker/docker-compose.yml run --rm build-fake
+```
+
+Ba pha, pha nào cũng resume được (`--phase index|select|write`):
+
+| Pha | Làm gì | Vì sao tách |
+|---|---|---|
+| `index` | quét cả 74,858 audio, chạy **đúng bộ lọc của REAL**, ghi sổ ứng viên vào bảng `candidates` — chưa ghi audio | chưa biết cần bao nhiêu: N chỉ xác định sau khi REAL quét xong |
+| `select` | N = số REAL; chọn N ứng viên bám **phân bố duration thực tế của REAL**, chia đều cho speaker theo vòng tròn | tránh model học duration hoặc học một giọng nào đó thay vì học đặc trưng AI-generated |
+| `write` | quét lại, chỉ ghi N audio đã chọn | item không được chọn bị bỏ qua **trước khi decode** nên pha này nhanh hơn pha index nhiều |
+
+Chọn mẫu là **xác định** (`--seed`), chạy lại cho ra đúng tập cũ. Nếu một bucket
+duration thiếu ứng viên, phần thiếu được bù từ bucket còn dư và ghi rõ trong
+`spill` của báo cáo. Nếu tổng ứng viên < N thì báo `short_by` và FAKE sẽ ít hơn REAL
+— khi đó phải giảm REAL hoặc thêm generator, script không tự ý nới ngưỡng lọc.
+
+**Dung lượng:** mặc định giữ cache 24 GB để pha `write` đọc lại từ đĩa.
+`--no-keep-cache` xoá từng file arrow sau khi xử lý (đĩa ~500 MB thay vì 24 GB,
+đổi lại phải tải lại toàn bộ ở pha `write`).
+
+## Dataset cuối (spec §12)
+
+Tar shard chỉ là **dạng vận chuyển** — Kaggle upload 30k file WAV rời rất chậm và
+hay lỗi. Bung ra cây dataset chuẩn bằng một lệnh riêng, chạy lại bao nhiêu lần cũng
+được mà không đụng tới tiến độ:
+
+```bash
+docker compose -f docker/docker-compose.yml run --rm export --verify
+# hoặc: python scripts/export_dataset.py --out /data/out --dest /data/dataset --verify
+```
+
+```
+/data/dataset/vietnamese-audio-deepfake-demo/
+├── audio/
+│   ├── real/{common_voice,vietmed,vivos}/*.wav
+│   └── fake/<generator>/*.wav
+├── metadata/
+│   ├── metadata.csv
+│   ├── metadata.parquet
+│   └── metadata.jsonl
+└── README.md                    # thống kê + attribution, sinh tự động
+```
+
+`--verify` đối chiếu `sha256_norm` của từng file sau khi bung. Bước này cần thêm
+~5 GB đĩa vì dữ liệu tồn tại đồng thời ở cả `dist/` lẫn `dataset/`.
+`--metadata-only` dựng lại ba file metadata mà không đụng WAV.
 
 ## Checkpoint & resume
 
@@ -129,8 +242,15 @@ python scripts/push_kaggle.py --out /data/out ... --retry-failed   # chỉ shard
 
 ## Dung lượng
 
-Ước tính output đầy đủ ~**4.5–5 GB** WAV (~30k audio). Cache nguồn thêm ~1.9 GB.
-Máy build cần ít nhất ~8 GB trống cho volume `corpus-data`.
+| Phần | Dung lượng |
+|---|---|
+| Cache nguồn REAL (parquet + tarball VIVOS) | ~1.9 GB |
+| Cache nguồn FAKE (49 file arrow VieNeu) | **~24 GB** (hoặc ~0.5 GB với `--no-keep-cache`) |
+| `dist/` — shard REAL + FAKE | ~9–10 GB |
+| `dataset/` — bung ra file rời (bước export) | ~9–10 GB nữa |
+
+Máy build nên có **~50 GB trống** cho volume `corpus-data` nếu giữ cache,
+hoặc ~25 GB nếu dùng `--no-keep-cache` và xoá `dist/` sau khi export.
 
 ## License
 
