@@ -1,109 +1,51 @@
 name: ai-detector
 
+# Mọi service dùng chung đúng một image và một volume.
+x-base: &base
+  image: ai-detector/corpus-builder:latest
+  volumes:
+    - corpus-data:/data
+  environment: &env
+    KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
+    KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
+    KAGGLE_KEY: ${KAGGLE_KEY:-}
+    KAGGLE_DATASET_SLUG: ${KAGGLE_DATASET_SLUG:-vietnamese-audio-deepfake-demo}
+    HF_TOKEN: ${HF_TOKEN:-}
+
 services:
-  build-corpus:
+  # Phần REAL: chạy nhiều giờ nên để nền.
+  #   docker compose up -d corpus
+  corpus:
+    <<: *base
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: ai-detector/corpus-builder:latest
     container_name: corpus-builder
-    # Job chạy nhiều giờ: tự dậy lại khi CHẾT (OOM, lỗi mạng), con trỏ resume lo phần
-    # còn lại. Không dùng unless-stopped: nó restart cả khi job đã chạy xong exit 0.
+    # Tự dậy lại khi CHẾT (OOM, đứt mạng); con trỏ resume lo phần còn lại.
+    # Không dùng unless-stopped: nó restart cả khi job đã xong và exit 0.
     restart: on-failure
-    stop_grace_period: 120s          # đủ để chốt checkpoint cuối khi nhận SIGTERM
-    environment:
-      KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
-      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
-      KAGGLE_KEY: ${KAGGLE_KEY:-}
-      KAGGLE_SLUG: ${KAGGLE_SLUG:-vi-real-audio-demo-v1}
-      HF_TOKEN: ${HF_TOKEN:-}
-    volumes:
-      - corpus-data:/data
-    command:
-      - --out=/data/out
-      - --cache=/data/cache
-      - --checkpoint-every=10
-      - --shard-max-mb=256
-      - --push-index-every=120
-      - --push-shard-every=900
+    stop_grace_period: 120s      # đủ để chốt checkpoint cuối khi nhận SIGTERM
+    command: ["real"]
 
-  # docker compose run --rm monitor --watch 10
-  monitor:
-    image: ai-detector/corpus-builder:latest
-    entrypoint: ["python", "/app/scripts/monitor.py"]
-    volumes:
-      - corpus-data:/data
-    command: ["--out=/data/out"]
-
-  # Chạy SAU khi build-corpus xong: số FAKE lấy bằng đúng số REAL đã nhận.
-  # docker compose run --rm build-fake
-  build-fake:
-    image: ai-detector/corpus-builder:latest
-    entrypoint: ["python", "/app/scripts/build_fake.py"]
-    environment:
-      KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
-      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
-      KAGGLE_KEY: ${KAGGLE_KEY:-}
-      KAGGLE_SLUG: ${KAGGLE_SLUG:-vi-real-audio-demo-v1}
-      HF_TOKEN: ${HF_TOKEN:-}
-    volumes:
-      - corpus-data:/data
-    command: ["--out=/data/out", "--cache=/data/cache", "--checkpoint-every=10"]
-
-  # Dashboard HTML: mở http://<máy-docker>:8000
+  # UI theo dõi tiến độ: http://<máy>:8000
+  #   docker compose up -d dashboard
   dashboard:
-    image: ai-detector/corpus-builder:latest
-    entrypoint: ["python", "/app/scripts/serve_monitor.py"]
+    <<: *base
     restart: unless-stopped
     ports:
       - "${DASHBOARD_PORT:-8000}:8000"
-    volumes:
-      - corpus-data:/data
-    command: ["--out=/data/out", "--host=0.0.0.0", "--port=8000"]
+    command: ["dashboard"]
 
-  # Đẩy shard lên Kaggle. Chạy được nhiều lần, --retry-failed chỉ đẩy cái còn thiếu.
-  # docker compose run --rm push
-  push:
-    image: ai-detector/corpus-builder:latest
-    entrypoint: ["python", "/app/scripts/push_kaggle.py"]
-    environment:
-      KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
-      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
-      KAGGLE_KEY: ${KAGGLE_KEY:-}
-      KAGGLE_SLUG: ${KAGGLE_SLUG:-vi-real-audio-demo-v1}
-    volumes:
-      - corpus-data:/data
-    command: ["--out=/data/out"]
-
-  # Đẩy cây dataset cuối lên Kaggle thành MỘT dataset.
-  # docker compose run --rm push-dataset
-  push-dataset:
-    image: ai-detector/corpus-builder:latest
-    entrypoint: ["python", "/app/scripts/push_dataset.py"]
-    environment:
-      KAGGLE_API_TOKEN: ${KAGGLE_API_TOKEN:-}
-      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
-      KAGGLE_KEY: ${KAGGLE_KEY:-}
-      KAGGLE_DATASET_SLUG: ${KAGGLE_DATASET_SLUG:-vietnamese-audio-deepfake-demo}
-    volumes:
-      - corpus-data:/data
-    command: ["--dataset=/data/dataset/vietnamese-audio-deepfake-demo"]
-
-  # Kiểm tra độc lập audio đã ghi: docker compose run --rm audit
-  audit:
-    image: ai-detector/corpus-builder:latest
-    entrypoint: ["python", "/app/scripts/audit_shards.py"]
-    volumes:
-      - corpus-data:/data
-    command: ["--out=/data/out"]
-
-  # docker compose run --rm export --verify
-  export:
-    image: ai-detector/corpus-builder:latest
-    entrypoint: ["python", "/app/scripts/export_dataset.py"]
-    volumes:
-      - corpus-data:/data
-    command: ["--out=/data/out", "--dest=/data/dataset"]
+  # Mọi việc còn lại, chạy một lần rồi thoát:
+  #   docker compose run --rm cli fake
+  #   docker compose run --rm cli export --verify
+  #   docker compose run --rm cli split --dry-run
+  #   docker compose run --rm cli audit
+  #   docker compose run --rm cli push --delete-old-versions
+  #   docker compose run --rm cli monitor --watch 10
+  cli:
+    <<: *base
+    command: []
 
 volumes:
   corpus-data:

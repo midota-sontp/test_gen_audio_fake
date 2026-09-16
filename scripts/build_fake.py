@@ -68,7 +68,9 @@ def parse_args(argv=None):
     p.add_argument("--kaggle-owner", default=os.getenv("KAGGLE_USERNAME"))
     p.add_argument("--kaggle-slug", default=os.getenv("KAGGLE_SLUG", "vi-real-audio-demo-v1"))
     p.add_argument("--kaggle-public", action="store_true")
-    p.add_argument("--no-kaggle", action="store_true")
+    p.add_argument("--kaggle-shard-sync", action="store_true",
+                   help="đồng bộ từng shard lên Kaggle ngay trong lúc chạy (mặc định tắt)")
+    p.add_argument("--no-kaggle", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--push-index-every", type=float, default=120.0)
     p.add_argument("--push-shard-every", type=float, default=900.0)
     return p.parse_args(argv)
@@ -153,9 +155,9 @@ def main(argv=None) -> int:
         return 0
 
     kaggle = None
-    if not a.no_kaggle:
+    if a.kaggle_shard_sync:
         if not a.kaggle_owner:
-            print("LỖI: thiếu --kaggle-owner / KAGGLE_USERNAME (hoặc dùng --no-kaggle).",
+            print("LỖI: thiếu --kaggle-owner / KAGGLE_USERNAME.",
                   file=sys.stderr)
             return 2
         kaggle = KaggleSync(a.kaggle_owner, a.kaggle_slug, out / "stage",
@@ -164,7 +166,7 @@ def main(argv=None) -> int:
             kaggle.check()
         except KaggleError as e:
             print(f"\nLỖI XÁC THỰC KAGGLE\n{e}\n"
-                  "Dùng --no-kaggle nếu chỉ muốn ghi xuống đĩa.", file=sys.stderr)
+                  "Bỏ --kaggle-shard-sync nếu chỉ muốn ghi xuống đĩa.", file=sys.stderr)
             return 2
 
     if a.phase in ("all", "index"):

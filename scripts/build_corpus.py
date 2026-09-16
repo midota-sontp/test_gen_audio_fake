@@ -2,8 +2,8 @@
 """Dựng corpus REAL tiếng Việt đạt chuẩn Demo v1.
 
 Ví dụ:
-  python scripts/build_corpus.py --out /data/out --cache /data/cache
-  python scripts/build_corpus.py --out /data/out --sources vivos --limit 50 --no-kaggle
+  corpus real                      # dùng qua dispatcher
+  python scripts/build_corpus.py --out /data/out --sources vivos --limit 50
 """
 from __future__ import annotations
 
@@ -57,7 +57,12 @@ def parse_args(argv=None):
     g.add_argument("--kaggle-owner", default=os.getenv("KAGGLE_USERNAME"))
     g.add_argument("--kaggle-slug", default=os.getenv("KAGGLE_SLUG", "vi-real-audio-demo-v1"))
     g.add_argument("--kaggle-public", action="store_true")
-    g.add_argument("--no-kaggle", action="store_true", help="chỉ ghi xuống đĩa")
+    g.add_argument("--kaggle-shard-sync", action="store_true",
+                   help="đồng bộ từng shard lên Kaggle NGAY TRONG lúc chạy, mỗi shard "
+                        "một dataset riêng. Mặc định TẮT: cách dùng thường là ghi xuống "
+                        "đĩa rồi `corpus push` một dataset duy nhất lúc cuối.")
+    g.add_argument("--no-kaggle", action="store_true",
+                   help=argparse.SUPPRESS)          # giữ cho quen tay, giờ là mặc định
     g.add_argument("--push-index-every", type=float, default=120.0,
                    help="giây giữa hai lần đẩy file tiến độ (nhẹ, vài KB)")
     g.add_argument("--push-shard-every", type=float, default=900.0,
@@ -72,10 +77,10 @@ def main(argv=None) -> int:
     cache.mkdir(parents=True, exist_ok=True)
 
     kaggle = None
-    if not a.no_kaggle:
+    if a.kaggle_shard_sync:
         if not a.kaggle_owner:
             print("LỖI: thiếu --kaggle-owner (hoặc biến KAGGLE_USERNAME). "
-                  "Dùng --no-kaggle nếu chỉ muốn ghi xuống đĩa.", file=sys.stderr)
+                  "Bỏ --kaggle-shard-sync nếu chỉ muốn ghi xuống đĩa.", file=sys.stderr)
             return 2
         kaggle = KaggleSync(a.kaggle_owner, a.kaggle_slug, out / "stage",
                             public=a.kaggle_public)
@@ -83,8 +88,8 @@ def main(argv=None) -> int:
             kaggle.check()
         except KaggleError as e:
             print(f"\nLỖI XÁC THỰC KAGGLE\n{e}\n"
-                  "Dùng --no-kaggle nếu chỉ muốn ghi xuống đĩa, đẩy sau bằng "
-                  "`docker compose run --rm push`.", file=sys.stderr)
+                  "Bỏ --kaggle-shard-sync nếu chỉ muốn ghi xuống đĩa, đẩy sau bằng "
+                  "`corpus push`.", file=sys.stderr)
             return 2
 
     cfg = BuildConfig(

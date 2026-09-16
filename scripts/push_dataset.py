@@ -19,12 +19,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from corpus.kaggle_sync import KaggleError, KaggleSync, _run   # noqa: E402
+from corpus.kaggle_sync import KaggleError, KaggleSync          # noqa: E402
 
 
 def human(n: int) -> str:
@@ -44,6 +45,14 @@ def main() -> int:
     p.add_argument("--dir-mode", default="zip", choices=["zip", "tar"],
                    help="cách gói thư mục con (zip: nén, tar: không nén, nhanh hơn)")
     p.add_argument("--message", default=None, help="ghi chú cho version mới")
+    p.add_argument("--quiet", action="store_true",
+                   help="tắt thanh tiến độ của Kaggle CLI (mặc định BẬT — job này "
+                        "chạy hàng giờ, im lặng thì không biết còn sống hay không)")
+    p.add_argument("--timeout-hours", type=float, default=24.0,
+                   help="bỏ cuộc sau bao nhiêu giờ (mặc định 24)")
+    p.add_argument("--delete-old-versions", action="store_true",
+                   help="xoá các version cũ sau khi đẩy. Kaggle giữ mọi version và "
+                        "chúng đều tính vào quota — 8 GB × 2 version = 16 GB.")
     a = p.parse_args()
 
     d = Path(a.dataset)
@@ -80,17 +89,24 @@ def main() -> int:
     exists = k._dataset_exists(a.slug)
     msg = a.message or f"{len(files):,} file, {human(total)}"
     print(f"\n{'Cập nhật version mới' if exists else 'Tạo dataset mới'} — "
-          f"đang gói và upload {human(total)}, sẽ mất khá lâu...\n", flush=True)
-    try:
-        if exists:
-            _run(["kaggle", "datasets", "version", "-p", str(d), "-m", msg,
-                  "-r", a.dir_mode, "-q"], timeout=14400)
-        else:
-            _run(["kaggle", "datasets", "create", "-p", str(d),
-                  "-r", a.dir_mode, "-q"] + (["-u"] if a.public else []),
-                 timeout=14400)
-    except KaggleError as e:
-        print(f"\nĐẨY HỎNG\n{e}", file=sys.stderr)
+          f"đang gói và upload {human(total)}, sẽ mất khá lâu...", flush=True)
+    if exists and not a.delete_old_versions:
+        print("  (version cũ vẫn được giữ và tính vào quota Kaggle; thêm "
+              "--delete-old-versions nếu muốn xoá)", flush=True)
+    print(flush=True)
+    quiet = ["-q"] if a.quiet else []
+    timeout = a.timeout_hours * 3600
+    if exists:
+        cmd = ["kaggle", "datasets", "version", "-p", str(d), "-m", msg,
+               "-r", a.dir_mode] + quiet + (["-d"] if a.delete_old_versions else [])
+    else:
+        cmd = ["kaggle", "datasets", "create", "-p", str(d),
+               "-r", a.dir_mode] + quiet + (["-u"] if a.public else [])
+    # Không nuốt stdout: đây là job hàng giờ, phải thấy nó đang nhúc nhích.
+    rc = subprocess.run(cmd, stdin=subprocess.DEVNULL, timeout=timeout).returncode
+    if rc != 0:
+        print(f"\nĐẨY HỎNG (mã thoát {rc}). Chạy lại chính lệnh này để thử tiếp.",
+              file=sys.stderr)
         return 1
     print(f"Xong: https://www.kaggle.com/datasets/{a.owner}/{a.slug}")
     return 0

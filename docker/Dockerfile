@@ -21,5 +21,5 @@ EXPOSE 8000
 RUN mkdir -p /data/out /data/cache
 VOLUME ["/data"]
 
-ENTRYPOINT ["python", "/app/scripts/build_corpus.py"]
-CMD ["--out", "/data/out", "--cache", "/data/cache"]
+ENTRYPOINT ["python", "/app/scripts/corpus.py"]
+CMD []

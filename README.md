@@ -18,13 +18,18 @@ git clone <repo> && cd ai-detector
 cp docker/.env.example docker/.env      # rồi điền KAGGLE_API_TOKEN và HF_TOKEN
 C="docker compose -f docker/docker-compose.yml"
 
-$C build                                # 0. dựng image (các service dùng chung)
-$C up -d build-corpus dashboard         # 1. REAL — chạy nền, kèm UI :8000
-$C run --rm build-fake --probe          # 2. kiểm tra tên cột VieNeu trước
-$C run --rm build-fake                  #    FAKE — lấy đúng bằng số REAL
-$C run --rm export --verify             # 3. bung ra cây dataset cuối
-$C run --rm push-dataset                #    đẩy lên Kaggle — MỘT dataset
+$C build                          # 0. dựng image
+$C up -d corpus dashboard         # 1. REAL — chạy nền, kèm UI :8000
+$C run --rm cli fake --probe      # 2. kiểm tên cột VieNeu trước
+$C run --rm cli fake              #    FAKE — lấy đúng bằng số REAL
+$C run --rm cli export --verify   # 3. bung ra cây dataset cuối
+$C run --rm cli split             # 4. chia train/validation/test
+$C run --rm cli push              # 5. đẩy lên Kaggle — MỘT dataset
 ```
+
+Chỉ có **3 service**: `corpus` (dựng REAL, chạy nền), `dashboard` (UI), và `cli`
+(mọi việc còn lại, chạy một lần rồi thoát). `docker compose run --rm cli` không
+tham số sẽ liệt kê các lệnh con.
 
 Thứ tự bắt buộc: FAKE cần biết số REAL nên phải chạy **sau**, và chỉ chạy khi
 dashboard báo cả ba nguồn REAL đã xong (`unit x/x`, thanh đầy 100%).
@@ -39,9 +44,9 @@ docker run --rm -v "$PWD/data":/data ai-detector/corpus-builder:latest \
 ### Dừng, chạy lại, lấy kết quả
 
 ```bash
-$C stop build-corpus     # SIGTERM -> chốt checkpoint cuối (có 120s ân hạn)
-$C start build-corpus    # chạy tiếp từ đúng con trỏ, không quét lại
-$C logs -f build-corpus
+$C stop corpus     # SIGTERM -> chốt checkpoint cuối (có 120s ân hạn)
+$C start corpus    # chạy tiếp từ đúng con trỏ, không quét lại
+$C logs -f corpus
 ```
 
 Dữ liệu nằm trong volume `ai-detector_corpus-data`. Copy ra máy host:
@@ -63,7 +68,7 @@ Hai cách, cùng đọc một nguồn số liệu:
 
 ```bash
 $C up -d dashboard                   # UI web  -> http://<máy-docker>:8000
-$C run --rm monitor --watch=10       # bản terminal, cho lúc chỉ có ssh
+$C run --rm cli monitor --watch=10       # bản terminal, cho lúc chỉ có ssh
 ```
 
 Dashboard tự làm mới mỗi 5 giây, có nút tạm dừng và nút đổi nền sáng/tối. Nội dung:
@@ -154,8 +159,7 @@ generator, recording_id, duration, sample_rate, channels, split, text, gender,
 speech_ratio, rms_db, clipping_ratio, original_sample_rate, original_split,
 sha256_raw, sha256_norm, shard, bytes`.
 
-`split` để `null` — chia train/val/test speaker-disjoint là bước sau, làm trên
-metadata chứ không di chuyển file.
+`split` để `null` cho tới khi chạy bước chia (xem dưới).
 
 ## Phần FAKE — cân bằng với REAL
 
@@ -164,13 +168,13 @@ VieNeu-TTS-140h là dataset **gated**: accept terms tại
 Kiểm tra tên cột trước khi chạy thật (repo không công khai schema):
 
 ```bash
-docker compose -f docker/docker-compose.yml run --rm build-fake --probe
+docker compose -f docker/docker-compose.yml run --rm cli fake --probe
 ```
 
 Chạy sau khi REAL xong — số FAKE **lấy đúng bằng số REAL đã nhận**:
 
 ```bash
-docker compose -f docker/docker-compose.yml run --rm build-fake
+docker compose -f docker/docker-compose.yml run --rm cli fake
 ```
 
 Ba pha, pha nào cũng resume được (`--phase index|select|write`):
@@ -197,9 +201,9 @@ checkpoint (đã `fsync` + commit sqlite) mới được đẩy lên Kaggle — 
 Kaggle đều đã qua kiểm. Nhưng đó là kiểm ở *đầu vào*; muốn kiểm ở *đầu ra* thì:
 
 ```bash
-$C run --rm audit                      # mở lại từng WAV trong tar, đo lại từ đầu
-$C run --rm audit --pushed-only        # chỉ các shard đã đẩy lên Kaggle
-$C run --rm audit --sample 2000        # kiểm nhanh 2000 file đầu
+$C run --rm cli audit                      # mở lại từng WAV trong tar, đo lại từ đầu
+$C run --rm cli audit --pushed-only        # chỉ các shard đã đẩy lên Kaggle
+$C run --rm cli audit --sample 2000        # kiểm nhanh 2000 file đầu
 ```
 
 Script **không tin metadata**: nó giải mã lại từng file trong tar rồi đối chiếu
@@ -215,7 +219,7 @@ hay lỗi. Bung ra cây dataset chuẩn bằng một lệnh riêng, chạy lại
 được mà không đụng tới tiến độ:
 
 ```bash
-docker compose -f docker/docker-compose.yml run --rm export --verify
+docker compose -f docker/docker-compose.yml run --rm cli export --verify
 # hoặc: python scripts/export_dataset.py --out /data/out --dest /data/dataset --verify
 ```
 
@@ -252,6 +256,32 @@ số member tar = số dòng metadata = số item trong DB, không trùng id.
 `SIGTERM`/`Ctrl-C` → chốt checkpoint cuối rồi thoát sạch (compose để
 `stop_grace_period: 120s`). `--max-seconds` đặt ngân sách thời gian cho một lần chạy.
 
+## Chia train / validation / test
+
+```bash
+$C run --rm cli split --dry-run     # xem kết quả trước, chưa ghi
+$C run --rm cli split               # ghi cột `split` vào 3 file metadata
+```
+
+Mặc định 70/15/15 (`--train/--val/--test`), ghi vào cột `split` của
+`metadata.csv` / `.parquet` / `.jsonl` — **không di chuyển file audio**, nên đổi
+cách chia lúc nào cũng được.
+
+**Đơn vị chia không phải speaker, cũng không phải recording, mà là cụm liên thông
+của đồ thị speaker ↔ recording.** Hai ràng buộc của spec §10 không suy ra nhau:
+VietMed là hội thoại, mỗi `audio_name` chứa nhiều speaker (`VietMed_011` gồm
+`_a`, `_b`, `_c`). Chia theo speaker sẽ xé một recording ra hai split; chia theo
+recording sẽ để một speaker xuất hiện ở hai split. Gom cụm liên thông thì cả hai
+ràng buộc cùng thoả.
+
+Script tự kiểm lại sau khi chia: nếu còn bất kỳ `speaker_id` hay `recording_id`
+nào nằm ở hai split thì báo lỗi và thoát ≠ 0.
+
+> **Cụm to làm tỷ lệ lệch.** VietMed gom cả nghìn utterance vào vài cụm, nên
+> 70/15/15 không thể bám sát — thậm chí một split có thể nhận 0 mẫu VietMed.
+> Đây là giới hạn của dữ liệu chứ không phải lỗi chia (một recording hội thoại
+> không tách đôi được). Script in cảnh báo rõ chứ không im lặng.
+
 ## Xác thực Kaggle
 
 Kaggle CLI 2.x nhận nhiều kiểu credential; chọn **một**:
@@ -274,8 +304,8 @@ bắt đầu, thay vì chỉ kiểm biến môi trường có tồn tại hay kh
 Dataset cuối là **một** dataset, đúng cây trong spec §12:
 
 ```bash
-$C run --rm export --verify     # bung shard thành file WAV rời + metadata
-$C run --rm push-dataset        # đẩy cả cây lên Kaggle
+$C run --rm cli export --verify     # bung shard thành file WAV rời + metadata
+$C run --rm cli push        # đẩy cả cây lên Kaggle
 ```
 
 Tên dataset lấy từ `KAGGLE_DATASET_SLUG` (mặc định `vietnamese-audio-deepfake-demo`),
@@ -289,12 +319,7 @@ thư mục con được gói thành một file rồi Kaggle bung lại phía ser
 
 Chạy lại lệnh đó lần nữa sẽ tạo **version mới** của cùng dataset, không tạo cái thứ hai.
 
-### Đẩy theo shard (không khuyến nghị)
-
-`$C run --rm push` đẩy **từng shard thành một dataset riêng** (`<slug>-0000`,
-`<slug>-0001`, …). Chỉ dùng khi cần đồng bộ liên tục *trong lúc* job còn chạy:
-Kaggle không có upload delta nên một dataset duy nhất sẽ phải upload lại toàn bộ
-mỗi lần. Xong việc thì dùng `push-dataset` và xoá các dataset shard đi.
+## Đẩy theo shard (không khuyến nghị)
 
 ## Dung lượng
 
