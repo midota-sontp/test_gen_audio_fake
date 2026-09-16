@@ -511,8 +511,11 @@ else:
         for meta in (*sorted(folder.glob("*/metadata.csv")), folder / "metadata.csv"):
             if meta.exists():
                 with meta.open(encoding="utf-8") as fh:
-                    if "utt_id" in fh.readline():
-                        return True
+                    dau = fh.readline()
+                # `id`/`audio` là chuẩn hiện hành, `utt_id`/`path` là schema cũ —
+                # corpus đẩy lên Kaggle ở phiên trước vẫn phải nhận ra được.
+                if "audio" in dau or "utt_id" in dau:
+                    return True
         return False
 
     print("Dataset đang mount:")
@@ -554,7 +557,7 @@ md("""
 ### A1b. Nạp corpus của phiên trước
 
 Bung kho ra `/kaggle/working` để chạy tiếp. `ingest` và `generate` đều idempotent theo
-`utt_id` nên chúng chỉ làm phần còn thiếu — không có bước nào làm lại từ đầu.
+`id` nên chúng chỉ làm phần còn thiếu — không có bước nào làm lại từ đầu.
 
 Muốn nối lại thì phải **Add Input → Datasets → dataset đó**. Chưa add thì ô này vẫn hỏi
 Kaggle xem dataset đang có gì (nếu đã cài token) rồi nhắc — chứ không im lặng bắt đầu lại
@@ -643,6 +646,11 @@ def _find(name):
 #
 # Vẫn nhận manifest gộp ở gốc (cấu trúc cũ) và tên cũ `manifest.csv`: corpus đã đẩy lên
 # Kaggle ở các phiên trước dùng chúng, bỏ đọc là vứt luôn hàng giờ GPU đã trả.
+# Đường dẫn audio của một DÒNG manifest. Chuẩn hiện hành là cột `audio`; `path` là tên
+# cũ, vẫn phải đọc được vì corpus đẩy lên Kaggle ở phiên trước mang tên đó.
+def _duong(row):
+    return row.get("audio") or row.get("path") or ""
+
 def _cac_meta(thu_muc):
     thu_muc = Path(thu_muc)
     if not thu_muc.is_dir():
@@ -683,7 +691,7 @@ def _cay_bung_san():
             rows = list(csv.DictReader(fh))
         if not rows:
             continue
-        # Cột `path` tính từ GỐC CORPUS ở cả hai cấu trúc, nên gốc là thư mục chứa
+        # Cột `audio` tính từ GỐC CORPUS ở cả hai cấu trúc, nên gốc là thư mục chứa
         # manifest (bảng gộp cũ) HOẶC thư mục cha của nó (manifest của một bộ). Thử cả
         # hai rồi lấy cái khớp hơn — đó là phép duy nhất phân biệt được hai trường hợp.
         #
@@ -691,7 +699,7 @@ def _cay_bung_san():
         # khớp thì mẫu đã nói đủ — cây đúng khớp gần 100%, cây sai khớp gần 0%.
         mau = rows[:: max(1, len(rows) // 200)][:200]
         for goc in (duong.parent, duong.parent.parent):
-            khop = sum(1 for r in mau if r.get("path") and (goc / r["path"]).exists())
+            khop = sum(1 for r in mau if _duong(r) and (goc / _duong(r)).exists())
             # Gộp theo GỐC, không theo manifest: một corpus tách bộ có nhiều manifest
             # nhưng chỉ một gốc, và nó phải được tính là một ứng viên với đủ số dòng.
             ti, tong = uv.get(str(goc), (0.0, 0))
@@ -718,10 +726,10 @@ def _muon_cay(goc):
         shutil.copy(meta, dich_meta)
         with open(meta, encoding="utf-8", newline="") as fh:
             for row in csv.DictReader(fh):
-                if not row.get("path"):
+                if not _duong(row):
                     thieu += 1
                     continue
-                nguon, dich = goc / row["path"], CORPUS / row["path"]
+                nguon, dich = goc / _duong(row), CORPUS / _duong(row)
                 if dich.exists():
                     continue
                 if not nguon.exists():
@@ -746,7 +754,7 @@ for _tep in _find("progress.json"):
           f" · {len(_s['speakers_todo'])} chưa động tới")
     # Theo từng NGUỒN: bộ dữ liệu nào đã nằm trên kho và đã duyệt tới đâu. Nguồn đã có
     # đủ thì phiên này không phải chuẩn hoá lại cũng không phải soi lại — `ingest` bỏ qua
-    # theo utt_id, `validate` bỏ qua theo dấu đã duyệt.
+    # theo id, `validate` bỏ qua theo dấu đã duyệt.
     for _ten, _o in sorted(_s.get("by_source", {}).items()):
         print(f"  nguồn {_ten:<22} real {_o['real']:>6} · fake {_o['fake']:>6}"
               f" · đã duyệt {_o['approved']:>6}")
@@ -768,7 +776,7 @@ def _bo_trong(nguon):
     ra = set()
     for meta in _cac_meta(nguon):
         with open(meta, encoding="utf-8", newline="") as fh:
-            ra.update(r["path"].split("/")[0] for r in csv.DictReader(fh) if r.get("path"))
+            ra.update(_duong(r).split("/")[0] for r in csv.DictReader(fh) if _duong(r))
     return ra
 
 # Kho chứa đường dẫn này, tức mount /kaggle/input/<slug>. Đơn vị ghi nhận phải là MOUNT
@@ -831,7 +839,8 @@ def _kho_co_corpus():
                 continue
             # Manifest CỦA TA, không phải `metadata.csv` bất kỳ của một dataset lạ —
             # bộ giọng thật đang mount cũng hay có một file trùng tên.
-            if {"utt_id", "path", "label", "speaker"} <= cot:
+            if {"id", "audio", "label", "speaker_id"} <= cot or \
+                    {"utt_id", "path", "label", "speaker"} <= cot:
                 ra.add(_kho_cua(duong))
     return sorted(ra)
 
@@ -957,7 +966,7 @@ if _cac_meta(CORPUS):
     for _r in _m:
         if not _r.augment and not _r.is_fake:
             NGUON_DA_CO[_r.source] = NGUON_DA_CO.get(_r.source, 0) + 1
-    _done = len({f.speaker for f in _m.fakes})
+    _done = len({f.speaker_id for f in _m.fakes})
     print(f"\\nCorpus đang có: {len(_m.reals)} real · {len(_m.fakes)} fake"
           f" · {_done}/{len(_m.speakers('real'))} speaker đã có fake")
     if len(NGUON_DA_CO) > 1:
@@ -973,8 +982,8 @@ if _cac_meta(CORPUS):
     _c = Config.load(CFG)
     _pool = [r for r in _m.reals if not r.augment and r.text and is_usable(
         r.text, int(_c.get("generate.min_words", 6)), int(_c.get("generate.max_words", 40)))]
-    _co_fake = {f.ref_utt_id for f in _m.fakes}
-    _xong = sum(1 for r in _pool if r.utt_id in _co_fake)
+    _co_fake = {f.ref_id for f in _m.fakes}
+    _xong = sum(1 for r in _pool if r.id in _co_fake)
     _con = len(_pool) - _xong
     print(f"Tiến độ gen   : {_xong}/{len(_pool)} real đủ điều kiện đã có fake"
           f" ({100 * _xong / max(len(_pool), 1):.0f}%) · còn {_con} mẫu"
@@ -1187,8 +1196,8 @@ phan(CHUNG),
 md("""
 ### A1d. Dọn corpus cũ về cây hiện hành
 
-Corpus bung ra từ phiên trước có thể còn cây cũ (`audio/<label>/…/<utt_id>.wav`). `migrate`
-dời file về đúng chỗ và giữ nguyên `utt_id`, nên **không sinh lại gì**.
+Corpus bung ra từ phiên trước có thể còn cây cũ (`audio/<label>/…/<id>.wav`). `migrate`
+dời file về đúng chỗ và giữ nguyên `id`, nên **không sinh lại gì**.
 
 Idempotent, và chịu được ngắt giữa chừng: manifest chỉ lưu sau khi dời xong, phép cấp số
 là tất định, nên chạy lại tính ra đúng những đường dẫn cũ và nhận lại phần đã dời.
@@ -1293,7 +1302,7 @@ if MAKE_DATASET:
         problems.append(f"Chỉ nạp được {n_real} audio thật — kiểm tra RAW có trỏ đúng dataset không.")
     if n_speakers < 3:
         problems.append(
-            f"Chỉ có {n_speakers} speaker — không chia được train/val/test speaker-disjoint. "
+            f"Chỉ có {n_speakers} speaker — không chia được train/validation/test speaker-disjoint. "
             "Adapter có thể đang đọc sai cấu trúc thư mục.")
     if n_text == 0:
         problems.append(
@@ -1804,7 +1813,7 @@ run("generate", "--engines", "omnivoice", "--count", N_FAKE_CLONE,
     "--overwrite", optional=True)
 ```
 
-`--overwrite` là bắt buộc khi sinh lại: `generate` bỏ qua utt_id đã có, nên không có
+`--overwrite` là bắt buộc khi sinh lại: `generate` bỏ qua id đã có, nên không có
 cờ đó thì lượt chạy sau chỉ in `đã có N` và giữ nguyên audio cũ. Chỉ cần khi corpus
 được nạp lại từ Kaggle Dataset của phiên trước — corpus mới trong `/kaggle/working`
 thì không.
@@ -1829,7 +1838,7 @@ else:
     skipped("kiểm tra engine sinh")
 """),
 code("""
-# CÒN BAO NHIÊU? `--dry-run` chạy đúng phép chọn của lượt sinh thật rồi đếm theo utt_id,
+# CÒN BAO NHIÊU? `--dry-run` chạy đúng phép chọn của lượt sinh thật rồi đếm theo id,
 # không nạp model nên xong trong vài giây. Tiến độ theo speaker cũng in ra đây.
 # `--count` vắng mặt ⇒ `fake_to_real_ratio: 1.0` trong config tự tính: đúng một fake
 # cho mỗi real đủ điều kiện. Đây là định nghĩa "full" mà không phải gõ con số nào.
@@ -1930,7 +1939,7 @@ durations = [r.duration for r in manifest]
 print(f"\\nĐộ dài    : {min(durations):.1f}–{max(durations):.1f}s "
       f"(trung bình {sum(durations) / len(durations):.1f}s)")
 
-paired = sum(1 for r in manifest.fakes if r.ref_utt_id in manifest)
+paired = sum(1 for r in manifest.fakes if r.ref_id in manifest)
 print(f"Ghép cặp  : {paired}/{len(manifest.fakes)} fake có real đối chứng cùng nội dung")
 
 no_text = sum(1 for r in manifest.reals if not r.text)
@@ -1953,8 +1962,8 @@ from aidetector.generate.base import KIND_CLONE, available_generators
 
 _clone_engines = {i for i, c in available_generators().items() if c.kind == KIND_CLONE}
 pairs = []
-for fake in sorted(manifest.fakes, key=lambda f: (f.engine not in _clone_engines, f.utt_id)):
-    real = manifest.get(fake.ref_utt_id)
+for fake in sorted(manifest.fakes, key=lambda f: (f.engine not in _clone_engines, f.id)):
+    real = manifest.get(fake.ref_id)
     if real is not None:
         pairs.append((real, fake))
     if len(pairs) >= 3:
@@ -1965,7 +1974,7 @@ if not pairs:
 for real, fake in pairs:
     print("=" * 90)
     print(f"Câu    : {real.text[:110]}")
-    print(f"Speaker: {real.speaker}   ·   engine: {fake.generator}")
+    print(f"Speaker: {real.speaker_id}   ·   engine: {fake.generator}")
     print(f"REAL ({real.duration:.1f}s)")
     display(Audio(str(manifest.abs_path(real))))
     print(f"FAKE ({fake.duration:.1f}s)")
@@ -1995,14 +2004,14 @@ if MAKE_DATASET:
     _cache = {}
 
     def embed(rec):
-        if rec.utt_id not in _cache:
+        if rec.id not in _cache:
             try:
-                _cache[rec.utt_id] = encoder.embed_utterance(
+                _cache[rec.id] = encoder.embed_utterance(
                     preprocess_wav(str(manifest.abs_path(rec)))
                 )
             except Exception:      # file quá ngắn sau VAD ⇒ bỏ qua, đừng làm hỏng cả ô
-                _cache[rec.utt_id] = None
-        return _cache[rec.utt_id]
+                _cache[rec.id] = None
+        return _cache[rec.id]
 
     def cosines(pairs, limit=80):
         out = []
@@ -2016,10 +2025,10 @@ if MAKE_DATASET:
     reals = [r for r in manifest.reals if not r.augment]
     by_spk = {}
     for r in reals:
-        by_spk.setdefault(r.speaker, []).append(r)
+        by_spk.setdefault(r.speaker_id, []).append(r)
 
     # TRẦN: cùng người, khác bản ghi. Đây là mức cao nhất một bản clone có thể với tới.
-    same = [p for recs in by_spk.values() for p in combinations(sorted(recs, key=lambda r: r.utt_id)[:4], 2)]
+    same = [p for recs in by_spk.values() for p in combinations(sorted(recs, key=lambda r: r.id)[:4], 2)]
     # SÀN: hai người khác nhau — điểm quanh đây nghĩa là clone ra một người khác hẳn.
     spk = sorted(by_spk)
     diff = [(by_spk[spk[i]][0], by_spk[spk[j]][0]) for i, j in combinations(range(len(spk)), 2)]
@@ -2044,7 +2053,7 @@ if MAKE_DATASET:
         for fake in manifest.fakes:
             if fake.augment or group_of(fake) != engine:
                 continue
-            target = manifest.get(fake.ref_utt_id)
+            target = manifest.get(fake.ref_id)
             if target is not None:
                 pairs.append((fake, target))
         rng.shuffle(pairs)
@@ -2250,7 +2259,7 @@ md("""
 ## B1. Chia tập → augment
 
 `split` chạy **trước** `augment`: bản augment chỉ sinh cho train và bám đúng split
-của bản gốc, còn val/test giữ audio sạch để số đo phản ánh dữ liệu thật. Chia
+của bản gốc, còn validation/test giữ audio sạch để số đo phản ánh dữ liệu thật. Chia
 speaker-disjoint nên không có speaker nào xuất hiện ở hai tập.
 
 Thêm `--holdout omnivoice` nếu muốn giữ hẳn một engine riêng cho test — đó là phép
@@ -2267,7 +2276,7 @@ else:
 md("""
 ## B2. WavLM → Classifier
 
-Embedding cache theo `utt_id` nên chạy lại chỉ trích phần mới. Đổi backbone chỉ cần
+Embedding cache theo `id` nên chạy lại chỉ trích phần mới. Đổi backbone chỉ cần
 `--set features.backbone.name=wav2vec2` — cache tách riêng, không đè lên nhau.
 """),
 code("""
@@ -2327,7 +2336,7 @@ if DO_TRAIN:
         """n mẫu: ưu tiên split=test, trải vòng tròn qua các generator."""
         # split=test là phần mô hình CHƯA thấy — chấm lại mẫu đã train thì điểm đẹp mà
         # không nói lên gì. Corpus chưa chia tập thì lấy tất, còn hơn không có mẫu nào.
-        recs = sorted([r for r in recs if r.split == "test"] or recs, key=lambda r: r.path)
+        recs = sorted([r for r in recs if r.split == "test"] or recs, key=lambda r: r.audio)
         # Sắp theo path thì 5 mẫu đầu rơi hết vào một bộ/một engine, trong khi chính
         # chênh lệch giữa các engine là thứ đáng nhìn (xem bảng by_generator ở B3).
         theo_engine = {}
@@ -2342,7 +2351,7 @@ if DO_TRAIN:
 
     _chon = _mau(_mf.fakes) + _mau(_mf.reals)
     for _r in _chon:
-        print(f"  {_r.label:<4} {_r.generator or '-':<28} {_r.split or '-':<5} {_r.path}")
+        print(f"  {_r.label_name:<4} {_r.generator or '-':<28} {_r.split or '-':<5} {_r.audio}")
     print()
     run("detect", *[str(_mf.abs_path(r)) for r in _chon])
 else:

@@ -52,7 +52,7 @@ corpus/
   <bộ>/real/<speaker>/0001.wav
 ```
 
-Chạy lại `ingest` là **idempotent**: `utt_id` suy ra từ (nguồn, speaker, khoá) nên
+Chạy lại `ingest` là **idempotent**: `id` suy ra từ (nguồn, speaker, khoá) nên
 chỉ phần thiếu được bổ sung.
 
 Kiểm tra corpus có đúng chuẩn:
@@ -113,7 +113,7 @@ N giây/mẫu` và cảnh báo nếu quá ngắn.
 | audio rè / mất chi tiết | `--set generate.options.omnivoice.num_step=48` |
 
 Checkpoint khác mặc định được ghi thẳng vào cột `generator` (`omnivoice:k2-fsa-omnivoice`)
-và vào `utt_id`, nên hai lượt A/B nằm cạnh nhau trong cùng corpus thay vì lượt sau bị bỏ
+và vào `id`, nên hai lượt A/B nằm cạnh nhau trong cùng corpus thay vì lượt sau bị bỏ
 qua vì trùng id. Knob (`guidance_scale`, `num_step`) thì không vào id — đổi knob phải
 `--overwrite` và lượt mới đè lên lượt cũ.
 
@@ -122,7 +122,7 @@ reference không tồn tại và model phải tự bịa — đó là phần "ch
 
 #### Chạy dở rồi tiếp tục ở phiên sau
 
-`generate` idempotent theo `utt_id`: chạy lại cùng `--count` thì nó bỏ qua phần đã có và
+`generate` idempotent theo `id`: chạy lại cùng `--count` thì nó bỏ qua phần đã có và
 chỉ làm phần còn thiếu. Bốn thứ đỡ mất công:
 
 ```bash
@@ -151,8 +151,8 @@ thường.
 Fake được ghi vào `corpus/<bộ>/fake/<speaker>/` — cùng độ sâu với `real/`, trong thư
 mục của **chính bộ dữ
 liệu đã sinh ra nó**, vì `source` thừa hưởng từ real gốc. Mỗi bản ghi mang:
-`generator` (vd `piper:vi_VN-vais1000-medium`), `ref_utt_id` (utterance real gốc)
-và **cùng `speaker` + cùng `text` với real** — nhờ vậy mô hình không thể phân loại
+`generator` (vd `piper:vi_VN-vais1000-medium`), `ref_id` (utterance real gốc)
+và **cùng `speaker_id` + cùng `text` với real** — nhờ vậy mô hình không thể phân loại
 dựa vào nội dung câu nói hay danh tính người nói.
 
 ### Thêm engine mới về sau
@@ -210,7 +210,7 @@ python -m aidetector augment --copies 3
 ```
 
 Bản clean **luôn được giữ lại**, bản augment là bản ghi thêm (`augment` ghi rõ chuỗi
-phép đã dùng, vd `mp3-64k+bg12db`). Mặc định chỉ augment `train`; val/test giữ sạch
+phép đã dùng, vd `mp3-64k+bg12db`). Mặc định chỉ augment `train`; validation/test giữ sạch
 để số đo phản ánh dữ liệu thật.
 
 Muốn dùng nhiễu nền và vang phòng thật, bỏ chú thích trong config và trỏ vào thư
@@ -231,7 +231,7 @@ python -m aidetector features
 ```
 
 Lần đầu tải `microsoft/wavlm-base-plus` (~380 MB) và cache lại. Embedding lưu theo
-`utt_id` tại `features/<backbone>-<layer>-<pooling>/`, nên thêm dữ liệu chỉ trích
+`id` tại `features/<backbone>-<layer>-<pooling>/`, nên thêm dữ liệu chỉ trích
 phần mới.
 
 Đổi sang backbone khác — cache tách riêng, không đè lên nhau:
@@ -331,7 +331,7 @@ sonpham12/vivos-fake-v2          ← kho của bộ `vivos`
    (+ progress.json ở gốc kho — tiến độ của riêng bộ này)
 ```
 
-Nhờ vậy **gộp nhiều bộ chỉ là Add Input nhiều dataset**: cột `path` bắt đầu bằng tên bộ
+Nhờ vậy **gộp nhiều bộ chỉ là Add Input nhiều dataset**: cột `audio` bắt đầu bằng tên bộ
 nên mỗi mount đóng góp một thư mục và không mount nào giẫm lên đường dẫn của mount nào.
 Phiên train mount ba kho là có corpus ba nhánh, y như chạy trên một máy.
 

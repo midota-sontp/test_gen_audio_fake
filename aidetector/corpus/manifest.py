@@ -76,7 +76,7 @@ def manifest_csv(records: Iterable[Record]) -> str:
 class Manifest:
     """Bảng bản ghi corpus, giữ trong bộ nhớ, ghi ra CSV nguyên tử.
 
-    Khoá chính là `utt_id`: thêm lại cùng id sẽ ghi đè chứ không nhân bản, nên
+    Khoá chính là `id`: thêm lại cùng id sẽ ghi đè chứ không nhân bản, nên
     mọi stage đều chạy lại được mà không sinh rác.
 
     Trên đĩa, bảng này được **tách theo bộ dữ liệu**: mỗi bộ một thư mục tự chứa
@@ -84,14 +84,14 @@ class Manifest:
     MỘT bảng hợp nhất, vì chia tập speaker-disjoint, cân bằng lớp và huấn luyện đều phải
     nhìn toàn bộ dữ liệu cùng lúc.
 
-    Cột `path` tính từ gốc corpus ở cả hai cấu trúc, nên corpus cũ (một manifest gộp ở
+    Cột `audio` tính từ gốc corpus ở cả hai cấu trúc, nên corpus cũ (một manifest gộp ở
     gốc) vẫn đọc và tra cứu được nguyên vẹn; `save()` là lúc nó được tách ra, `migrate`
     là lúc file audio được dời về cây mới.
     """
 
     def __init__(self, root: str | Path, records: Iterable[Record] = ()) -> None:
         self.root = Path(root)
-        self._records: dict[str, Record] = {r.utt_id: r for r in records}
+        self._records: dict[str, Record] = {r.id: r for r in records}
         # Số cuối đã cấp cho mỗi thư mục. Dựng lười vì corpus lớn thì quét toàn bộ chỉ
         # để ghi một file là phí; cấp xong thì số nằm trong `path`, không tính lại.
         self._so_cuoi: dict[str, int] = {}
@@ -135,7 +135,7 @@ class Manifest:
         records: dict[str, Record] = {}
         for path in shards:
             for rec in _doc_csv(path):
-                records[rec.utt_id] = rec
+                records[rec.id] = rec
         log.debug("Đã nạp %d bản ghi từ %d bộ", len(records), len(shards))
 
         if goc_cu is not None:
@@ -143,8 +143,8 @@ class Manifest:
             # manifest gộp chỉ còn là di sản chờ `save()` chuyển đi.
             them = 0
             for rec in _doc_csv(goc_cu):
-                if rec.utt_id not in records:
-                    records[rec.utt_id] = rec
+                if rec.id not in records:
+                    records[rec.id] = rec
                     them += 1
             if them:
                 log.info("Nạp thêm %d bản ghi từ manifest gộp cũ %s — lượt `save` tới sẽ"
@@ -183,26 +183,26 @@ class Manifest:
     def __iter__(self) -> Iterator[Record]:
         return iter(self._records.values())
 
-    def __contains__(self, utt_id: object) -> bool:
-        return utt_id in self._records
+    def __contains__(self, rec_id: object) -> bool:
+        return rec_id in self._records
 
-    def get(self, utt_id: str) -> Record | None:
-        return self._records.get(utt_id)
+    def get(self, rec_id: str) -> Record | None:
+        return self._records.get(rec_id)
 
     def add(self, rec: Record) -> None:
         errs = rec.validate()
         if errs:
-            raise ValueError(f"Bản ghi {rec.utt_id} không hợp lệ: {'; '.join(errs)}")
-        self._records[rec.utt_id] = rec
+            raise ValueError(f"Bản ghi {rec.id} không hợp lệ: {'; '.join(errs)}")
+        self._records[rec.id] = rec
 
-    def remove(self, utt_id: str) -> None:
-        self._records.pop(utt_id, None)
+    def remove(self, rec_id: str) -> None:
+        self._records.pop(rec_id, None)
 
     def sorted(self) -> list[Record]:
-        return sorted(self._records.values(), key=lambda r: (r.label, r.source, r.speaker, r.utt_id))
+        return sorted(self._records.values(), key=lambda r: (r.label, r.source, r.speaker_id, r.id))
 
     def filter(self, **criteria) -> list[Record]:
-        """`filter(label="real", split="train")` — so khớp bằng ==."""
+        """`filter(label=LABEL_REAL, split="train")` — so khớp bằng ==."""
         return [
             r for r in self._records.values()
             if all(getattr(r, k, None) == v for k, v in criteria.items())
@@ -219,18 +219,18 @@ class Manifest:
     def fakes(self) -> list[Record]:
         return [r for r in self._records.values() if r.label == LABEL_FAKE]
 
-    def speakers(self, label: str | None = None) -> list[str]:
-        return sorted({r.speaker for r in self._records.values()
-                       if r.speaker and (label is None or r.label == label)})
+    def speakers(self, label: int | None = None) -> list[str]:
+        return sorted({r.speaker_id for r in self._records.values()
+                       if r.speaker_id and (label is None or r.label == label)})
 
     def abs_path(self, rec: Record) -> Path:
-        return self.root / rec.path
+        return self.root / rec.audio
 
     # ------------------------------------------------- ghi audio đúng chuẩn
     def allocate_path(self, rec: Record) -> str:
         """Cấp đường dẫn cho một bản ghi MỚI: thư mục chuẩn + số thứ tự kế tiếp.
 
-        Số cấp một lần rồi lưu trong cột `path`; lần chạy sau đọc lại chứ không suy ra
+        Số cấp một lần rồi lưu trong cột `audio`; lần chạy sau đọc lại chứ không suy ra
         từ thứ tự duyệt. Không tái sử dụng số đã cấp kể cả khi bản ghi bị xoá — số cũ
         trỏ tới file cũ trên đĩa, dùng lại là hai bản ghi cùng một file.
         """
@@ -238,8 +238,8 @@ class Manifest:
         if folder not in self._so_cuoi:
             lon_nhat = 0
             for r in self._records.values():
-                if r.path.startswith(folder + "/"):
-                    stem = Path(r.path).stem
+                if r.audio.startswith(folder + "/"):
+                    stem = Path(r.audio).stem
                     if stem.isdigit():
                         lon_nhat = max(lon_nhat, int(stem))
             self._so_cuoi[folder] = lon_nhat
@@ -252,56 +252,56 @@ class Manifest:
         """Ghi mảng audio vào đúng vị trí chuẩn, cập nhật metadata rồi thêm vào manifest."""
         # Ghi đè bản ghi đã có (vd `generate --overwrite`) thì giữ nguyên chỗ cũ: cấp số
         # mới là để lại một file mồ côi và làm cây phình sau mỗi lượt chạy lại.
-        cu = self._records.get(rec.utt_id)
-        rec.path = cu.path if (cu is not None and cu.path) else self.allocate_path(rec)
+        cu = self._records.get(rec.id)
+        rec.audio = cu.audio if (cu is not None and cu.audio) else self.allocate_path(rec)
         rec.duration = round(len(audio) / spec.sample_rate, 3)
         rec.sample_rate = spec.sample_rate
         rec.channels = spec.channels
-        save_audio(self.root / rec.path, audio, spec)
+        save_audio(self.root / rec.audio, audio, spec)
         self.add(rec)
         return rec
 
     def migrate_layout(self, dry_run: bool = False) -> dict:
-        """Đưa mọi bản ghi về đúng cấu trúc thư mục hiện hành, giữ nguyên `utt_id`.
+        """Đưa mọi bản ghi về đúng cấu trúc thư mục hiện hành, giữ nguyên `id`.
 
-        Cột `path` là nguồn sự thật nên corpus cũ vẫn ĐỌC được mà không cần chuyển; hàm
+        Cột `audio` là nguồn sự thật nên corpus cũ vẫn ĐỌC được mà không cần chuyển; hàm
         này để dọn cho đồng nhất một cây duy nhất. Idempotent: bản ghi đã đúng chỗ thì
         giữ nguyên số cũ, chạy lại lần hai không xáo lại gì.
         """
         dung_cho: list[Record] = []
         self._so_cuoi = {}
-        for rec in sorted(self._records.values(), key=lambda r: r.utt_id):
+        for rec in sorted(self._records.values(), key=lambda r: r.id):
             folder = audio_folder(rec)
-            p = Path(rec.path)
+            p = Path(rec.audio)
             if p.parent.as_posix() == folder and p.stem.isdigit():
                 self._so_cuoi[folder] = max(self._so_cuoi.get(folder, 0), int(p.stem))
             else:
                 dung_cho.append(rec)
 
         # Manifest chỉ được lưu SAU khi mọi file đã dời xong, và phép cấp số ở trên là
-        # tất định (duyệt theo utt_id, `_so_cuoi` dựng từ chính các bản ghi đã đúng chỗ).
+        # tất định (duyệt theo id, `_so_cuoi` dựng từ chính các bản ghi đã đúng chỗ).
         # Nhờ hai điều đó, bị ngắt giữa chừng thì manifest còn nguyên ⇒ chạy lại tính ra
         # ĐÚNG những đường dẫn cũ, và nhánh "nguồn mất nhưng đích đã có" nhận ra phần đã
         # dời để bỏ qua. Lưu dở giữa chừng mới là thứ phá được tính tất định đó.
         chuyen = thieu = tiep_tuc = 0
         bo_lai: set[Path] = set()      # thư mục vừa bị lấy hết file — dọn ở cuối
         for rec in dung_cho:
-            cu = self.root / rec.path
+            cu = self.root / rec.audio
             moi = self.allocate_path(rec)
             dich = self.root / moi
             if not cu.exists():
                 if dich.exists():
                     tiep_tuc += 1       # lượt trước đã dời file này rồi
-                    rec.path = moi
+                    rec.audio = moi
                     continue
                 thieu += 1
-                rec.path = moi          # file mất thật; prune_missing sẽ dọn nếu cần
+                rec.audio = moi          # file mất thật; prune_missing sẽ dọn nếu cần
                 continue
             if not dry_run:
                 dich.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(cu, dich)
                 bo_lai.add(cu.parent)
-            rec.path = moi
+            rec.audio = moi
             chuyen += 1
         if tiep_tuc:
             log.info("Nhận lại %d file đã dời ở lượt bị ngắt trước", tiep_tuc)
@@ -337,9 +337,9 @@ class Manifest:
 
     def prune_missing(self) -> int:
         """Bỏ các bản ghi trỏ tới file không còn tồn tại."""
-        gone = [r.utt_id for r in self._records.values() if not self.abs_path(r).exists()]
-        for utt_id in gone:
-            del self._records[utt_id]
+        gone = [r.id for r in self._records.values() if not self.abs_path(r).exists()]
+        for rec_id in gone:
+            del self._records[rec_id]
         if gone:
             log.warning("Đã loại %d bản ghi mất file audio", len(gone))
         return len(gone)
@@ -347,14 +347,14 @@ class Manifest:
     # ----------------------------------------------------------------- thống kê
     def stats(self) -> dict:
         recs = list(self._records.values())
-        by_label = Counter(r.label for r in recs)
+        by_label = Counter(r.label_name for r in recs)
         by_generator = Counter(r.generator for r in recs if r.generator)
         # Fake thừa hưởng `source` của utterance real gốc, nên chỉ đếm real ở đây
         # để con số phản ánh đúng "dữ liệu thật đến từ đâu".
         by_source = Counter(r.source for r in recs if r.source and r.label == LABEL_REAL)
         by_split: dict[str, Counter] = defaultdict(Counter)
         for r in recs:
-            by_split[r.split or "(chưa chia)"][r.label] += 1
+            by_split[r.split or "(chưa chia)"][r.label_name] += 1
         hours = sum(r.duration for r in recs) / 3600
         return {
             "total": len(recs),
@@ -372,7 +372,7 @@ class Manifest:
         lines = [
             f"Corpus: {self.root}",
             f"  Tổng: {s['total']} utt · {s['hours']} giờ · "
-            f"real={s['by_label'].get(LABEL_REAL, 0)} fake={s['by_label'].get(LABEL_FAKE, 0)} "
+            f"real={s['by_label'].get('real', 0)} fake={s['by_label'].get('fake', 0)} "
             f"(augment: {s['augmented']})",
         ]
         if s["by_source"]:
@@ -387,7 +387,7 @@ class Manifest:
             lines.append("  Generator : " + ", ".join(f"{k}={v}" for k, v in sorted(s["by_generator"].items())))
         for split, counts in s["by_split"].items():
             lines.append(
-                f"  {split:<12}: real={counts.get(LABEL_REAL, 0)} fake={counts.get(LABEL_FAKE, 0)}"
+                f"  {split:<12}: real={counts.get('real', 0)} fake={counts.get('fake', 0)}"
             )
         lines.append(f"  Speaker real: {s['speakers_real']}")
         return "\n".join(lines)

@@ -91,11 +91,11 @@ class Generator:
         """Nhánh của engine, phân biệt hai lần chạy cùng engine khác cấu hình.
 
         Engine TTS phân biệt nhau bằng `voices()`, nhưng engine cloning không có
-        danh sách giọng nên MỌI bản sinh đều mang đúng một tag và một utt_id. Chạy
+        danh sách giọng nên MỌI bản sinh đều mang đúng một tag và một id. Chạy
         A/B hai checkpoint là hỏng: lượt sau bị bỏ qua vì "đã có", mà manifest cũng
         không cho biết audio nào ra từ checkpoint nào.
 
-        Trả `""` nghĩa là cấu hình mặc định — tag và utt_id giữ nguyên như cũ, nên
+        Trả `""` nghĩa là cấu hình mặc định — tag và id giữ nguyên như cũ, nên
         corpus đã sinh trước đó không bị coi là thiếu và sinh lại từ đầu.
         """
         return ""

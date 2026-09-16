@@ -6,7 +6,7 @@ Các lệnh khớp 1-1 với sơ đồ pipeline:
 
     ingest    Vietnamese real speech ─→ REAL dataset (chuẩn hoá về chuẩn corpus)
     generate  REAL ─→ voice cloning / TTS ─→ FAKE dataset
-    split     chia train/val/test speaker-disjoint
+    split     chia train/validation/test speaker-disjoint
     augment   thêm bản nhiễu / nén cho train (giữ nguyên bản clean)
     features  ─→ WavLM (hoặc backbone khác) ─→ embedding cache
     train     ─→ Classifier
@@ -367,25 +367,25 @@ def cmd_validate(args) -> int:
         path = manifest.abs_path(rec)
         if not path.exists():
             issues["missing_file"] += 1
-            broken.append(rec.utt_id)
+            broken.append(rec.id)
             continue
         try:
             audio = load_audio(path, spec.sample_rate)
         except Exception:  # noqa: BLE001
             issues["unreadable"] += 1
-            broken.append(rec.utt_id)
+            broken.append(rec.id)
             continue
-        loi = check_quality(audio, spec, rec.utt_id)
+        loi = check_quality(audio, spec, rec.id)
         for issue in loi:
             issues[issue.code] += 1
-            broken.append(rec.utt_id)
+            broken.append(rec.id)
         loi_schema = rec.validate()
         for err in loi_schema:
             issues[f"schema:{err.split(':')[0]}"] += 1
             # Trước đây lỗi schema chỉ được ĐẾM: `--fix` không dọn được nó, nên corpus
             # dính một bản ghi sai schema là `validate` đỏ vĩnh viễn và ô A4 dừng
             # notebook sau nhiều giờ sinh, không có đường ra ngoài sửa tay manifest.
-            broken.append(rec.utt_id)
+            broken.append(rec.id)
         # Đóng dấu chỉ khi đạt CẢ HAI. Đóng dấu một bản ghi sai schema là lần sau nó
         # được bỏ qua, không ai soi nữa, và `--fix` không bao giờ chạm tới nó.
         if not loi and not loi_schema:
@@ -432,8 +432,8 @@ def cmd_validate(args) -> int:
                     "thật sự muốn loại chúng.", len(tung_dat), spec.describe(),
                 )
                 return 1
-            for utt_id in hong:
-                manifest.remove(utt_id)
+            for rec_id in hong:
+                manifest.remove(rec_id)
             manifest.save()
             print(f"Đã loại {len(hong)} bản ghi khỏi manifest (--fix).")
             if args.prune_files:
@@ -441,11 +441,11 @@ def cmd_validate(args) -> int:
                 # chuẩn đổi, và file đã xoá thì phải ingest lại từ nguồn. Nhưng để đó thì
                 # mỗi phiên `ingest` nạp lại rồi cấp số MỚI, tích dần file mồ côi.
                 xoa = 0
-                for utt_id in hong:
-                    r = cu_the.get(utt_id)
+                for rec_id in hong:
+                    r = cu_the.get(rec_id)
                     if r is None:
                         continue
-                    f = Path(manifest.root) / r.path
+                    f = Path(manifest.root) / r.audio
                     if f.exists():
                         f.unlink()
                         xoa += 1
@@ -480,15 +480,15 @@ def cmd_progress(args) -> int:
     khuon: dict[str, list] = defaultdict(list)
     for rec in manifest.reals:
         if not rec.augment and rec.text and is_usable(rec.text, min_w, max_w):
-            khuon[rec.speaker].append(rec)
-    co_fake = {f.ref_utt_id for f in manifest.fakes if not f.augment}
+            khuon[rec.speaker_id].append(rec)
+    co_fake = {f.ref_id for f in manifest.fakes if not f.augment}
 
     xong: list[str] = []
     dang_do: dict[str, dict] = {}
     chua: list[str] = []
     for spk in sorted(khuon):
         dich = len(khuon[spk])
-        da = sum(1 for r in khuon[spk] if r.utt_id in co_fake)
+        da = sum(1 for r in khuon[spk] if r.id in co_fake)
         if da >= dich:
             xong.append(spk)
         elif da:
@@ -497,7 +497,7 @@ def cmd_progress(args) -> int:
             chua.append(spk)
 
     tong_dich = sum(len(v) for v in khuon.values())
-    tong_da = sum(1 for recs in khuon.values() for r in recs if r.utt_id in co_fake)
+    tong_da = sum(1 for recs in khuon.values() for r in recs if r.id in co_fake)
     state = {
         "dataset_records": len(manifest),
         "real": len(manifest.reals),
@@ -715,7 +715,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--splits", nargs="*", help="split được augment (mặc định: train)")
     p.set_defaults(func=cmd_augment)
 
-    p = sub.add_parser("split", parents=[common], help="chia train/val/test speaker-disjoint")
+    p = sub.add_parser("split", parents=[common], help="chia train/validation/test speaker-disjoint")
     p.add_argument("--holdout", nargs="*", help="engine chỉ xuất hiện ở test")
     p.set_defaults(func=cmd_split)
 

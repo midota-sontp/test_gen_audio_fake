@@ -9,7 +9,7 @@ from typing import Iterator
 import numpy as np
 
 from ..corpus.manifest import Manifest
-from ..corpus.schema import LABEL_REAL, Record, make_utt_id
+from ..corpus.schema import LABEL_REAL, Record, make_id
 from ..corpus.spec import AUDIO_EXTENSIONS, AudioSpec, normalize, normalize_file
 from ..utils import get_logger, progress, slugify
 from .base import (  # noqa: F401
@@ -25,6 +25,12 @@ from .base import (  # noqa: F401
 from . import canonical, common_voice, folder, hf, vivos  # noqa: F401,E402
 
 log = get_logger("aidetector.ingest")
+
+#: Giá trị `speaker` mà các adapter điền khi NGUỒN không công bố danh tính người nói.
+#: Bản ghi như vậy mang `speaker_known=False`: chia speaker-disjoint vẫn chạy, nhưng
+#: mỗi clip thành một "speaker" riêng nên cùng một người thật có thể rơi vào hai tập —
+#: cột này là chỗ duy nhất đọc ra được điều đó khi xem lại số đo.
+SPEAKER_UNKNOWN = ("", "unknown", "cv-unknown", "hf-unknown")
 
 
 def _resample(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
@@ -306,7 +312,7 @@ def ingest_source(
 ) -> dict:
     """Duyệt adapter, chuẩn hoá từng utterance rồi ghi vào corpus.
 
-    Idempotent: `utt_id` suy ra từ (source, speaker, key) nên chạy lại chỉ bổ sung
+    Idempotent: `id` suy ra từ (source, speaker, key) nên chạy lại chỉ bổ sung
     phần thiếu, trừ khi bật `overwrite`.
     """
     source_name = slugify(source_name)
@@ -316,10 +322,10 @@ def ingest_source(
 
     # `limit` là TỔNG utterance của nguồn này TRONG CORPUS, không phải "thêm bao nhiêu
     # lần này". Corpus sống qua nhiều phiên, nên `--limit 4000` chạy lại phải ra đúng
-    # 4000 chứ không cộng thêm 4000 mỗi lượt. `ref_utt_id` rỗng để chỉ đếm phần do
+    # 4000 chứ không cộng thêm 4000 mỗi lượt. `ref_id` rỗng để chỉ đếm phần do
     # ingest tạo, không đếm fake (fake thừa hưởng cùng `source` với real gốc).
     already = sum(1 for r in manifest
-                  if r.source == source_name and not r.augment and not r.ref_utt_id)
+                  if r.source == source_name and not r.augment and not r.ref_id)
     if limit is not None and already >= limit:
         log.info("Nguồn %s đã có %d/%d utterance trong corpus — không nạp thêm.",
                  source_name, already, limit)
@@ -344,7 +350,7 @@ def ingest_source(
             stats["skip_speaker_full"] += 1
             continue
 
-        base_id = make_utt_id(source_name, speaker, item.key)
+        base_id = make_id(source_name, speaker, item.key)
         if not overwrite and base_id in manifest:
             stats["skip_exists"] += 1
             speaker_count[speaker] += 1
@@ -364,16 +370,17 @@ def ingest_source(
             stats["drop_invalid"] += 1
             continue
 
-        label = str(item.meta.get("label", LABEL_REAL))
+        label = int(item.meta.get("label", LABEL_REAL))
         generator = str(item.meta.get("generator", ""))
         for idx, chunk in enumerate(chunks):
-            utt_id = base_id if idx == 0 else f"{base_id}-{idx}"
+            rec_id = base_id if idx == 0 else f"{base_id}-{idx}"
             rec = Record(
-                utt_id=utt_id,
-                path="",                       # write_audio sẽ điền đúng vị trí chuẩn
+                id=rec_id,
+                audio="",                      # write_audio sẽ điền đúng vị trí chuẩn
                 label=label,
                 source=source_name,
-                speaker=speaker,
+                speaker_id=speaker,
+                speaker_known=item.speaker not in SPEAKER_UNKNOWN,
                 text=item.text.strip(),
                 generator=generator,
                 language=item.language or language,
@@ -395,7 +402,7 @@ def ingest_source(
         log.warning(
             "Chỉ nhận diện được %d speaker — không đủ để chia train/val/test "
             "speaker-disjoint. Có thể adapter %r đọc sai cấu trúc thư mục; kiểm tra cột "
-            "`speaker` trong manifest.csv.", len(speaker_count), type(adapter).name,
+            "`speaker_id` trong metadata.csv.", len(speaker_count), type(adapter).name,
         )
     # Nguồn bị loại gần nửa thì `--limit` không còn nói lên nguồn cấp được bao nhiêu.
     # Dòng này phải là WARNING: nó là trần cứng cho N_REAL, mà ở dạng INFO nó nằm lẫn

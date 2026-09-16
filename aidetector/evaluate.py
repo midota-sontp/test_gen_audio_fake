@@ -151,14 +151,14 @@ def _log_breakdown(result: dict) -> None:
 def _write_predictions(path: Path, records, y, scores, threshold) -> None:
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["utt_id", "label", "score", "predicted", "correct",
-                         "generator", "source", "speaker", "augment", "duration"])
+        writer.writerow(["id", "label", "score", "predicted", "correct",
+                         "generator", "source", "speaker_id", "augment", "duration"])
         for rec, truth, score in zip(records, y, scores):
             predicted = LABEL_FAKE if score >= threshold else LABEL_REAL
             writer.writerow([
-                rec.utt_id, rec.label, round(float(score), 6), predicted,
+                rec.id, rec.label, round(float(score), 6), predicted,
                 int((score >= threshold) == bool(truth)),
-                rec.generator, rec.source, rec.speaker, rec.augment, rec.duration,
+                rec.generator, rec.source, rec.speaker_id, rec.augment, rec.duration,
             ])
 
 

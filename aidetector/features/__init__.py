@@ -1,6 +1,6 @@
 """Trích + cache đặc trưng.
 
-Cache theo `utt_id` (không theo chỉ số) nên thêm/bớt dữ liệu hay đổi cách chia
+Cache theo `id` (không theo chỉ số) nên thêm/bớt dữ liệu hay đổi cách chia
 split đều không làm hỏng cache cũ. Mỗi backbone/layer/pooling có thư mục riêng.
 """
 
@@ -27,32 +27,36 @@ log = get_logger("aidetector.features")
 
 
 class FeatureStore:
-    """Kho embedding trên đĩa: `<root>/<cache_key>/<utt_id>.npy`."""
+    """Kho embedding trên đĩa: `<root>/<cache_key>/<id>.npy`.
+
+    Khoá cache là cột `id` của manifest — GIÁ TRỊ không đổi khi schema đổi tên cột,
+    nên cache dựng ở phiên trước vẫn dùng lại được nguyên vẹn.
+    """
 
     def __init__(self, root: str | Path, backbone: Backbone) -> None:
         self.dir = ensure_dir(Path(root) / backbone.cache_key)
         self.backbone = backbone
 
-    def path_for(self, utt_id: str) -> Path:
-        return self.dir / f"{utt_id}.npy"
+    def path_for(self, rec_id: str) -> Path:
+        return self.dir / f"{rec_id}.npy"
 
-    def has(self, utt_id: str) -> bool:
-        return self.path_for(utt_id).exists()
+    def has(self, rec_id: str) -> bool:
+        return self.path_for(rec_id).exists()
 
-    def save(self, utt_id: str, vector: np.ndarray) -> None:
-        np.save(self.path_for(utt_id), vector.astype(np.float32))
+    def save(self, rec_id: str, vector: np.ndarray) -> None:
+        np.save(self.path_for(rec_id), vector.astype(np.float32))
 
-    def load(self, utt_id: str) -> np.ndarray:
-        return np.load(self.path_for(utt_id))
+    def load(self, rec_id: str) -> np.ndarray:
+        return np.load(self.path_for(rec_id))
 
     def load_many(self, records: list[Record]) -> tuple[np.ndarray, np.ndarray, list[Record]]:
         """Trả (X [N, D], y [N], danh sách bản ghi có embedding)."""
         vectors, labels, kept = [], [], []
         for rec in records:
-            if not self.has(rec.utt_id):
+            if not self.has(rec.id):
                 continue
-            vectors.append(self.load(rec.utt_id))
-            labels.append(rec.label_int)
+            vectors.append(self.load(rec.id))
+            labels.append(rec.label)
             kept.append(rec)
         if not vectors:
             return np.zeros((0, self.backbone.output_dim), np.float32), np.zeros((0,), np.int64), []
@@ -91,7 +95,7 @@ def extract_features(
     """Trích embedding cho mọi bản ghi (bỏ qua bản đã có trong cache)."""
     store = FeatureStore(cache_root, backbone)
     records = [r for r in manifest if splits is None or r.split in splits]
-    todo = [r for r in records if overwrite or not store.has(r.utt_id)]
+    todo = [r for r in records if overwrite or not store.has(r.id)]
 
     log.info(
         "Đặc trưng: %s · layer=%d · pooling=%s · dim=%d",
@@ -112,15 +116,15 @@ def extract_features(
         for rec in batch:
             try:
                 waveforms.append(load_audio(manifest.abs_path(rec), spec.sample_rate))
-                ids.append(rec.utt_id)
+                ids.append(rec.id)
             except Exception as exc:  # noqa: BLE001
-                log.warning("Bỏ %s: %s", rec.utt_id, exc)
+                log.warning("Bỏ %s: %s", rec.id, exc)
                 failed += 1
         if not waveforms:
             continue
         vectors = backbone.embed(waveforms)
-        for utt_id, vector in zip(ids, vectors):
-            store.save(utt_id, vector)
+        for rec_id, vector in zip(ids, vectors):
+            store.save(rec_id, vector)
             done += 1
 
     store.write_meta()

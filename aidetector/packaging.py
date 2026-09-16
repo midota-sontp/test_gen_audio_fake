@@ -53,11 +53,11 @@ def pack_corpus(
             zf.write(find_manifest(corpus_root), MANIFEST_NAME)
         if include_audio:
             for rec in progress(list(manifest), total=len(manifest), label="pack"):
-                src = corpus_root / rec.path
+                src = corpus_root / rec.audio
                 if not src.exists():
                     missing += 1
                     continue
-                zf.write(src, rec.path)
+                zf.write(src, rec.audio)
 
     size_mb = out_path.stat().st_size / 1024**2
     log.info("Đã gói %d bản ghi → %s (%.1f MB)", len(manifest), out_path, size_mb)

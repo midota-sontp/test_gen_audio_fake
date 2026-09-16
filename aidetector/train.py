@@ -55,9 +55,9 @@ def train(
     store = FeatureStore(cache_root, backbone)
     log.info("Nạp embedding từ %s", store.dir)
     X_train, y_train, _ = _load_split(store, manifest, "train")
-    X_val, y_val, _ = _load_split(store, manifest, "val")
+    X_val, y_val, _ = _load_split(store, manifest, "validation")
 
-    # Chuẩn hoá theo thống kê của TRAIN (không được nhìn val/test).
+    # Chuẩn hoá theo thống kê của TRAIN (không được nhìn validation/test).
     mean = X_train.mean(axis=0, keepdims=True)
     std = X_train.std(axis=0, keepdims=True) + 1e-6
     X_train_n = (X_train - mean) / std

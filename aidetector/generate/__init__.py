@@ -11,7 +11,7 @@ from typing import Callable
 import numpy as np
 
 from ..corpus.manifest import Manifest
-from ..corpus.schema import LABEL_FAKE, LABEL_REAL, Record, make_utt_id
+from ..corpus.schema import LABEL_FAKE, LABEL_REAL, Record, make_id
 from ..corpus.spec import AudioSpec, load_audio, normalize, save_audio
 from ..utils import get_logger, progress, stable_id, stable_rand
 from .base import (  # noqa: F401
@@ -84,9 +84,9 @@ def _pick_targets(
 
     by_speaker: dict[str, list[Record]] = defaultdict(list)
     for rec in pool:
-        by_speaker[rec.speaker].append(rec)
+        by_speaker[rec.speaker_id].append(rec)
     for recs in by_speaker.values():
-        recs.sort(key=lambda r: r.utt_id)
+        recs.sort(key=lambda r: r.id)
 
     rng = stable_rand("pick_targets", engine_id)
     speakers = sorted(by_speaker)
@@ -120,9 +120,9 @@ def _is_partial_chunk(manifest: Manifest, rec: Record) -> bool:
     hoàn toàn, và bộ ước lượng độ dài của OmniVoice lấy tốc độ nói = số ký tự
     ref_text / thời lượng ref_audio nên sẽ đọc câu đích nhanh gấp mấy lần bình thường.
     """
-    if f"{rec.utt_id}-1" in manifest:  # đoạn 0 của một file đã bị cắt
+    if f"{rec.id}-1" in manifest:  # đoạn 0 của một file đã bị cắt
         return True
-    base, sep, tail = rec.utt_id.rpartition("-")
+    base, sep, tail = rec.id.rpartition("-")
     return bool(sep) and tail.isdigit() and base in manifest
 
 
@@ -135,7 +135,7 @@ def _pick_reference(manifest: Manifest, target: Record) -> list[Record]:
     """
     candidates = [
         r for r in manifest.reals
-        if r.speaker == target.speaker
+        if r.speaker_id == target.speaker_id
         and not r.augment
         # Không có transcript thì không dùng làm reference: engine sẽ phải tự nhận
         # dạng bằng ASR, chậm và thêm một nguồn sai.
@@ -145,18 +145,18 @@ def _pick_reference(manifest: Manifest, target: Record) -> list[Record]:
     ]
     if not candidates:
         return []
-    candidates.sort(key=lambda r: r.utt_id)
+    candidates.sort(key=lambda r: r.id)
     # Thứ tự bốc phụ thuộc (speaker, variant) chứ không phải từng target: các target
     # cùng speaker sẽ dùng chung một nhúm tổ hợp reference, nên file ghép được tái sử
     # dụng thay vì mỗi mẫu ghi ra một file mới.
-    variant = stable_rand("ref-variant", target.utt_id).randrange(REF_VARIANTS)
-    stable_rand("ref", target.speaker, variant).shuffle(candidates)
+    variant = stable_rand("ref-variant", target.id).randrange(REF_VARIANTS)
+    stable_rand("ref", target.speaker_id, variant).shuffle(candidates)
 
     chosen: list[Record] = []
     total = 0.0
     for rec in candidates:
         # Clone từ chính câu đích thì fake chỉ là bản đọc lại của real đối chứng.
-        if rec.utt_id == target.utt_id:
+        if rec.id == target.id:
             continue
         extra = rec.duration + (REF_GAP_SECONDS if chosen else 0.0)
         if chosen and total + extra > MAX_REF_SECONDS:
@@ -190,7 +190,7 @@ def _materialize_reference(
     if len(recs) == 1:
         return str(manifest.abs_path(recs[0])), recs[0].text
 
-    key = "|".join(r.utt_id for r in recs)
+    key = "|".join(r.id for r in recs)
     if key in cache:
         return cache[key]
 
@@ -228,7 +228,7 @@ def _report_progress(
 ) -> dict:
     """Đếm còn thiếu bao nhiêu, không nạp model.
 
-    Dùng ĐÚNG công thức utt_id của vòng sinh thật, nên con số này là chính xác chứ
+    Dùng ĐÚNG công thức id của vòng sinh thật, nên con số này là chính xác chứ
     không phải ước lượng — nó là thứ để quyết định còn phải chạy bao lâu nữa.
     """
     by_speaker: dict[str, Counter[str]] = defaultdict(Counter)
@@ -236,12 +236,12 @@ def _report_progress(
     for i, target in enumerate(targets):
         voice = voice_list[i % len(voice_list)]
         marker = f"{voice}|{gen.variant}" if gen.variant else str(voice)
-        key = (f"{target.utt_id}|{marker}" if target.utt_id
+        key = (f"{target.id}|{marker}" if target.id
                else f"fallback:{stable_id(target.text)}|{marker}")
-        by_speaker[target.speaker]["all"] += 1
-        if make_utt_id(engine_id, target.speaker, key) in manifest:
+        by_speaker[target.speaker_id]["all"] += 1
+        if make_id(engine_id, target.speaker_id, key) in manifest:
             done += 1
-            by_speaker[target.speaker]["done"] += 1
+            by_speaker[target.speaker_id]["done"] += 1
         else:
             todo += 1
 
@@ -307,20 +307,20 @@ def generate_fakes(
             "transcript (VIVOS, Common Voice) nếu muốn kết quả đáng tin.",
             len(fallback),
         )
-        # `speaker` để RỖNG có chủ đích: câu dự phòng không thuộc về người nói thật
+        # `speaker_id` để RỖNG có chủ đích: câu dự phòng không thuộc về người nói thật
         # nào cả. Bịa ra speaker giả ở đây sẽ khiến bước chia tập speaker-disjoint
         # tưởng chúng là người thật và rải fake khắp các split, trong khi toàn bộ
-        # real (ít speaker) dồn vào một split — kết cục là train/val mất hẳn một lớp.
+        # real (ít speaker) dồn vào một split — kết cục là train/validation mất hẳn một lớp.
         targets = [
-            Record(utt_id="", path="", label=LABEL_REAL, source=FALLBACK_SOURCE,
-                   speaker="", text=text)
+            Record(id="", audio="", label=LABEL_REAL, source=FALLBACK_SOURCE,
+                   speaker_id="", text=text)
             for text in (fallback * (count // max(len(fallback), 1) + 1))
         ][:count]
 
     # Thứ tự CHỌN vẫn là round-robin (phân bổ đều cho mọi speaker), chỉ đổi thứ tự
     # CHẠY sang gom theo speaker — `sort` ổn định nên trong mỗi speaker giữ nguyên.
     # Chạy xen kẽ thì không bao giờ có thời điểm nào "xong một giọng" để chốt tiến độ.
-    targets.sort(key=lambda t: t.speaker)
+    targets.sort(key=lambda t: t.speaker_id)
 
     if dry_run:
         return _report_progress(manifest, targets, voice_list, engine_id, gen)
@@ -328,7 +328,7 @@ def generate_fakes(
     log.info(
         "Engine %s (%s) · %d mẫu · %d giọng · %d speaker · device=%s",
         engine_id, gen.kind, len(targets), len(voice_list),
-        len({t.speaker for t in targets}), device,
+        len({t.speaker_id for t in targets}), device,
     )
     gen.ensure_loaded()
 
@@ -365,7 +365,7 @@ def generate_fakes(
             )
     if stats["skip_exists"]:
         log.warning(
-            "%d mẫu đã có sẵn nên KHÔNG sinh lại. `utt_id` chỉ gồm câu đích + giọng + "
+            "%d mẫu đã có sẵn nên KHÔNG sinh lại. `id` chỉ gồm câu đích + giọng + "
             "biến thể engine, nên mọi thay đổi về CÁCH tổng hợp (xử lý text, knob giải mã, "
             "dtype, phiên bản thư viện) đều vô hình với phép kiểm này: audio cũ sống sót và "
             "trộn lẫn với audio mới dưới cùng một tag, làm hỏng mọi phép đo chất lượng. "
@@ -414,7 +414,7 @@ def _run_batch(
         """Chốt một giọng: lưu manifest TRƯỚC rồi mới báo, để hook thấy trạng thái thật.
 
         Giọng không tạo được bản ghi nào thì KHÔNG chốt. Lượt chạy lại (mọi mẫu đã có
-        nên bị bỏ qua theo utt_id) vẫn đi hết danh sách khuôn, và chốt vô điều kiện ở
+        nên bị bỏ qua theo id) vẫn đi hết danh sách khuôn, và chốt vô điều kiện ở
         đây là ghi lại manifest hàng chục nghìn dòng rồi gọi hook đồng bộ MỘT LẦN CHO
         MỖI SPEAKER — không thêm một bản ghi nào. Đo trên một phiên thật: 30 lượt lưu +
         30 lượt gọi hook đẩy dataset để đổi lấy đúng 1 mẫu mới. Tốn I/O, tốn lượt đẩy,
@@ -432,27 +432,27 @@ def _run_batch(
             on_speaker_done(speaker, dict(stats))
 
     for i, target in enumerate(progress(targets, total=len(targets), label=f"generate:{engine_id}")):
-        if target.speaker != speaker:
+        if target.speaker_id != speaker:
             close_speaker()
-            speaker = target.speaker
+            speaker = target.speaker_id
             kept_luc_mo = stats["kept"]
             since_save = 0
         voice = voice_list[i % len(voice_list)]
         # Câu dự phòng không có utt gốc ⇒ lấy chính nội dung câu làm khoá, nếu không
-        # mọi bản sinh ra sẽ trùng utt_id và đè lên nhau. Biến thể engine (vd checkpoint
+        # mọi bản sinh ra sẽ trùng id và đè lên nhau. Biến thể engine (vd checkpoint
         # khác mặc định) cũng vào khoá, để hai lượt A/B nằm cạnh nhau trong corpus thay
         # vì lượt sau bị bỏ qua vì "đã có". Biến thể mặc định là "" ⇒ khoá y như cũ.
         marker = f"{voice}|{gen.variant}" if gen.variant else str(voice)
-        key = f"{target.utt_id}|{marker}" if target.utt_id else f"fallback:{stable_id(target.text)}|{marker}"
-        utt_id = make_utt_id(engine_id, target.speaker, key)
-        if not overwrite and utt_id in manifest:
+        key = f"{target.id}|{marker}" if target.id else f"fallback:{stable_id(target.text)}|{marker}"
+        rec_id = make_id(engine_id, target.speaker_id, key)
+        if not overwrite and rec_id in manifest:
             stats["skip_exists"] += 1
             continue
 
         ref_path = ref_text = None
         if gen.kind == KIND_CLONE:
             assert ref_dir is not None
-            refs = _pick_reference(manifest, target) if target.utt_id else []
+            refs = _pick_reference(manifest, target) if target.id else []
             if not refs:
                 stats["skip_no_reference"] += 1
                 continue
@@ -467,7 +467,7 @@ def _run_batch(
                 language=target.language or None,
             )
         except Exception as exc:  # noqa: BLE001 — engine bên thứ ba, lỗi rất đa dạng
-            log.warning("Sinh lỗi (%s, utt=%s): %s", engine_id, target.utt_id, exc)
+            log.warning("Sinh lỗi (%s, utt=%s): %s", engine_id, target.id, exc)
             stats["error"] += 1
             continue
 
@@ -478,16 +478,17 @@ def _run_batch(
 
         for idx, chunk in enumerate(chunks):
             rec = Record(
-                utt_id=utt_id if idx == 0 else f"{utt_id}-{idx}",
-                path="",
+                id=rec_id if idx == 0 else f"{rec_id}-{idx}",
+                audio="",
                 label=LABEL_FAKE,
                 source=target.source,
                 # Giữ nguyên speaker gốc: fake và real đối chứng luôn nằm cùng một
                 # phía khi chia tập theo speaker ⇒ không rò rỉ nội dung/giọng nói.
-                speaker=target.speaker,
+                speaker_id=target.speaker_id,
+                speaker_known=target.speaker_known,
                 text=target.text,
                 generator=gen.tag(voice),
-                ref_utt_id=target.utt_id,
+                ref_id=target.id,
                 language=target.language,
                 split=target.split,
             )

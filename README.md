@@ -40,7 +40,7 @@ Kaggle là chạy — **[notebooks/aidetector_dataset.ipynb](notebooks/aidetecto
 
 **Một chuẩn dữ liệu duy nhất.** Mọi nguồn — VIVOS, Common Voice, một thư mục wav
 bất kỳ, dataset trên HuggingFace, hay audio vừa do TTS sinh ra — đều đi qua đúng
-một hàm chuẩn hoá rồi ghi vào `corpus/manifest.csv`. Các tầng sau không cần biết
+một hàm chuẩn hoá rồi ghi vào `corpus/<bộ>/metadata.csv`. Các tầng sau không cần biết
 dữ liệu đến từ đâu.
 
 | Thuộc tính | Chuẩn |
@@ -54,6 +54,28 @@ dữ liệu đến từ đâu.
 | Clipping / NaN / Inf | không được có (`validate` kiểm tra lại) |
 | Background noise | cho phép — nhưng luôn giữ **cả bản clean lẫn bản noisy** |
 | Compression | MP3/AAC sinh ở tầng augmentation, không nằm trong corpus gốc |
+
+Cột của `metadata.csv` theo **chuẩn corpus Việt**, nên một bảng dựng sẵn ngoài dự án
+nạp thẳng được — không cần bước map tên cột:
+
+| Nhóm | Cột |
+|---|---|
+| Định danh & nội dung | `id` `audio` `label` (0=real, 1=fake) `speaker_id` `speaker_known` `source` `generator` `recording_id` `duration` `sample_rate` `channels` `split` `text` `gender` |
+| Số đo — tuỳ chọn | `speech_ratio` `rms_db` `clipping_ratio` `original_sample_rate` `original_channels` `original_split` `original_duration` `norm_gain` `norm_peak` `sha256_raw` `sha256_norm` `shard` `bytes` `extra` |
+| Riêng pipeline này | `ref_id` `language` `augment` `parent_id` `checked` `schema_version` |
+
+Nhóm **số đo** giữ nguyên khi nạp từ bảng ngoài và để trống khi `ingest`/`generate`
+tự sinh bản ghi — rỗng đọc ra `None`, phân biệt được với một giá trị 0 đo thật. Bản
+sao có audio khác (augment) bị xoá sạch nhóm này thay vì thừa hưởng, vì một
+`sha256_norm` chép lại từ bản gốc là số đo sai một cách im lặng.
+
+Nhóm **riêng pipeline** không có trong bảng ngoài nhưng chịu lực: `augment` +
+`parent_id` giữ bất biến "bản augment nằm cùng split với bản gốc", `checked` cho
+`validate` soi tăng dần thay vì đọc lại cả corpus mỗi phiên.
+
+Schema cũ (`utt_id` `path` `speaker` `ref_utt_id` `parent_utt_id`, `label` real/fake,
+split `val`) vẫn **đọc được** — `Record.from_row` đổi tên khi nạp, lượt `save()` kế
+tiếp ghi ra chuẩn mới. Mọi `corpus.zip` đã đẩy lên Kaggle vì thế không thành rác.
 
 **Mọi tầng đều cắm rời.** Nguồn dữ liệu, engine sinh fake, phép augment, backbone
 và classifier head đều nằm trong registry riêng. Thêm cái mới = thêm một file +
@@ -88,9 +110,9 @@ aidetector/
   ingest/       nguồn thô  → chuẩn corpus (có tự nhận diện loại dataset)
   generate/     REAL       → FAKE bằng TTS / voice cloning
   augment/      thêm bản nhiễu · vang · nén, giữ nguyên bản clean
-  features/     backbone đóng băng + cache embedding theo utt_id
+  features/     backbone đóng băng + cache embedding theo id
   models.py     classifier head
-  splits.py     chia train/val/test speaker-disjoint + holdout engine
+  splits.py     chia train/validation/test speaker-disjoint + holdout engine
   train.py      huấn luyện (early-stopping theo val EER)
   evaluate.py   EER/AUC + breakdown theo từng generator
   detect.py     suy luận trên file bất kỳ

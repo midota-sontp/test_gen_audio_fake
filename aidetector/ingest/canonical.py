@@ -10,9 +10,9 @@ convert một bộ dữ liệu về cây này **một lần**, rồi mọi thứ
 vốn có cấu trúc gì.
 
 Chỉ nhập phần **real**. Fake luôn do `generate` của chính pipeline này sinh, và nó
-idempotent nên nhập lại fake từ ngoài chỉ tạo ra một lớp bản ghi không có `ref_utt_id`
+idempotent nên nhập lại fake từ ngoài chỉ tạo ra một lớp bản ghi không có `ref_id`
 — tức fake không ghép cặp được với real nào, đúng thứ mà cả thiết kế corpus tránh.
-Muốn mang nguyên corpus (cả fake, giữ nguyên utt_id) thì dùng `pack`/`unpack`.
+Muốn mang nguyên corpus (cả fake, giữ nguyên id) thì dùng `pack`/`unpack`.
 """
 
 from __future__ import annotations
@@ -97,10 +97,11 @@ class CanonicalAdapter(SourceAdapter):
         for path in cac:
             with path.open(newline="", encoding="utf-8") as fh:
                 for row in csv.DictReader(fh):
-                    duong = row.get("path") or ""
+                    # Chuẩn hiện hành là cột `audio`; `path` là tên cũ, vẫn đọc.
+                    duong = row.get("audio") or row.get("path") or ""
                     # Chỉ lấy lớp real, ở cả hai cây: `real/…` (cây nhập) và `<bộ>/real/…`
                     # (cây corpus). Bỏ fake — nhập lại fake là tạo ra bản ghi không có
-                    # `ref_utt_id`, đúng thứ cả thiết kế corpus tránh.
+                    # `ref_id`, đúng thứ cả thiết kế corpus tránh.
                     la_real = duong.startswith("real/") or "/real/" in duong
                     if la_real and row.get("text"):
                         table[duong] = row["text"]
@@ -113,7 +114,7 @@ class CanonicalAdapter(SourceAdapter):
         for wav in _audio_real(root):
             rel = wav.relative_to(root).as_posix()
             yield SourceItem(
-                # `key` là đường dẫn tương đối nên utt_id ổn định giữa các lần nhập:
+                # `key` là đường dẫn tương đối nên id ổn định giữa các lần nhập:
                 # cùng cây vào lại cho cùng id, và ingest vẫn idempotent.
                 key=rel,
                 audio_path=wav,

@@ -7,7 +7,7 @@ seed: 42
 language: vi
 
 paths:
-  corpus: corpus          # dữ liệu đã chuẩn hoá + manifest.csv
+  corpus: corpus          # dữ liệu đã chuẩn hoá + <bộ>/metadata.csv
   features: features      # cache embedding (tách thư mục theo từng backbone)
   checkpoints: checkpoints
   reports: reports
@@ -77,7 +77,7 @@ generate:
 augment:
   copies: 1                # số bản biến dạng cho mỗi utterance
   max_ops: 2               # tối đa bao nhiêu phép chồng lên nhau
-  splits: [train]          # chỉ augment train; val/test giữ sạch để đo cho đúng
+  splits: [train]          # chỉ augment train; validation/test giữ sạch để đo cho đúng
   # noise_dir: noise       # thư mục nhiễu nền thật (MUSAN, WHAM, ...)
   # rir_dir: rir           # thư mục impulse response
   ops:

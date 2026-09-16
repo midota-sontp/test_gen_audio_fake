@@ -23,7 +23,7 @@ from .utils import get_logger, stable_rand
 
 log = get_logger("aidetector.splits")
 
-SPLITS = ("train", "val", "test")
+SPLITS = ("train", "validation", "test")
 
 
 def assign_splits(
@@ -49,15 +49,15 @@ def assign_splits(
         raise ValueError("Corpus rỗng — chạy `ingest` trước khi chia split.")
 
     # --- 1. Chia speaker ----------------------------------------------------
-    speakers = sorted({r.speaker for r in records if r.speaker})
+    speakers = sorted({r.speaker_id for r in records if r.speaker_id})
     speaker_split: dict[str, str] = {}
 
     if respect_source_hints:
         # Nguồn đã chia sẵn (vd VIVOS train/test) — tôn trọng, chỉ carve val từ train.
         hinted: dict[str, Counter] = defaultdict(Counter)
         for r in records:
-            if r.speaker and r.split in SPLITS:
-                hinted[r.speaker][r.split] += 1
+            if r.speaker_id and r.split in SPLITS:
+                hinted[r.speaker_id][r.split] += 1
         for spk, counts in hinted.items():
             speaker_split[spk] = counts.most_common(1)[0][0]
         log.info("Dùng split sẵn có từ nguồn cho %d speaker", len(speaker_split))
@@ -72,7 +72,7 @@ def assign_splits(
         rng.shuffle(train_speakers)
         n_val = max(1, int(len(train_speakers) * ratios[1])) if len(train_speakers) > 1 else 0
         for spk in train_speakers[:n_val]:
-            speaker_split[spk] = "val"
+            speaker_split[spk] = "validation"
         for spk in unassigned:
             speaker_split[spk] = "train"
     else:
@@ -80,32 +80,32 @@ def assign_splits(
         n_train = int(n * ratios[0])
         n_val = int(n * ratios[1])
         for i, spk in enumerate(unassigned):
-            speaker_split[spk] = "train" if i < n_train else ("val" if i < n_train + n_val else "test")
+            speaker_split[spk] = "train" if i < n_train else ("validation" if i < n_train + n_val else "test")
 
     # --- 2. Gán cho từng bản ghi -------------------------------------------
-    by_id = {r.utt_id: r for r in records}
+    by_id = {r.id: r for r in records}
     # Bản ghi không thuộc speaker nào (vd fake sinh từ câu dự phòng) không thể chia
-    # theo speaker — rải theo đúng tỉ lệ, tất định theo utt_id.
-    homeless = [r for r in records if not (by_id.get(r.parent_utt_id) or r).speaker]
-    homeless.sort(key=lambda r: r.utt_id)
+    # theo speaker — rải theo đúng tỉ lệ, tất định theo id.
+    homeless = [r for r in records if not (by_id.get(r.parent_id) or r).speaker_id]
+    homeless.sort(key=lambda r: r.id)
     if homeless:
         log.info("%d bản ghi không có speaker — chia theo tỉ lệ thay vì theo speaker",
                  len(homeless))
     homeless_split = {}
     n_train, n_val = int(len(homeless) * ratios[0]), int(len(homeless) * ratios[1])
     for i, rec in enumerate(stable_rand("homeless", seed).sample(homeless, len(homeless))):
-        homeless_split[rec.utt_id] = (
-            "train" if i < n_train else ("val" if i < n_train + n_val else "test")
+        homeless_split[rec.id] = (
+            "train" if i < n_train else ("validation" if i < n_train + n_val else "test")
         )
 
     for rec in records:
         # Bản augment luôn bám theo bản gốc.
-        parent = by_id.get(rec.parent_utt_id) if rec.parent_utt_id else None
+        parent = by_id.get(rec.parent_id) if rec.parent_id else None
         base = parent or rec
-        if not base.speaker:
-            rec.split = homeless_split.get(base.utt_id, "train")
+        if not base.speaker_id:
+            rec.split = homeless_split.get(base.id, "train")
             continue
-        rec.split = speaker_split.get(base.speaker, "train")
+        rec.split = speaker_split.get(base.speaker_id, "train")
 
     # --- 3. Engine bị giữ lại chỉ để test ----------------------------------
     moved = 0
@@ -151,8 +151,8 @@ def assign_splits(
 def _diagnose(manifest: Manifest, report: dict) -> str:
     """Đoán nguyên nhân thường gặp để người dùng biết phải sửa ở đâu."""
     n_speakers = len(report["speaker_split"])
-    real_speakers = {r.speaker for r in manifest.reals if r.speaker}
-    unpaired = [r for r in manifest.fakes if r.ref_utt_id not in manifest]
+    real_speakers = {r.speaker_id for r in manifest.reals if r.speaker_id}
+    unpaired = [r for r in manifest.fakes if r.ref_id not in manifest]
     hints = []
 
     if n_speakers < len(SPLITS):
@@ -165,7 +165,7 @@ def _diagnose(manifest: Manifest, report: dict) -> str:
         hints.append(
             f"Toàn bộ audio thật chỉ thuộc {len(real_speakers)} speaker nên dồn hết vào "
             f"một tập. Kiểm tra adapter ingest có nhận đúng speaker không "
-            f"(`python -m aidetector validate` và cột `speaker` trong manifest.csv)."
+            f"(`python -m aidetector validate` và cột `speaker_id` trong metadata.csv)."
         )
     if unpaired:
         hints.append(
@@ -184,8 +184,8 @@ def _report(manifest: Manifest, speaker_split: dict[str, str]) -> dict:
         if rec.split not in counts:
             continue
         counts[rec.split][rec.label] += 1
-        if rec.speaker:
-            speakers[rec.split].add(rec.speaker)
+        if rec.speaker_id:
+            speakers[rec.split].add(rec.speaker_id)
 
     leaks = []
     for a in SPLITS:

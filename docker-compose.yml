@@ -11,7 +11,7 @@ x-common: &common
       WITH_GENERATORS: ${WITH_GENERATORS:-0}
   volumes:
     - ./raw:/data:ro              # dataset thô (chỉ đọc)
-    - ./corpus:/workspace/corpus  # dữ liệu đã chuẩn hoá + manifest.csv
+    - ./corpus:/workspace/corpus  # dữ liệu đã chuẩn hoá + <bộ>/metadata.csv
     - ./features:/workspace/features
     - ./checkpoints:/workspace/checkpoints
     - ./reports:/workspace/reports

@@ -1,7 +1,7 @@
 """Tầng augmentation — sinh thêm bản biến dạng, GIỮ NGUYÊN bản clean.
 
 Corpus sau bước này chứa cả bản sạch lẫn bản nhiễu/nén của cùng một utterance
-(đúng yêu cầu "phải có cả clean/noisy"). Bản augment mang `parent_utt_id` trỏ về
+(đúng yêu cầu "phải có cả clean/noisy"). Bản augment mang `parent_id` trỏ về
 bản gốc và **thừa hưởng split của bản gốc**, nên không bao giờ có chuyện bản
 augment nằm ở train còn bản gốc nằm ở test.
 """
@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import random
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
 from ..corpus.manifest import Manifest
-from ..corpus.schema import Record
+from ..corpus.schema import clear_measurements
 from ..corpus.spec import (
     AudioSpec,
     check_quality,
@@ -108,7 +109,7 @@ def augment_corpus(
 ) -> dict:
     """Sinh bản augment cho các split chỉ định (mặc định chỉ train).
 
-    Val/test nên giữ sạch để số đo phản ánh đúng dữ liệu thật; muốn đo độ bền
+    Validation/test nên giữ sạch để số đo phản ánh đúng dữ liệu thật; muốn đo độ bền
     trước nhiễu thì thêm "test" vào `splits` và xem breakdown theo cột `augment`.
     """
     sources = [
@@ -126,17 +127,17 @@ def augment_corpus(
         try:
             audio = load_audio(manifest.abs_path(rec), spec.sample_rate)
         except Exception as exc:  # noqa: BLE001
-            log.warning("Không đọc được %s: %s", rec.path, exc)
+            log.warning("Không đọc được %s: %s", rec.audio, exc)
             stats["read_error"] += 1
             continue
 
         for copy_idx in range(copies):
-            aug_id = f"{rec.utt_id}-aug{copy_idx}"
+            aug_id = f"{rec.id}-aug{copy_idx}"
             if not overwrite and aug_id in manifest:
                 stats["skip_exists"] += 1
                 continue
 
-            rng = stable_rand(seed, rec.utt_id, copy_idx)
+            rng = stable_rand(seed, rec.id, copy_idx)
             out, tag = chain.apply(audio.copy(), spec.sample_rate, rng)
             if not tag:                                  # không phép nào trúng xác suất
                 stats["skip_no_op"] += 1
@@ -149,13 +150,15 @@ def augment_corpus(
                 stats["drop_invalid"] += 1
                 continue
 
-            aug = Record(
-                **{**rec.to_row(), "utt_id": aug_id, "path": "",
-                   "augment": tag, "parent_utt_id": rec.utt_id}
-            )
+            # `replace` sao nguyên bản ghi gốc; `clear_measurements` xoá nhóm cột
+            # số đo vì audio đã khác — thừa hưởng `sha256_norm`/`rms_db` của bản gốc
+            # là ghi một số đo sai mà không ai thấy.
+            aug = clear_measurements(replace(
+                rec, id=aug_id, audio="", augment=tag, parent_id=rec.id,
+            ))
             manifest.write_audio(aug, out, spec)
             stats["created"] += 1
-            per_label[rec.label] += 1
+            per_label[rec.label_name] += 1
 
     log.info(
         "Augment: tạo %d bản (real=%d, fake=%d) · bỏ %d · đã có %d",
